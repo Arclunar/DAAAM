@@ -1,6 +1,7 @@
 import base64
 import builtins
 import contextlib
+import gzip
 import importlib.util
 import io
 import json
@@ -202,6 +203,59 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 		self.assertEqual(code, 0)
 		self.assertEqual(attempts, [], "embedding a cache must not even try to import Open3D")
 		self.assertNotIn("open3d", (REPO / "scripts" / "replay.py").read_text(encoding="utf-8"))
+
+	def finalize(self, reference=None):
+		from scripts.replay_bundle import BundleOptions, finalize_bundle
+
+		run = self.root / "run"
+		run.mkdir(exist_ok=True)
+		return finalize_bundle(BundleOptions(recording=self.recording, source_graph=None, run_dir=run, output=run / "replay",
+			dataset_kind="tum", sequence="fr1_desk", reference_mesh=reference))
+
+	def test_the_bundle_stores_the_reference_once_with_its_own_quantization(self) -> None:
+		reference = reference_arrays(side=40)
+		manifest_path = self.finalize(self.save_reference(reference))
+		manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+		entry = manifest["reference_mesh"]
+		self.assertEqual((entry["vertices"], entry["triangles"]), (1600, 2 * 39 * 39))
+		self.assertIn("1 cm", entry["label"])
+		payload = json.loads(gzip.decompress((manifest_path.parent / entry["path"]).read_bytes()))
+		self.assertNotEqual(payload["quant"]["min"], manifest["quant"]["min"], "the reference needs a grid of its own")
+		arrays = decode_chunk(payload["chunk"])
+		quant_min, quant_scale = np.array(payload["quant"]["min"]), np.array(payload["quant"]["scale"])
+		restored = quant_min + (arrays["mesh_pos"].astype(np.float64) + 32768.0) * quant_scale
+		np.testing.assert_allclose(restored, reference["positions"], atol=float(quant_scale.max()))
+		np.testing.assert_allclose(arrays["mesh_nrm"] / 32767.0, reference["normals"], atol=1e-4)
+		self.assertEqual(len(manifest["chunks"]), 1, "the Hydra snapshots are untouched by the reference")
+
+	def test_a_bundle_without_a_reference_has_none(self) -> None:
+		manifest = json.loads(self.finalize().read_text(encoding="utf-8"))
+		self.assertIsNone(manifest["reference_mesh"])
+		self.assertFalse((self.root / "run" / "replay" / "reference").exists())
+
+	def test_a_malformed_cache_writes_no_bundle(self) -> None:
+		arrays = reference_arrays()
+		arrays.pop("normals")
+		path = self.save_reference(arrays, "missing.npz")
+		with self.assertRaises(ValueError) as caught:
+			self.finalize(path)
+		self.assertIn("missing.npz", str(caught.exception))
+		self.assertFalse((self.root / "run" / "replay").exists())
+
+	def test_finalizing_with_a_cache_never_imports_open3d(self) -> None:
+		real_import = builtins.__import__
+		attempts = []
+
+		def guarded(name, *args, **kwargs):
+			if name.split(".")[0] == "open3d":
+				attempts.append(name)
+				raise ImportError("open3d must not be imported to embed a cache")
+			return real_import(name, *args, **kwargs)
+
+		with mock.patch.object(builtins, "__import__", guarded):
+			self.finalize(self.save_reference())
+		self.assertEqual(attempts, [])
+		self.assertNotIn("open3d", (REPO / "scripts" / "replay_bundle.py").read_text(encoding="utf-8"))
 
 	def test_the_page_is_written_atomically(self) -> None:
 		self.page.write_text("previous page")

@@ -687,6 +687,46 @@ def build(args) -> int:
 	return 0
 
 
+def finalize(args) -> int:
+	"""Turn a recording, or the final scene graph of a run without one, into the run's versioned replay/ bundle."""
+	if (args.recording is None) == (args.graph is None):
+		args.parser.error("finalize needs exactly one source: a recording directory or --graph DSG")
+	sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+	from scripts.replay_bundle import BundleOptions, describe, finalize_bundle
+
+	options = BundleOptions(
+		recording=Path(args.recording) if args.recording else None,
+		source_graph=Path(args.graph) if args.graph else None,
+		run_dir=Path(args.run),
+		output=Path(args.out),
+		dataset_kind=args.dataset_kind,
+		sequence=args.sequence,
+		dataset=Path(args.dataset) if args.dataset else None,
+		fps=args.fps,
+		time_origin=args.time_origin,
+		start_frame=args.start_frame,
+		frame_count=args.frame_count,
+		title=args.title or "",
+		merge=args.merge,
+		thumb_width=args.thumb_width,
+		max_depth=args.max_depth,
+		reference_mesh=Path(args.reference_mesh) if args.reference_mesh else None,
+		max_chunk_snapshots=args.max_chunk_snapshots,
+		max_chunk_bytes=args.max_chunk_bytes,
+	)
+	try:
+		manifest_path = finalize_bundle(options)
+	except (ValueError, OSError) as error:
+		print(f"[replay] finalize failed: {error}", file=sys.stderr)
+		return 1
+	manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+	reference = manifest.get("reference_mesh")
+	if reference:
+		print(f"[replay] reference mesh: {reference['vertices']:,} vertices, {reference['triangles']:,} triangles, payload {reference['bytes'] / 1e6:.1f} MB")
+	print(describe(manifest, manifest_path.parent))
+	return 0
+
+
 def main() -> int:
 	parser = argparse.ArgumentParser(description="Record a mapping run and build a web page to review it")
 	sub = parser.add_subparsers(dest="command", required=True)
@@ -709,6 +749,27 @@ def main() -> int:
 	p.add_argument("--fps", type=float, default=15.0, help="frame rate the pipeline ran with (data time -> frame number of the images; also the clock when no graph carries a time stamp)")
 	p.add_argument("--reference-mesh", help="cache (.npz) of the 1 cm reference mesh written by scripts/build_reference_mesh.py: the page can then show it instead of Hydra's mesh")
 	p.set_defaults(func=build)
+
+	p = sub.add_parser("finalize", help="turn a recording (or a final scene graph) into the versioned replay/ data bundle of a run")
+	p.add_argument("recording", nargs="?", help="directory written by `record`; leave out and give --graph for a one-snapshot bundle")
+	p.add_argument("--graph", help="final scene graph (dsg.json) of a run without a recording, e.g. CODa")
+	p.add_argument("--run", required=True, help="pipeline output directory of the run (object descriptions are read from its corrections.yaml)")
+	p.add_argument("--out", required=True, help="bundle directory to publish, normally RUN/replay")
+	p.add_argument("--dataset-kind", choices=("tum", "coda"), required=True)
+	p.add_argument("--sequence", required=True, help="dataset sequence: a TUM name such as fr1_desk, or a CODa sequence number")
+	p.add_argument("--dataset", help="dataset directory: camera images of every snapshot and the exact DAM source frames are copied from it")
+	p.add_argument("--fps", type=float, default=15.0, help="frame rate of the run (run time -> dataset frame)")
+	p.add_argument("--time-origin", type=float, help="dataset time of t = 0 (default: TUM 0, CODa the first line of timestamps/<sequence>.txt)")
+	p.add_argument("--start-frame", type=int, default=0, help="first dataset frame of the run (CODa bags can start later)")
+	p.add_argument("--frame-count", type=int, help="number of frames in the run (required with --graph)")
+	p.add_argument("--title")
+	p.add_argument("--merge", type=float, default=0.005, help="merge mesh vertices closer than this many metres (0 = off)")
+	p.add_argument("--thumb-width", type=int, default=320, help="width in pixels of the camera images")
+	p.add_argument("--max-depth", type=float, help="depth in metres at the far end of the colour scale (default: TUM 4, CODa 30)")
+	p.add_argument("--reference-mesh", help="cache (.npz) of the 1 cm reference mesh written by scripts/build_reference_mesh.py")
+	p.add_argument("--max-chunk-snapshots", type=int, default=24, help="at most this many snapshots per timeline chunk")
+	p.add_argument("--max-chunk-bytes", type=int, default=8 * 1024 * 1024, help="uncompressed size target of a timeline chunk")
+	p.set_defaults(func=finalize, parser=p)
 
 	p = sub.add_parser("rrd", help="turn a recording into a timed native Rerun .rrd file")
 	p.add_argument("recording", help="directory written by `record`")
