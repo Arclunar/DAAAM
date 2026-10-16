@@ -226,7 +226,7 @@ class ReplayServerApplicationTest(ReplayServerTestCase):
 		self.assertTrue(headers["content-type"].startswith("text/javascript"))
 		self.assertIn(b"export class ReplayApi", data)
 		self.assertEqual(self.request("GET", "/static/replay.css")[1]["content-type"].split(";")[0], "text/css")
-		for path in ("/static/missing.js", "/static/", "/scripts/replay_web/server.py", "/manifest.json", "/replay_viewer.html"):
+		for path in ("/static/missing.js", "/static/", "/scripts/replay_web/server.py", "/manifest.json", "/scripts/replay.py"):
 			with self.subTest(path=path):
 				self.assertEqual(self.request("GET", path)[0], 404)
 

@@ -55,7 +55,7 @@ if RUN_BROWSER_TESTS and CHROME_BINARY is None:
 	raise RuntimeError("RUN_BROWSER_TESTS=1 requires Chrome, Chromium, or CHROME_BINARY")
 
 
-def make_driver(width: int = 1280, height: int = 800):
+def make_driver(width: int = 1280, height: int = 1000):
 	options = webdriver.ChromeOptions()
 	options.binary_location = CHROME_BINARY
 	for argument in ("--headless=new", "--disable-gpu", "--no-sandbox", "--no-proxy-server", f"--window-size={width},{height}"):

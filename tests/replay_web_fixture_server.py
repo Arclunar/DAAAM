@@ -150,6 +150,16 @@ class Fixtures:
 		shutil.rmtree(Path(path) / "replay")
 		return {}
 
+	def corrupt_chunk(self, path: str, index: int) -> Dict[str, Any]:
+		"""Damage one timeline chunk without changing its size (its gzip check fails in the browser)."""
+		manifest = json.loads((Path(path) / "replay" / "manifest.json").read_text(encoding="utf-8"))
+		chunk = Path(path) / "replay" / manifest["chunks"][index]["path"]
+		data = bytearray(chunk.read_bytes())
+		for offset in range(10, len(data)):
+			data[offset] ^= 0x5A
+		chunk.write_bytes(bytes(data))
+		return {"chunk": manifest["chunks"][index]["path"]}
+
 	def exists(self, path: str) -> Dict[str, Any]:
 		return {"manifest": (Path(path) / "replay" / "manifest.json").is_file(), "result": Path(path).is_dir()}
 
@@ -165,6 +175,7 @@ def main() -> int:
 		"make_result": fixtures.make_result,
 		"remove_bundle": fixtures.remove_bundle,
 		"exists": fixtures.exists,
+		"corrupt_chunk": fixtures.corrupt_chunk,
 	}
 
 	def reply(value: Dict[str, Any]) -> None:

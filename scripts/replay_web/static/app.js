@@ -6,6 +6,8 @@
 // in localStorage (never the service's run IDs, which change when the service restarts).
 
 import { ApiError, ReplayApi } from './api.js';
+import { ReplayDataSource } from './replay_data.js';
+import { ReplayViewer } from './viewer.js';
 
 export const STORAGE_KEY = 'daaam.replay.workspace.v1';
 const DATASET_NAMES = { tum: 'TUM', coda: 'CODa' };
@@ -21,6 +23,14 @@ const element = (tag, className, text) => {
 export const datasetName = (kind) => DATASET_NAMES[kind] || String(kind || '?').toUpperCase();
 const basename = (path) => String(path).split('/').filter(Boolean).pop() || path;
 
+// The viewer of one tab: its own bounded data source and WebGL view inside the tab's pane.
+export function mountReplayViewer(tab, app) {
+  const data = new ReplayDataSource(app.api, tab.runId, tab.manifest, tab.bundleVersion);
+  const viewer = new ReplayViewer(tab.pane, data, tab.viewerState, { onStateChange: () => app.persist() });
+  viewer.mount();
+  return viewer;
+}
+
 export class WorkspaceApp {
   constructor(api = new ReplayApi(), storage = window.localStorage, options = {}) {
     this.api = api;
@@ -28,7 +38,8 @@ export class WorkspaceApp {
     this.tabs = new Map();   // tabId -> tab
     this.order = [];   // tabIds in strip order
     this.activeTabId = null;
-    this.mountViewer = options.mountViewer || null;   // (tab) -> viewer with activate/deactivate/serializeState/destroy
+    // (tab, app) -> viewer with activate/deactivate/serializeState/destroy; null shows a manifest summary only
+    this.mountViewer = options.mountViewer === undefined ? mountReplayViewer : options.mountViewer;
     this.persistTimer = 0;
     this.el = {
       form: document.getElementById('open-form'),
@@ -243,6 +254,7 @@ export class WorkspaceApp {
       current.pane.hidden = true;
       current.button.setAttribute('aria-selected', 'false');
       current.button.tabIndex = -1;
+      current.item.classList.remove('active');
     }
     this.activeTabId = tabId;
     if (!next.active) {
@@ -253,6 +265,7 @@ export class WorkspaceApp {
     }
     next.button.setAttribute('aria-selected', 'true');
     next.button.tabIndex = 0;
+    next.item.classList.add('active');
     next.item.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     this.persist();
     return next;
@@ -436,7 +449,8 @@ export class WorkspaceApp {
 
 export async function startWorkspace(options = {}) {
   const app = new WorkspaceApp(new ReplayApi(), window.localStorage, options);
-  window.replayWorkspace = app;   // handle for debugging in the browser console and for the browser tests
+  window.replayWorkspace = app;   // handles for debugging in the browser console and for the browser tests
+  Object.defineProperty(window, 'replayDebug', { configurable: true, get: () => app.activeTab()?.viewer?.debug });
   await app.start();
   return app;
 }

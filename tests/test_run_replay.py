@@ -138,7 +138,8 @@ class RunReplayTest(unittest.TestCase):
 		self.assertIn("--sequence fr1_desk", finalize)
 		self.assertIn(f"--dataset {self.root / 'dataset'} --fps 15", finalize)
 		self.assertIn("--out output/test_run/out_new/replay", finalize)
-		self.assertNotIn("replay.py build", " ".join(self._calls()))
+		modes = {call.split()[1] for call in self._calls() if call.startswith("scripts/replay.py")}
+		self.assertEqual(modes, {"record", "finalize", "rrd"}, "no page is built")
 		self.assertFalse(any(self.root.glob("output/**/replay.html")))
 		self.assertTrue((self.root / "output/test_run/out_new/replay/manifest.json").is_file())
 		self.assertTrue((self.root / "output/test_run/out_new/replay.rrd").is_file())

@@ -15,8 +15,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The replay viewer now lives in the workspace (`scripts/replay_web/static/viewer.js`, `replay_data.js`): every result tab owns a WebGL viewer that loads gzip timeline chunks over HTTP through bounded caches (three chunks, twelve decoded snapshots), prefetches only the neighbouring chunks of the active tab, loads camera and description-source images by URL and the reference mesh once, and renders, plays and decodes images only while its tab is active (playback pauses in the background and resumes on return). Mesh source switching, stable label modes, the amber selection overlay, picking, the entity browser and timestamp playback behave as before. Selecting an Object or Place and the `描述源帧` modal never move the timeline; an object without recorded provenance shows a disabled `无描述源帧`; a corrupt chunk stops only that result and names the chunk; each tab's time, camera, controls, selection and hidden entities come back after a reload.
 - New mapping results no longer contain a generated `replay.html`. `scripts/run_replay.sh` (`just tum-run`, `just tum-test`) finalizes `RUN/replay/` with the explicit dataset kind `tum` and the run's sequence and prints the result directory and `just replay-web` instead of a file path; `just tum-run` reports only a result created by its own invocation. Old self-contained pages are intentionally not supported by the new workspace.
 - `scripts/make_coda_bag.sh` (`just coda-bag`) checks the requested frame range against `timestamps/0.txt` before recording and, once the bag is closed, atomically writes `daaam_replay.json` into it (dataset kind, sequence, first frame, frame count, 10 Hz, time origin). `scripts/run_coda_example.sh` (`just coda-run`) finalizes a one-snapshot replay bundle from the final `dsg.json` of the result created by its own run, using that sidecar rather than the bag name; a bag without the sidecar keeps its mapping result but exits with status 3 and prints the `just coda-bag` command that records a supported bag. `scripts/run_coda_chunks.sh` reuses only bags that carry the sidecar and records older ones again.
+
+### Removed
+
+- Removed the per-result page builder: `python scripts/replay.py build`, its template `scripts/replay_viewer.html` and the page-only image helpers. Recordings are finalized with `replay.py finalize` and viewed with `just replay-web`.
 
 ## 2026-10-16
 

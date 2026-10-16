@@ -1,5 +1,4 @@
 import importlib.util
-import base64
 import json
 import tempfile
 import unittest
@@ -36,48 +35,27 @@ def snapshot(
 
 
 class ReplayCatalogTest(unittest.TestCase):
-	def test_description_sources_load_metadata_and_exact_one_based_dataset_frame(self) -> None:
+	def test_description_sources_load_the_recorded_frame_and_time(self) -> None:
 		with tempfile.TemporaryDirectory() as tmp:
-			root = Path(tmp)
-			run = root / "run"
-			dataset = root / "dataset"
-			(run).mkdir()
-			(dataset / "rgb").mkdir(parents=True)
+			run = Path(tmp) / "run"
+			run.mkdir()
 			(run / "corrections.yaml").write_text(
 				"label_names:\n"
 				"  - label: 42\n"
 				"    name: a green chair\n"
 				"    description_source:\n"
 				"      frame_id: 2\n"
-				"      timestamp: 0.125\n",
+				"      timestamp: 0.125\n"
+				"  - label: 43\n"
+				"    name: a table described before provenance was recorded\n",
 				encoding="utf-8",
 			)
-			cv2.imwrite(str(dataset / "rgb" / "000000.png"), np.full((8, 8, 3), (0, 0, 255), np.uint8))
-			cv2.imwrite(str(dataset / "rgb" / "000001.png"), np.full((8, 8, 3), (0, 255, 0), np.uint8))
+			self.assertEqual(REPLAY.description_sources(run), {"42": {"frame_id": 2, "timestamp": 0.125}})
 
-			sources = REPLAY.description_sources(run)
-			images = REPLAY.description_source_images(
-				dataset,
-				{**sources, "43": {"frame_id": 2, "timestamp": 0.125}},
-				8,
-			)
-
-			self.assertEqual(sources, {"42": {"frame_id": 2, "timestamp": 0.125}})
-			self.assertEqual(list(images), ["2"], "objects described from one frame must share one embedded JPEG")
-			encoded = base64.b64decode(images["2"])
-			decoded = cv2.imdecode(np.frombuffer(encoded, np.uint8), cv2.IMREAD_COLOR)
-			self.assertGreater(float(decoded[:, :, 1].mean()), 240.0)
-			self.assertLess(float(decoded[:, :, 2].mean()), 15.0)
-
-	def test_description_source_image_is_optional_for_old_or_missing_data(self) -> None:
+	def test_description_sources_are_optional_for_old_or_missing_data(self) -> None:
 		with tempfile.TemporaryDirectory() as tmp:
-			root = Path(tmp)
-			root.mkdir(exist_ok=True)
-			self.assertEqual(REPLAY.description_sources(root), {})
-			self.assertEqual(
-				REPLAY.description_source_images(root, {"42": {"frame_id": 99, "timestamp": 1.0}}, 8),
-				{},
-			)
+			self.assertEqual(REPLAY.description_sources(Path(tmp)), {})
+			self.assertEqual(REPLAY.description_sources(None), {})
 
 	def test_catalog_summarizes_entity_lifetime_and_object_motion(self) -> None:
 		snapshots = [
