@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-10-17
+
+### Added
+
+- Added `TODO_UNIFIED_REPLAY_WORKSPACE.md`, a complete AI handoff for the approved single-entry replay workspace. It records the current implementation status, authoritative design and plan commits, settled TUM/CODa bundle and service contracts, hot-reload/job/Agent safety boundaries, phased checklist, verification expectations and the supersession of per-result HTML assumptions.
+
 ## 2026-10-16
 
 ### Added
