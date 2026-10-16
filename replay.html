@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAAAM 回看工作区</title>
+<!-- The single replay application of the repository. Served by the loopback service (`just replay-web`), which also
+     serves the replay/ data bundles of the opened results; mapping results no longer contain HTML of their own. -->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/replay.css">
+<script type="module" src="/static/api.js"></script>
+</head>
+<body>
+<header id="workspace-bar">
+  <h1 class="brand">DAAAM 回看</h1>
+  <form id="open-form" class="open-form" autocomplete="off">
+    <input id="result-path" type="text" spellcheck="false" aria-label="结果目录"
+      placeholder="结果目录:/home/…、/mnt/e/…、E:\… 或 \\wsl.localhost\…\out_…">
+    <button id="open-result" type="submit">打开</button>
+  </form>
+  <details id="result-browser" class="result-browser">
+    <summary>output/ 里的结果</summary>
+    <div class="result-browser__panel">
+      <div class="result-browser__head"><span id="result-root"></span><button id="refresh-results" type="button">刷新</button></div>
+      <ul id="result-list" class="result-list"></ul>
+    </div>
+  </details>
+</header>
+<nav id="tabs" class="tabs" role="tablist" aria-label="已打开的结果"></nav>
+<main id="workspace" class="workspace">
+  <p id="boot-message" class="workspace-empty">这个页面由本地回看服务提供:在仓库目录运行 <code>just replay-web</code>,再用浏览器打开它打印的地址。</p>
+</main>
+<div id="global-status" class="global-status" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -157,6 +157,16 @@ class JustfileTest(unittest.TestCase):
 			self.assertIn("replay/", comment, recipe)
 			self.assertNotIn("replay.html", comment, recipe)
 
+	def test_replay_web_serves_the_workspace_on_loopback(self) -> None:
+		result = self._dry_run("replay-web")
+		text = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, text)
+		self.assertIn("python3 -m scripts.replay_web.server --host 127.0.0.1 --port 8765", text)
+		self.assertIn("http://127.0.0.1:8765/replay.html", text)
+		self.assertNotIn("docker compose", text, "the service runs on the WSL host, not in the container")
+		other = self._dry_run("replay-web", "localhost", "9000")
+		self.assertIn("--host localhost --port 9000", other.stdout + other.stderr)
+
 	def test_old_replay_recipe_is_removed(self) -> None:
 		result = self._dry_run("replay")
 		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)

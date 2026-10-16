@@ -71,6 +71,12 @@ tum-summarize seq="fr1_desk" *runs: _coda-guard
 reference-mesh seq="fr1_desk" mode="auto":
     docker compose run --rm -T -e REFERENCE_MESH_CACHE daaam-ws python scripts/build_reference_mesh.py /datasets/tum_{{ seq }}{{ if mode == "rebuild" { " --force" } else if mode == "auto" { "" } else { error("mode 只能是 auto 或 rebuild") } }}
 
+# 回看工作区:在 WSL 里启动只监听本机(127.0.0.1)的服务,用浏览器打开打印的地址;页面列出 output/ 里的结果,也能输入任意
+# WSL 可见的结果目录(/home/…、/mnt/e/…、E:\…、\\wsl.localhost\…),多个结果用标签页切换;Ctrl+C 停止。见 USAGE.md 9.0.1
+replay-web host="127.0.0.1" port="8765":
+    @echo "回看工作区: http://{{ host }}:{{ port }}/replay.html"
+    python3 -m scripts.replay_web.server --host {{ host }} --port {{ port }}
+
 # 在浏览器版 Rerun 中播放 .rrd；不传路径时自动选择 output 下最新的 replay.rrd
 rerun-play rrd="":
     @rrd="{{ rrd }}"; if [ -z "$rrd" ]; then rrd=$(find output -type f -name replay.rrd -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-); fi; if [ -z "$rrd" ] || [ ! -f "$rrd" ]; then echo "找不到 Rerun 录制文件；请先运行 just tum-run，或执行 just rerun-play path/to/replay.rrd" >&2; exit 1; fi; echo "Rerun 录制: $rrd"; echo "浏览器地址: http://127.0.0.1:9090/?url=rerun%2Bhttp%3A%2F%2F127.0.0.1%3A9876%2Fproxy"; docker compose run --rm -T daaam-ws rerun --serve-web --port 9876 --web-viewer-port 9090 "$rrd"
