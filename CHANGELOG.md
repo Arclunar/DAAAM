@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Added the versioned replay bundle contract (`scripts/replay_web/manifest.py`, schema 1). A mapping result is openable in the replay workspace only when its `replay/manifest.json` is finalized and valid: required keys and types are checked without silent defaults, chunks must cover the snapshots in order with matching sizes (digests on request), and every chunk, image and reference member must be a normalized relative path that stays inside the bundle after following symlinks. JSON state is written through a temporary sibling and an atomic rename. `tests/test_replay_manifest.py` covers the schema and the path-traversal boundary.
 - Added `TODO_UNIFIED_REPLAY_WORKSPACE.md`, a complete AI handoff for the approved single-entry replay workspace. It records the current implementation status, authoritative design and plan commits, settled TUM/CODa bundle and service contracts, hot-reload/job/Agent safety boundaries, phased checklist, verification expectations and the supersession of per-result HTML assumptions.
 
 ## 2026-10-16
