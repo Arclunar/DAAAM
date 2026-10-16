@@ -8,7 +8,7 @@ the debug handle of the active tab's viewer.
 import time
 import unittest
 
-from tests.replay_browser_support import RUN_BROWSER_TESTS, ActionChains, By, FixtureService, WebDriverWait, make_driver, severe_logs
+from tests.replay_browser_support import RUN_BROWSER_TESTS, ActionChains, By, FixtureService, Keys, WebDriverWait, make_driver, severe_logs
 
 PANE = "section.result-pane:not([hidden])"
 
@@ -253,6 +253,115 @@ class ReplayTabsBrowserTest(ReplayViewerBrowserTestCase):
 		self.assertAlmostEqual(restored[6], expected[0], places=4)
 		for got, want in zip(restored[7], expected[1]):
 			self.assertAlmostEqual(got, want, places=4)
+
+
+class ReplayCameraCardsBrowserTest(ReplayViewerBrowserTestCase):
+	"""The current-time camera cards: dragged by their handle, raised, kept inside the workspace and remembered per result."""
+
+	def card(self, key: str):
+		return self.driver.find_element(By.CSS_SELECTOR, f"{PANE} .camera-card[data-camera={key}]")
+
+	def handle(self, key: str):
+		return self.card(key).find_element(By.CSS_SELECTOR, ".camera-card__handle")
+
+	def position(self, key: str):
+		rect = self.card(key).rect
+		return round(rect["x"]), round(rect["y"])
+
+	def stored_layout(self, index: int = 0):
+		state = self.script("return JSON.parse(localStorage.getItem('daaam.replay.workspace.v1'))")
+		return ((state or {}).get("tabs") or [{}])[index].get("viewerState", {}).get("cameraLayout") or {}
+
+	def drag(self, key: str, dx: int, dy: int) -> None:
+		ActionChains(self.driver).move_to_element(self.handle(key)).click_and_hold().move_by_offset(dx // 2, dy // 2).move_by_offset(dx - dx // 2, dy - dy // 2).release().perform()
+
+	def drag_to_corner(self, key: str, bottom_right: bool) -> None:
+		"""Drag a handle to a corner of the browser window (Selenium cannot move the pointer outside it)."""
+		rect = self.handle(key).rect
+		width, height = self.script("return [window.innerWidth, window.innerHeight]")
+		target = (width - 3, height - 3) if bottom_right else (3, 3)
+		self.drag(key, int(target[0] - (rect["x"] + rect["width"] / 2)), int(target[1] - (rect["y"] + rect["height"] / 2)))
+
+	def wait_for_images(self) -> None:
+		self.wait.until(lambda d: d.execute_script(f"return [...document.querySelectorAll('{PANE} .camera-card__image')].every((img) => img.complete && img.naturalWidth > 0)"))
+
+	def test_a_card_moves_by_its_handle_without_moving_time_and_comes_back_after_a_reload(self) -> None:
+		path = self.result(name="cards", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		original_time = self.script("return window.replayDebug.S.cur")
+		before = self.position("rgb")
+		self.drag("rgb", -120, -80)
+		after = self.position("rgb")
+		self.assertNotEqual(before, after)
+		self.assertAlmostEqual(after[0], before[0] - 120, delta=2)
+		self.assertAlmostEqual(after[1], before[1] - 80, delta=2)
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), original_time, "moving a card never moves the timeline")
+		self.assertEqual(self.el("slider").get_attribute("value"), str(original_time))
+		self.wait.until(lambda d: "rgb" in self.stored_layout())
+		self.driver.refresh()
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready && window.replayDebug && window.replayDebug.viewer.started)"))
+		self.wait_for_images()
+		restored = self.position("rgb")
+		self.assertAlmostEqual(restored[0], after[0], delta=2)
+		self.assertAlmostEqual(restored[1], after[1], delta=2)
+
+	def test_each_tab_keeps_its_own_camera_layout(self) -> None:
+		first = self.result(name="cards_a", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		second = self.result(name="cards_b", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(first, 1)
+		self.wait_for_images()
+		default = self.position("rgb")
+		self.drag("rgb", -150, -100)
+		moved = self.position("rgb")
+		self.open_viewer(second, 1)
+		self.wait_for_images()
+		self.assertEqual(self.position("rgb"), default, "a new tab starts from the default layout")
+		self.script("window.replayWorkspace.activate([...window.replayWorkspace.tabs.values()][0].tabId)")
+		self.wait_for_images()
+		self.assertEqual(self.position("rgb"), moved)
+
+	def test_cards_stay_inside_the_workspace_and_reset_restores_the_default_layout(self) -> None:
+		path = self.result(name="cards_clamp", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		defaults = {key: self.position(key) for key in ("rgb", "depth")}
+		self.drag_to_corner("depth", bottom_right=True)   # its body ends up past the bottom-right corner
+		self.drag_to_corner("rgb", bottom_right=False)   # and its handle above the workspace
+		for _ in range(2):
+			pane = self.driver.find_element(By.CSS_SELECTOR, PANE).rect
+			for key in ("rgb", "depth"):
+				rect = self.card(key).rect
+				self.assertGreaterEqual(rect["x"], pane["x"] - 1, key)
+				self.assertGreaterEqual(rect["y"], pane["y"] - 1, key)
+				self.assertLessEqual(rect["x"] + rect["width"], pane["x"] + pane["width"] + 1, key)
+				self.assertLessEqual(rect["y"] + rect["height"], pane["y"] + pane["height"] + 1, key)
+			self.driver.set_window_size(960, 720)
+			self.wait.until(lambda d: d.execute_script("return window.innerWidth") < 1000)
+			time.sleep(0.3)
+		self.driver.set_window_size(1280, 1000)
+		self.wait.until(lambda d: d.execute_script("return window.innerWidth") > 1200)
+		time.sleep(0.3)
+		self.el("reset-cameras").click()
+		self.assertEqual({key: self.position(key) for key in ("rgb", "depth")}, defaults)
+		self.wait.until(lambda d: self.stored_layout() == {})
+
+	def test_a_clicked_card_comes_to_the_front_and_a_focused_handle_moves_with_the_keyboard(self) -> None:
+		path = self.result(name="cards_keys", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		z = lambda key: int(self.script("return getComputedStyle(arguments[0]).zIndex", self.card(key)))
+		self.handle("rgb").click()
+		self.assertGreater(z("rgb"), z("depth"))
+		self.handle("depth").click()
+		self.assertGreater(z("depth"), z("rgb"))
+		original_time = self.script("return window.replayDebug.S.cur")
+		before = self.position("rgb")
+		self.handle("rgb").send_keys(Keys.ARROW_LEFT)
+		self.assertEqual(self.position("rgb"), (before[0] - 10, before[1]))
+		self.handle("rgb").send_keys(Keys.SHIFT, Keys.ARROW_UP)
+		self.assertEqual(self.position("rgb"), (before[0] - 10, before[1] - 1))
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), original_time, "arrow keys on a card handle do not step the timeline")
 
 
 LABEL_VISIBILITY_SCRIPT = """

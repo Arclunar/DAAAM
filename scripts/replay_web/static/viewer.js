@@ -177,6 +177,7 @@ const TEMPLATE = `
   <label><input type="checkbox" data-role="c-links"> 层间连线</label>
   <label><input type="checkbox" data-role="c-traj" checked> 相机轨迹</label>
   <label data-role="c-cam-row"><input type="checkbox" data-role="c-cam" checked> 相机画面(RGB / 深度)</label>
+  <button type="button" class="panel-button" data-role="reset-cameras" title="把相机画面放回默认位置和大小">重置相机布局</button>
   <div class="row"><span>节点大小</span><input type="range" data-role="r-size" min="0.4" max="3" step="0.1" value="1"></div>
   <div class="row"><span>层间距</span><input type="range" data-role="r-space" min="0" max="3" step="0.1" value="1"><span data-role="v-space">1.0 m</span></div>
   <div class="help">左键旋转 · 右键或 Shift+左键平移<br>滚轮缩放 · 双击复位<br>点击物体框内或右侧列表:选择实体<br>空格 播放/暂停 · ←/→ 单步</div>
@@ -233,7 +234,7 @@ export class ReplayViewer {
     this.listeners = [];
     this.labelEls = new Map();   // label key -> its element
     this.labelItems = [];   // { key, pos, text, color, selected } of the cards of this snapshot, the selected one last
-    this.cards = new Map();   // camera key -> { card, img, placeholder, caption }
+    this.cards = new Map();   // camera key -> { card, img, placeholder, caption, handle, camera, position }
     const m = this.manifest;
     // the replay data the former page embedded, now assembled from the manifest (tests and the console read it as debug.D)
     this.D = {
@@ -247,6 +248,7 @@ export class ReplayViewer {
       cameras: m.cameras || [],
     };
     this.N = this.data.count;
+    this.cameraLayout = this.sanitizeCameraLayout(this.initialState.cameraLayout);   // camera key -> { x, y, z, big }
     this.S = { cur: -1, snap: null, reference: null, yaw: 0.8, pitch: 0.5, dist: 6, target: [0, 0, 0], dirty: true, wanted: 0, request: 0,
                selectedKey: null, hidden: new Set(), entityTab: 'objects', objItems: [], placeItems: [] };
     this.G = { meshCount: 0, meshTriangles: 0, meshIndexed: 0, meshKey: 'none', meshUploads: 0, indexType: 0, lines: 0, nodes: 0, highlightNodes: 0,
@@ -276,7 +278,7 @@ export class ReplayViewer {
     this.el['dataset-badge'].classList.add(`dataset-badge--${this.manifest.dataset.kind}`);
     this.el.title.textContent = this.D.title || '';
     this.el.title.title = this.D.title || '';
-    if (!this.D.cameras.length) this.el['c-cam-row'].hidden = true;   // bundle without dataset images
+    if (!this.D.cameras.length) { this.el['c-cam-row'].hidden = true; this.el['reset-cameras'].hidden = true; }   // bundle without dataset images
     this.el.slider.max = this.N - 1;
     this.canvas = this.el.gl;
     this.overlay = this.el['selection-overlay'];
@@ -334,6 +336,7 @@ export class ReplayViewer {
     this.data.paused = false;
     if (this.glLost && this.gl && this.gl.isContextLost()) this.fail('这个标签页的 WebGL 上下文被浏览器回收了:关闭再打开这个结果即可恢复。');
     this.showImages(this.S.wanted);
+    this.layoutCameras();
     this.S.dirty = true;
     this.requestDraw();
     if (this.wasPlaying) this.setPlaying(true);
@@ -977,14 +980,41 @@ export class ReplayViewer {
       + '  ·  房间 ' + a.room_pos.length / 3 + '  ·  顶点 ' + fmt(mesh ? mesh.count : 0);
   }
 
+  // ------------------------------------------------------------------ camera cards
+  // The current-time RGB and depth images. Each card can be dragged by its handle (or moved with the arrow keys while
+  // the handle has focus, Shift for 1 px), comes to the front when clicked and stays inside the viewer. A card that was
+  // never moved follows the default layout (left of the sidebar, above the time bar); moved positions, the stacking
+  // order and the enlarged state belong to this tab's view state. Nothing here touches the timeline or the 3D view.
+  sanitizeCameraLayout(value) {
+    const layout = {};
+    if (!value || typeof value !== 'object') return layout;
+    for (const camera of this.D.cameras) {
+      const entry = value[camera.key];
+      if (!entry || typeof entry !== 'object') continue;
+      const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+      layout[camera.key] = {
+        x: finite(entry.x) ? entry.x : null,
+        y: finite(entry.y) && finite(entry.x) ? entry.y : null,
+        z: finite(entry.z) ? Math.max(0, Math.round(entry.z)) : 0,
+        big: !!entry.big,
+      };
+    }
+    return layout;
+  }
+
   buildCameraCards() {
     const host = this.el.cameras;
     for (const camera of this.D.cameras) {
+      const key = camera.key;
       const card = document.createElement('div');
       card.className = 'camera-card';
-      card.dataset.camera = camera.key;
+      card.dataset.camera = key;
       const handle = document.createElement('div');
       handle.className = 'camera-card__handle';
+      handle.tabIndex = 0;
+      handle.setAttribute('role', 'button');
+      handle.setAttribute('aria-label', '移动' + camera.label + '画面(拖动,或用方向键)');
+      handle.title = '拖动移动这张画面;获得焦点后方向键移动 10 px,Shift+方向键 1 px';
       const caption = document.createElement('span');
       caption.className = 'camera-card__caption';
       handle.appendChild(caption);
@@ -996,10 +1026,120 @@ export class ReplayViewer {
       placeholder.className = 'camera-card__placeholder';
       placeholder.hidden = true;
       card.append(handle, img, placeholder);
-      img.addEventListener('click', () => { card.classList.toggle('big'); this.layoutChanged?.(camera.key); });
       host.appendChild(card);
-      this.cards.set(camera.key, { card, img, placeholder, caption, handle, camera });
+      const entry = { card, img, placeholder, caption, handle, camera, position: { x: 0, y: 0 } };
+      this.cards.set(key, entry);
+      if (this.cameraLayout[key] && this.cameraLayout[key].big) card.classList.add('big');
+      card.addEventListener('pointerdown', () => this.raiseCamera(key), true);
+      img.addEventListener('load', () => this.layoutCameras());
+      img.addEventListener('click', () => {
+        card.classList.toggle('big');
+        this.cameraEntry(key).big = card.classList.contains('big');
+        this.layoutCameras();
+        this.changed();
+      });
+      handle.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        handle.setPointerCapture(event.pointerId);
+        this.cardDrag = { key, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origin: { ...entry.position } };
+        card.classList.add('dragging');
+      });
+      handle.addEventListener('pointermove', (event) => {
+        const drag = this.cardDrag;
+        if (!drag || drag.key !== key || drag.pointerId !== event.pointerId) return;
+        this.placeCamera(key, drag.origin.x + event.clientX - drag.startX, drag.origin.y + event.clientY - drag.startY);
+      });
+      const finish = (event) => {
+        const drag = this.cardDrag;
+        if (!drag || drag.key !== key || drag.pointerId !== event.pointerId) return;
+        if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+        this.cardDrag = null;
+        card.classList.remove('dragging');
+        this.changed();
+      };
+      handle.addEventListener('pointerup', finish);
+      handle.addEventListener('pointercancel', finish);
+      handle.addEventListener('keydown', (event) => {
+        const step = event.shiftKey ? 1 : 10;
+        const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+        if (!delta) return;
+        event.preventDefault();
+        event.stopPropagation();   // the arrows move the card, not the timeline
+        this.raiseCamera(key);
+        this.placeCamera(key, entry.position.x + delta[0], entry.position.y + delta[1]);
+        this.changed();
+      });
     }
+    this.el['reset-cameras'].addEventListener('click', () => this.resetCameraLayout());
+    this.listen(window, 'resize', () => { if (this.active) this.layoutCameras(); });
+  }
+
+  cameraEntry(key) {
+    if (!this.cameraLayout[key]) this.cameraLayout[key] = { x: null, y: null, z: 0, big: false };
+    return this.cameraLayout[key];
+  }
+
+  raiseCamera(key) {
+    const z = (name) => (this.cameraLayout[name] ? this.cameraLayout[name].z || 0 : 0);
+    const levels = [...this.cards.keys()].map(z), top = Math.max(0, ...levels);
+    if (z(key) === top && levels.filter((level) => level === top).length === 1) return;   // already alone on top
+    this.cameraEntry(key).z = top + 1;
+    this.layoutCameras();
+  }
+
+  // Move a card to (x, y) in viewer pixels, kept inside the viewer; the position is remembered for this tab.
+  placeCamera(key, x, y) {
+    const entry = this.cards.get(key), stored = this.cameraEntry(key);
+    const position = this.clampCamera(entry.card, x, y);
+    stored.x = position.x;
+    stored.y = position.y;
+    this.applyCameraPosition(entry, position, stored.z);
+  }
+
+  clampCamera(card, x, y) {
+    const W = this.root.clientWidth, H = this.root.clientHeight;
+    return {
+      x: Math.round(Math.max(0, Math.min(W - card.offsetWidth, x))),
+      y: Math.round(Math.max(0, Math.min(H - card.offsetHeight, y))),
+    };
+  }
+
+  applyCameraPosition(entry, position, z) {
+    entry.position = position;
+    entry.card.style.transform = 'translate(' + position.x + 'px, ' + position.y + 'px)';
+    entry.card.style.zIndex = String(10 + (z || 0));
+  }
+
+  defaultCameraPositions() {   // side by side, left of the sidebar and above the time bar, as on the former page
+    const W = this.root.clientWidth, H = this.root.clientHeight;
+    const sidebar = this.el.sidebar.getBoundingClientRect(), root = this.root.getBoundingClientRect(), bar = this.el.bar.getBoundingClientRect();
+    let right = (sidebar.width ? sidebar.left - root.left : W - 12) - 14;
+    const bottom = (bar.height ? bar.top - root.top : H - 12) - 14;
+    const positions = {};
+    for (const key of [...this.cards.keys()].reverse()) {
+      const card = this.cards.get(key).card;
+      positions[key] = { x: right - card.offsetWidth, y: bottom - card.offsetHeight };
+      right -= card.offsetWidth + 8;
+    }
+    return positions;
+  }
+
+  layoutCameras() {
+    if (!this.cards.size || !this.root || !this.root.clientWidth || this.el.cameras.hidden) return;   // a hidden pane has no size yet
+    const defaults = this.defaultCameraPositions();
+    for (const [key, entry] of this.cards) {
+      const stored = this.cameraLayout[key];
+      const wanted = stored && stored.x != null ? stored : defaults[key];
+      this.applyCameraPosition(entry, this.clampCamera(entry.card, wanted.x, wanted.y), stored ? stored.z : 0);
+    }
+  }
+
+  resetCameraLayout() {
+    this.cameraLayout = {};
+    for (const { card } of this.cards.values()) card.classList.remove('big');
+    this.layoutCameras();
+    this.changed();
   }
 
   showImages(i) {   // the RGB and depth image of the frame the pipeline had processed at this moment (active tab only)
@@ -1021,6 +1161,7 @@ export class ReplayViewer {
 
   updateCameraVisibility() {
     this.el.cameras.hidden = !(this.D.cameras.length && this.el['c-cam'].checked);
+    this.layoutCameras();
   }
 
   async show(i) {
