@@ -220,6 +220,7 @@ class ReplayServerApplicationTest(ReplayServerTestCase):
 			self.assertIn(element, page)
 		self.assertIn('href="/static/replay.css"', page)
 		self.assertIn("/static/api.js", page)
+		self.assertIn('<script type="module" src="/static/app.js">', page)
 		status, headers, data = self.request("GET", "/static/api.js")
 		self.assertEqual(status, 200)
 		self.assertTrue(headers["content-type"].startswith("text/javascript"))
