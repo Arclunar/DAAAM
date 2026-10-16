@@ -38,3 +38,6 @@ wheel
 rerun-sdk
 sentence_transformers==4.1.0
 transformers==4.55.4
+# 1 cm reference mesh of the replay pages (scripts/build_reference_mesh.py, Open3D TSDF). The wheel is large (about 450 MB);
+# nothing else needs it, and a replay without it only lacks that mesh.
+open3d==0.19.0

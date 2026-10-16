@@ -89,7 +89,8 @@ def _find_room_for_object(obj_position: np.ndarray, kdtree: cKDTree, trav_node_i
 
 
 def objects_by_region(
-	scene_graph: DynamicSceneGraph
+	scene_graph: DynamicSceneGraph,
+	places_layer: str = "TRAVERSABILITY",
 ) -> Tuple[Dict[int, List[int]], Dict[int, int], Dict[int, List[int]]]:
 	"""Organize objects by their associated regions (rooms).
 
@@ -104,7 +105,7 @@ def objects_by_region(
 	background_objs_by_region = defaultdict(list)
 
 	objects_layer = scene_graph.get_layer(spark_dsg.DsgLayers.OBJECTS)
-	traversability_places = scene_graph.get_layer("TRAVERSABILITY")
+	traversability_places = scene_graph.get_layer(places_layer)
 	background_layer = scene_graph.get_layer("BACKGROUND_OBJECTS") if scene_graph.has_layer("BACKGROUND_OBJECTS") else None
 
 	trav_to_room = _build_trav_room_mapping(scene_graph, traversability_places)

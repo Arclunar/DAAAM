@@ -12,7 +12,8 @@ from daaam.utils.scene_graph_utils import objects_by_region
 
 def extract_traversable_floor_annotation(
 	region_id: int,
-	scene_graph: sdsg.DynamicSceneGraph
+	scene_graph: sdsg.DynamicSceneGraph,
+	places_layer: str = "TRAVERSABILITY",
 ) -> str:
 	"""Extract traversable floor annotation from place nodes.
 
@@ -34,17 +35,17 @@ def extract_traversable_floor_annotation(
 
 	room_node = rooms_layer.get_node(room_symbol)
 
-	if not scene_graph.has_layer(sdsg.DsgLayers.PLACES):
-		return "None (no PLACES layer)"
+	if not scene_graph.has_layer(places_layer):
+		return f"None (no {places_layer} layer)"
 
-	places_layer = scene_graph.get_layer("TRAVERSABILITY")
+	places = scene_graph.get_layer(places_layer)
 
 	room_labels = {}
 	for place_id in room_node.children():
-		if not places_layer.has_node(place_id):
+		if not places.has_node(place_id):
 			continue
 
-		place_node = places_layer.get_node(place_id)
+		place_node = places.get_node(place_id)
 		daaam_labels = place_node.attributes.label_weights
 
 		for sem_id, weight in daaam_labels.items():
@@ -130,7 +131,8 @@ def prepare_region_data(
 	scene_graph: sdsg.DynamicSceneGraph,
 	corrections: Dict,
 	n_samples: int = 5,
-	feature_key: str = "sentence_embedding_feature"
+	feature_key: str = "sentence_embedding_feature",
+	places_layer: str = "TRAVERSABILITY",
 ) -> Dict[str, Any]:
 	"""Prepare region data for summarization.
 
@@ -251,7 +253,7 @@ def prepare_region_data(
 
 	bg_objects_str = "All objects sampled together (regular + background)"
 
-	traversable_floor = extract_traversable_floor_annotation(region_id, scene_graph)
+	traversable_floor = extract_traversable_floor_annotation(region_id, scene_graph, places_layer)
 
 	return {
 		'region_id': region_id,
@@ -351,7 +353,13 @@ def summarize_region(
 	default='clustered_dsg.json',
 	help='Scene graph filename for structure (default: clustered_dsg.json)'
 )
-def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene_graph_file: str):
+@click.option(
+	'--places-layer',
+	type=str,
+	default='TRAVERSABILITY',
+	help='Place layer used to associate objects with rooms.'
+)
+def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene_graph_file: str, places_layer: str):
 	"""Summarize regions in the scene graph using OpenAI structured outputs."""
 
 	# load data
@@ -372,7 +380,7 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 		with open(bg_path, 'r') as f:
 			background_objects = yaml.safe_load(f)
 
-	objs_by_region, _, bg_objs_by_region = objects_by_region(scene_graph)
+	objs_by_region, _, bg_objs_by_region = objects_by_region(scene_graph, places_layer=places_layer)
 
 	print(f"Loaded scene graph with {scene_graph.num_nodes()} nodes")
 	print(f"Found {len(set(objs_by_region.keys()) | set(bg_objs_by_region.keys()))} regions "
@@ -412,7 +420,8 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 			scene_graph=scene_graph,
 			corrections=corrections,
 			n_samples=n_samples,
-			feature_key=feature_key
+			feature_key=feature_key,
+			places_layer=places_layer,
 		)
 
 		print(f"  Sampled {region_data['num_sampled']} diverse objects")

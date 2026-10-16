@@ -21,6 +21,9 @@ except ImportError:
 
 from daaam.utils.logging import PipelineLogger
 
+# Pipelines that publish the scene graph over ZMQ are not destroyed at shutdown, see HydraIntegration.shutdown().
+_PIPELINES_KEPT_ALIVE = []
+
 
 class HydraIntegration:
 	"""Manages Hydra pipeline integration with daaam."""
@@ -35,9 +38,10 @@ class HydraIntegration:
 		zmq_url: Optional[str] = None,
 		glog_level: int = 0,
 		verbosity: int = 0,
+		skip_invalid_depth: bool = True,
 	):
 		"""Initialize Hydra integration.
-		
+
 		Args:
 			hydra_config_path: Path to Hydra config YAML file
 			labelspace_path: Path to labelspace YAML file (optional)
@@ -47,10 +51,12 @@ class HydraIntegration:
 			zmq_url: ZMQ URL for DSG visualization (None to disable)
 			glog_level: Glog level for Hydra
 			verbosity: Verbosity level for Hydra
+			skip_invalid_depth: Make Hydra skip pixels without a depth measurement (see process_frame)
 		"""
 		if not HYDRA_AVAILABLE:
 			raise RuntimeError("hydra_python is not installed. Cannot use HydraIntegration.")
-			
+
+		self.skip_invalid_depth = skip_invalid_depth
 		self.hydra_config_path = hydra_config_path
 		self.labelspace_path = labelspace_path
 		self.labelspace_colors = labelspace_colors
@@ -224,6 +230,14 @@ class HydraIntegration:
 			
 			# Convert depth to uint16 millimeters for Hydra
 			depth_mm = (depth_image * 1000).astype(np.uint16)
+			# Hydra turns a depth of 0 into NaN, and its TSDF integrator (ProjectiveIntegrator::computeSDF) then treats NaN
+			# as free space along the whole ray: std::min(truncation, NaN) is the truncation distance. Every hole of a Kinect
+			# depth image (dark or glossy surfaces, occlusion shadows) then carves away the surfaces that other frames
+			# measured there, and the mesh loses most of its surfaces. A depth of 1 mm is no measurement either, but it
+			# puts the voxel far behind the "surface", where Hydra skips it (extra_integration_distance must stay 0).
+			# The free space that these rays used to add is also what the places and rooms were built from.
+			if self.skip_invalid_depth:
+				depth_mm[depth_mm == 0] = 1
 			
 			# Process through Hydra
 			success = self.pipeline.step(
@@ -322,6 +336,11 @@ class HydraIntegration:
 		try:
 			if self.pipeline:
 				self.save_results()
+				if self.zmq_url:
+					# A run with a live viewer attached once segfaulted right here, when the pipeline and its ZMQ
+					# publisher were destroyed (the cause was not found: 1 crash in 8 runs). The results are saved
+					# at this point and scripts/run_pipeline.py ends the process with os._exit, so keep the object.
+					_PIPELINES_KEPT_ALIVE.append(self.pipeline)
 				# Pipeline cleanup if needed
 				self.pipeline = None
 			self.logger.info("Hydra integration shutdown complete")

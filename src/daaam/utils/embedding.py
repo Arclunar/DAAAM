@@ -1,5 +1,6 @@
 from typing import List, Optional, Any, Tuple, Dict, Union
 from dataclasses import dataclass
+import os
 import threading
 import torch
 import numpy as np
@@ -9,6 +10,7 @@ from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 import open_clip
 
+from daaam.utils.hf_cache import create_openclip_model
 from daaam.utils.logging import PipelineLogger, get_default_logger
 
 
@@ -51,9 +53,7 @@ class CLIPHandler:
 	def _init_openclip(self, model_name: str, pretrained: str) -> None:
 		"""Initialize OpenCLIP model."""
 		self.logger.info(f"Loading OpenCLIP {model_name} with {pretrained} weights...")
-		self.model, _, self.preprocess = open_clip.create_model_and_transforms(
-			model_name, pretrained=pretrained, device=self.device
-		)
+		self.model, _, self.preprocess = create_openclip_model(model_name, pretrained, self.device)
 		self.tokenizer = open_clip.get_tokenizer(model_name)
 		self.model.eval()
 		self.logger.info(f"OpenCLIP model loaded on {self.device}")
@@ -66,6 +66,10 @@ class CLIPHandler:
 		self.logger.info(f"Loading Perception Encoder {model_name}...")
 		self.model = pe.CLIP.from_config(model_name, pretrained=True)
 		self.model = self.model.to(self.device)
+		if os.environ.get("DAAAM_CLIP_HALF") == "1":
+			# fp16 weights take 1.3 GB of GPU memory instead of 2.7 GB (both towers); the feature extraction runs under
+			# torch.autocast, which computes the matrix products in fp16 anyway
+			self.model = self.model.half()
 		self.model.eval()
 
 		self.preprocess = pe_transforms.get_image_transform(self.model.image_size)

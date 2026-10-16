@@ -1,0 +1,79 @@
+services:
+  daaam:
+    image: daaam:jazzy-cu128-dev
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+        UBUNTU_MIRROR: "${UBUNTU_MIRROR:-https://mirrors.ustc.edu.cn/ubuntu}"
+        UBUNTU_SECURITY_MIRROR: "${UBUNTU_SECURITY_MIRROR:-https://mirrors.ustc.edu.cn/ubuntu}"
+        ROS_MIRROR: "${ROS_MIRROR:-https://mirrors.ustc.edu.cn/ros2/ubuntu}"
+        ROSDISTRO_INDEX_URL: "${ROSDISTRO_INDEX_URL:-https://mirrors.ustc.edu.cn/rosdistro/index-v4.yaml}"
+    init: true
+    network_mode: host
+    shm_size: 8gb
+    stdin_open: true
+    tty: true
+    gpus: all
+    environment:
+      DISPLAY: "${DISPLAY:-:0}"
+      QT_X11_NO_MITSHM: "1"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+    volumes:
+      - daaam_workspace:/opt/daaam_ws
+      - .:/opt/daaam_ws/src/daaam
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    working_dir: /opt/daaam_ws/src/daaam
+
+  # 日常使用的服务：在 daaam 镜像之上追加了 rosdep 解析出的系统包（docker/apt-deps.txt）。
+  # 工作区卷里编译好的产物依赖这些库，而在容器里用 rosdep 装的包会在 `run --rm` 之后丢失，
+  # 所以安装、编译、运行都用这个服务。构建：docker compose build daaam-ws
+  daaam-ws:
+    image: daaam:jazzy-cu128-deps
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.deps
+      args:
+        BASE_IMAGE: daaam:jazzy-cu128-dev
+    init: true
+    network_mode: host
+    shm_size: 8gb
+    stdin_open: true
+    tty: true
+    gpus: all
+    environment:
+      DISPLAY: "${DISPLAY:-:0}"
+      QT_X11_NO_MITSHM: "1"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      # install/packages.yaml 里是 SSH 地址；这些仓库都是公开的，改走 HTTPS，不需要 SSH 密钥
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf"
+      GIT_CONFIG_VALUE_0: "git@github.com:"
+      # 模型缓存与 pip 缓存放进工作区卷，`run --rm` 之后不会丢
+      HF_HOME: /opt/daaam_ws/cache/huggingface
+      TORCH_HOME: /opt/daaam_ws/cache/torch
+      XDG_CACHE_HOME: /opt/daaam_ws/cache
+      PIP_CACHE_DIR: /opt/daaam_ws/cache/pip
+      PIP_DEFAULT_TIMEOUT: "120"
+      PIP_RETRIES: "10"
+      # 代理偶尔会让 git 传输停滞：低于 1 KB/s 持续 2 分钟就报错，而不是无限等待
+      GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+      GIT_HTTP_LOW_SPEED_TIME: "120"
+      # RUNNING.md 的 CODa 流程：数据集根目录（宿主机上是 DAAAM_DATA_DIR/CODa）
+      CODA_ROOT_DIR: /data/CODa
+    volumes:
+      - daaam_workspace:/opt/daaam_ws
+      - .:/opt/daaam_ws/src/daaam
+      - ${DAAAM_DATASETS_DIR:-./datasets}:/datasets
+      # CODa 数据集、FoundationStereo 和 bag 放在宿主机目录里（本机在 .env 里设成 /mnt/e/daaam-data，
+      # 即 E:\daaam-data）：WSL 和 Windows 里直接能看，不占 C: 盘上的 WSL 虚拟磁盘，容器里是 /data
+      - ${DAAAM_DATA_DIR:-./datasets}:/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    working_dir: /opt/daaam_ws/src/daaam
+
+volumes:
+  daaam_workspace:

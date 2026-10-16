@@ -1,8 +1,14 @@
 # repo-specific
 output/*
 checkpoints/*
+datasets/*
 config/labels_pseudo.*
 null/
+/logs/
+/.superpowers/
+/docs/openai_apikey.txt
+/docs/orchestrator_process_frame.html
+/\\
 
 # Environments
 .env
@@ -159,3 +165,6 @@ dmypy.json
 .pytype/
 osnet_x0_25_msmt17.pt
 .vscode/settings.json
+
+# deployment bundles exported by docker/build_full_image.sh
+/dist/

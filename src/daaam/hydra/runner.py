@@ -144,13 +144,15 @@ class HydraPipelineRunner:
 			zmq_url=zmq_url,
 			glog_level=glog_level,
 			verbosity=verbosity,
+			skip_invalid_depth=self.config.hydra.skip_invalid_depth,
 		)
-		
+
 		# Initialize daaam pipeline orchestrator
 		self.logger.info("Initializing daaam pipeline orchestrator...")
 		self.orchestrator = PipelineOrchestrator(
 			config=self.config,
-			logger=self.logger
+			logger=self.logger,
+			output_dir=self.output_dir,
 		)
 		
 		# Statistics

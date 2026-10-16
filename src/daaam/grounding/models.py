@@ -20,6 +20,12 @@ class ObjectAnnotation(Annotation):
 	semantic_id: int = Field(
 		..., description="Semantic ID of the object displayed in the image."
 	)
+	description_frame_id: Optional[int] = Field(
+		default=None, description="Frame ID of the exact image sent to DAM for this description."
+	)
+	description_timestamp: Optional[float] = Field(
+		default=None, description="Timestamp of the exact image sent to DAM for this description."
+	)
 	# Temporal observation history fields
 	frame_ids: Optional[List[int]] = Field(
 		default=None, description="List of frame IDs where this object was observed."

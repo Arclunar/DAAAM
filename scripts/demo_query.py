@@ -12,6 +12,7 @@ from daaam.utils.evaluation import preprocess_scene_graph, START_TIMES
 from daaam.scene_understanding.services import SceneUnderstandingAgent
 from daaam.scene_understanding.config import SceneUnderstandingConfig
 from daaam.scene_understanding.models import TextResponse
+from daaam.utils.embedding import CLIPHandler, EmbeddingProvenance, PROVENANCE_KEY
 from daaam.utils.logging import ConsoleLogger
 
 
@@ -39,7 +40,17 @@ def main(dsg_path: str, seq_id: int, model_name: str):
 			"get_agent_trajectory_information",
 		],
 	)
-	agent = SceneUnderstandingAgent(config, ConsoleLogger())
+	# Query with the CLIP encoder the scene graph was embedded with (as scripts/eval_navqa.py does): the tool config
+	# names the backend "openai" by default, which the embedding provenance check rejects against "openclip" or "pe".
+	clip_handler = None
+	raw_provenance = dict(sg.metadata.get()).get(PROVENANCE_KEY)
+	if raw_provenance is not None:
+		clip = EmbeddingProvenance.from_metadata(raw_provenance).clip
+		if clip is not None:
+			config.tool_config.clip_model_name = clip.model_name
+			config.tool_config.clip_backend = clip.backend
+			clip_handler = CLIPHandler(model_name=clip.model_name, pretrained=clip.pretrained, backend=clip.backend)
+	agent = SceneUnderstandingAgent(config, ConsoleLogger(), clip_handler=clip_handler)
 	agent.update_scene_graph(sg)
 
 	n_nodes = sum(1 for _ in sg.nodes)

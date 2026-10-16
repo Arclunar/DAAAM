@@ -1,0 +1,29 @@
+# TUM RGB-D outputs contain ordinary PLACES nodes. CODa instead clusters its
+# TRAVERSABILITY layer, so it keeps using daaam_ros's default CODa config.
+daaam_labels:
+  feature_type: BOTH
+  distance_metric:
+    type: cosine
+
+places_layer: PLACES
+merge_label_strategy: SINGLE_MAX
+node_distance_aggregation: MAX
+
+# Match the relaxed TUM room thresholds used while building the graph. A desk
+# sequence has about 23 place nodes, below the CODa config's 25-node minimum.
+room_finder:
+  min_dilation_m: 0.5
+  max_dilation_m: 1.2
+  min_component_size: 3
+  min_room_size: 3
+  dilation_threshold_mode: PLATEAU
+  min_lifetime_length_m: 0.1
+  plateau_ratio: 0.15
+  clustering_mode: NEIGHBORS
+  dilation_diff_threshold_m: -1.0
+
+backend:
+  # cluster_places only knows TraversabilityNodeAttributes. The wrapper adapts
+  # ordinary PlaceNodeAttributes temporarily, so its incompatible merge
+  # functors must not run; the restored result keeps the original place nodes.
+  enable_node_merging: false

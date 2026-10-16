@@ -24,6 +24,7 @@ from daaam.utils.performance import performance_measure
 from daaam.utils.embedding import EncoderProvenance, stamp_embedding_provenance
 from daaam.utils.io import atomic_path, atomic_yaml_dump
 from daaam.grounding.models import Annotation, ImageAnnotation, ObjectAnnotation
+from daaam.grounding.utils import correction_label_entry
 from daaam.scene_graph.models import (
 	BackgroundObjectData,
 	ObjectPosition,
@@ -827,27 +828,7 @@ class SceneGraphService:
 		self.logger.info(f"corrections stats on shutdown:\n {self.get_correction_stats()}")
 
 		for semantic_id, correction in corrections_copy.items():
-			label_entry = {
-				"label": semantic_id,
-				"name": correction.semantic_label,
-			}
-			
-			# Add temporal history if available
-			if hasattr(correction, 'frame_ids') and correction.frame_ids:
-				label_entry["temporal_history"] = {
-					"frame_ids": correction.frame_ids,
-					"timestamps": correction.timestamps,
-					"observation_count": correction.observation_count,
-					"first_observed": correction.first_observed,
-					"last_observed": correction.last_observed
-				}
-			
-			# Add CLIP feature if available (don't save the full vector to YAML, just note its presence)
-			if hasattr(correction, 'selectframe_clip_feature') and correction.selectframe_clip_feature:
-				label_entry["has_clip_feature"] = True
-				label_entry["clip_feature_dim"] = len(correction.selectframe_clip_feature)
-			
-			label_names.append(label_entry)
+			label_names.append(correction_label_entry(semantic_id, correction))
 		
 		# Save corrections as YAML
 		corrections_data = {

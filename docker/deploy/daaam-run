@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Run DAAAM from the deployed image. deploy.sh installs this script as $DAAAM_HOME/bin/daaam-run (see DEPLOY.md).
+#
+#   daaam-run check [--quick]                 GPU, Python packages, model files, and loading DAM-3B
+#                                             (--quick skips loading it)
+#   daaam-run tum-example [FRAMES] [FPS]      the bundled TUM fr1/desk sample (default: 298 frames, 3 fps)
+#   daaam-run pipeline DATASET_DIR [ARGS...]  scripts/run_pipeline.py on a dataset directory of your own
+#   daaam-run summarize RUN_DIR               scripts/summarize_run.py; RUN_DIR as seen in the container,
+#                                             e.g. output/tum_fr1_desk/out_20261014_115924
+#   daaam-run shell                           bash inside the container
+#   daaam-run exec COMMAND [ARGS...]          any other command
+#
+# Layout under $DAAAM_HOME: assets/ (model weights), datasets/ (mounted at /datasets), output/ (results).
+# Environment: DAAAM_HOME, DAAAM_IMAGE, DAAAM_GPUS (default all), DAAAM_SHM (default 8g),
+#   DAAAM_USER (default: uid:gid of the caller), DAAAM_ONLINE=1 (allow Hugging Face downloads; by default the
+#   container works offline), DAAAM_DOCKER_ARGS (extra `docker run` arguments, e.g. "--network none").
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+DAAAM_HOME="${DAAAM_HOME:-$(dirname "$(dirname "${self}")")}"
+IMAGE="${DAAAM_IMAGE:-daaam:jazzy-cu128-full}"
+WS=/opt/daaam_ws/src/daaam
+
+die() { echo "daaam-run: $*" >&2; exit 1; }
+
+usage() { sed -n '2,/^set -euo/p' "${self}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+# run_container [extra docker run arguments...] -- command [arguments...]
+run_container() {
+  local extra=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do extra+=("$1"); shift; done
+  shift
+  local args=(run --rm --init
+    --gpus "${DAAAM_GPUS:-all}" --shm-size "${DAAAM_SHM:-8g}"
+    --user "${DAAAM_USER:-$(id -u):$(id -g)}" -e "HOME=/tmp"
+    -v "${DAAAM_HOME}/assets/hf:/opt/daaam_ws/cache/huggingface"
+    -v "${DAAAM_HOME}/assets/checkpoints:${WS}/checkpoints"
+    -v "${DAAAM_HOME}/datasets:/datasets"
+    -v "${DAAAM_HOME}/output:${WS}/output")
+  if [ -z "${DAAAM_ONLINE:-}" ]; then
+    args+=(-e "HF_HUB_OFFLINE=1" -e "TRANSFORMERS_OFFLINE=1")
+  fi
+  if [ -t 0 ] && [ -t 1 ]; then
+    args+=(-it)
+  fi
+  if [ -n "${DAAAM_DOCKER_ARGS:-}" ]; then
+    # shellcheck disable=SC2206  # intentional word splitting of the extra arguments
+    args+=(${DAAAM_DOCKER_ARGS})
+  fi
+  exec docker "${args[@]}" ${extra[@]+"${extra[@]}"} "${IMAGE}" "$@"
+}
+
+cmd="${1:-help}"
+if [ "$#" -gt 0 ]; then shift; fi
+case "${cmd}" in
+  help|-h|--help) usage; exit 0 ;;
+esac
+
+command -v docker >/dev/null || die "docker not found"
+docker image inspect "${IMAGE}" >/dev/null 2>&1 || die "image ${IMAGE} is not loaded; run deploy.sh from the bundle first"
+[ -d "${DAAAM_HOME}/assets/hf/hub" ] || die "model assets not found in ${DAAAM_HOME}/assets; run deploy.sh first"
+mkdir -p "${DAAAM_HOME}/output" "${DAAAM_HOME}/datasets"
+
+case "${cmd}" in
+  check)
+    deep=(--load-dam)
+    if [ "${1:-}" = "--quick" ]; then deep=(); fi
+    run_container -- python scripts/check_deployment.py ${deep[@]+"${deep[@]}"} ;;
+  tum-example)
+    [ -d "${DAAAM_HOME}/datasets/tum_fr1_desk" ] || die "sample dataset not found in ${DAAAM_HOME}/datasets/tum_fr1_desk (deploy.sh unpacks it unless --no-sample was given)"
+    run_container -- bash scripts/run_tum_example.sh "${1:-298}" "${2:-3}" ;;
+  pipeline)
+    [ "$#" -ge 1 ] || die "usage: daaam-run pipeline DATASET_DIR [run_pipeline.py options...]"
+    dataset="$(readlink -f "$1")"
+    shift
+    [ -d "${dataset}" ] || die "dataset directory not found: ${dataset}"
+    run_container -v "${dataset}:/data/input:ro" -- python scripts/run_pipeline.py /data/input "$@" ;;
+  summarize)
+    run_container -- python scripts/summarize_run.py "$@" ;;
+  shell)
+    run_container -- bash ;;
+  exec)
+    [ "$#" -ge 1 ] || die "usage: daaam-run exec COMMAND [ARGS...]"
+    run_container -- "$@" ;;
+  *)
+    die "unknown command '${cmd}' (daaam-run help)" ;;
+esac

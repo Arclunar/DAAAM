@@ -15,7 +15,7 @@ Key contributions:
 
 The ROS 2 interface lives in [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS).
 
-**[Installation](INSTALL.md) | [Running](RUNNING.md) | [Evaluation](EVAL.md) | [Codebase](CODEBASE.md) | [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS)**
+**[中文使用指南](USAGE.md) | [Installation](INSTALL.md) | [Running](RUNNING.md) | [Evaluation](EVAL.md) | [Codebase](CODEBASE.md) | [DAAAM-ROS](https://github.com/MIT-SPARK/DAAAM-ROS)**
 
 ## Paper
 

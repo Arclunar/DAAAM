@@ -38,8 +38,10 @@ def create_corrections_from_descriptions(
 	descriptions: List[str],
 	semantic_ids: List[int],  
 	worker_id: str,
+	source_frame_id: Optional[int] = None,
+	source_timestamp: Optional[float] = None,
 ) -> List[ObjectAnnotation]:
-	"""Convert descriptions to ObjectAnnotation objects."""
+	"""Convert descriptions to annotations and retain the exact DAM input frame."""
 	corrections = []
 	for i, description in enumerate(descriptions):
 		if i < len(semantic_ids):
@@ -55,6 +57,8 @@ def create_corrections_from_descriptions(
 					semantic_id=semantic_id,
 					semantic_label=description.strip() if description else "unknown",
 					confidence=0.0,
+					description_frame_id=source_frame_id,
+					description_timestamp=source_timestamp,
 				)
 			corrections.append(correction)
 			print(
@@ -62,3 +66,28 @@ def create_corrections_from_descriptions(
 				flush=True,
 			)
 	return corrections
+
+
+def correction_label_entry(semantic_id: int, correction: ObjectAnnotation) -> Dict:
+	"""Serialize one correction for corrections.yaml without storing large feature vectors."""
+	entry = {
+		"label": semantic_id,
+		"name": correction.semantic_label,
+	}
+	if correction.description_frame_id is not None:
+		entry["description_source"] = {
+			"frame_id": correction.description_frame_id,
+			"timestamp": correction.description_timestamp,
+		}
+	if correction.frame_ids:
+		entry["temporal_history"] = {
+			"frame_ids": correction.frame_ids,
+			"timestamps": correction.timestamps,
+			"observation_count": correction.observation_count,
+			"first_observed": correction.first_observed,
+			"last_observed": correction.last_observed,
+		}
+	if correction.selectframe_clip_feature:
+		entry["has_clip_feature"] = True
+		entry["clip_feature_dim"] = len(correction.selectframe_clip_feature)
+	return entry

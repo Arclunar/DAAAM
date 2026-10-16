@@ -15,6 +15,7 @@ import yaml
 from daaam.grounding.interfaces import GroundingWorkerInterface
 from daaam.utils.embedding import CLIPHandler, SentenceEmbeddingHandler
 from daaam.utils.logging import PipelineLogger
+from daaam.utils.memory import release_freed_memory
 from daaam.utils.performance import performance_measure
 from daaam.query_manager.dam import DAMAgentPanoptic
 from daaam.grounding.models import ObjectAnnotation, ImageAnnotation
@@ -112,7 +113,9 @@ class DAMGroundingWorkerBase(GroundingWorkerInterface):
 
 			self.worker_logger.info(f"[Worker {self.worker_id}] Will save grounding data to {worker_dir}")
 
-
+		# loading the models leaves freed memory resident in this process (about 0.5 GB measured with DAM-3B and the Perception Encoder)
+		freed = release_freed_memory()
+		self.worker_logger.info(f"[Worker {self.worker_id}] Returned {freed:.0f} MB of freed heap memory to the OS after loading the models.")
 
 		self.worker_logger.info(f"[Worker {self.worker_id}] Finished initializing successfully.")
 
@@ -432,6 +435,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			image_mask_pairs = []
 			all_semantic_ids_by_record = []
 			all_clip_features_by_record = []  # Store CLIP features for each record
+			all_frame_ids_by_record = []  # Exact selected frame used for each DAM image
 			all_timestamps_by_record = []  # Store timestamps for each record
 			base_filenames = []
 
@@ -440,6 +444,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				prompt_tracks = record.tracks
 				object_labels = record.object_labels
 				record_timestamp = record.timestamp
+				record_frame_id = record.frame_id
 				
 				pil_frame = PILImage.fromarray(prompt_frame)
 				
@@ -474,6 +479,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 					image_mask_pairs.append((pil_frame, masks))
 					all_semantic_ids_by_record.append(semantic_ids)
 					all_clip_features_by_record.append(clip_features)
+					all_frame_ids_by_record.append(record_frame_id)
 					all_timestamps_by_record.append(record_timestamp)
 
 					# Save grounding image if enabled
@@ -512,6 +518,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				if img_idx < len(all_semantic_ids_by_record):
 					semantic_ids = all_semantic_ids_by_record[img_idx]
 					clip_features = all_clip_features_by_record[img_idx] if img_idx < len(all_clip_features_by_record) else {}
+					record_frame_id = all_frame_ids_by_record[img_idx] if img_idx < len(all_frame_ids_by_record) else None
 					record_timestamp = all_timestamps_by_record[img_idx] if img_idx < len(all_timestamps_by_record) else None
 
 					# Save annotations if enabled
@@ -520,7 +527,11 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 
 					# Create corrections and attach CLIP features
 					record_corrections = create_corrections_from_descriptions(
-						descriptions, semantic_ids, self.worker_id
+						descriptions,
+						semantic_ids,
+						self.worker_id,
+						source_frame_id=record_frame_id,
+						source_timestamp=record_timestamp,
 					)
 					
 					# Attach CLIP features to corrections
