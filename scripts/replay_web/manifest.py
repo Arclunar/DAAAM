@@ -52,16 +52,23 @@ def bundle_root_of(result_dir: Path) -> Path:
 	return Path(result_dir) / BUNDLE_DIR
 
 
-def resolve_bundle_member(bundle_root: Path, relative: str) -> Path:
-	"""The real path of an existing bundle member, or ManifestError.
-
-	`relative` must be a normalized POSIX path below the bundle (no absolute path, drive, backslash, `.` or `..` part,
-	empty or doubled separator), and the file it resolves to, symlinks followed, must still lie inside the bundle."""
+def member_name(relative: Any) -> PurePosixPath:
+	"""`relative` as a bundle member name, or ManifestError: a normalized POSIX path below the bundle (no absolute path,
+	drive, backslash, `.` or `..` part, empty or doubled separator)."""
 	if not isinstance(relative, str) or not relative or "\x00" in relative or "\\" in relative or ":" in relative:
 		raise ManifestError(f"unsafe bundle member: {relative!r}")
 	member = PurePosixPath(relative)
 	if member.is_absolute() or not member.parts or ".." in member.parts or member.as_posix() != relative:
 		raise ManifestError(f"unsafe bundle member: {relative!r}")
+	return member
+
+
+def resolve_bundle_member(bundle_root: Path, relative: str) -> Path:
+	"""The real path of an existing bundle member, or ManifestError.
+
+	`relative` must be a valid member name (member_name), and the file it resolves to, symlinks followed, must still lie
+	inside the bundle."""
+	member = member_name(relative)
 	try:
 		root = Path(bundle_root).resolve(strict=True)
 	except (OSError, RuntimeError) as error:
@@ -119,13 +126,14 @@ def load_manifest_json(bundle_root: Path) -> Dict[str, Any]:
 	return value
 
 
-def validate_manifest(bundle_root: Path, verify_digests: bool = False) -> Dict[str, Any]:
+def validate_manifest(bundle_root: Path, verify_digests: bool = False, check_members: bool = True) -> Dict[str, Any]:
 	"""The manifest of a finalized bundle after checking its schema and every file it names.
 
-	Sizes and containment of all members are always checked; `verify_digests` also re-hashes every chunk (the finalizer
-	does this once after writing; opening a large result for browsing does not)."""
+	Sizes and containment of all members are checked unless `check_members` is false (listing many results checks the
+	schema and member names only; opening one checks everything); `verify_digests` also re-hashes every chunk (the
+	finalizer does this once after writing; opening a large result for browsing does not)."""
 	manifest = load_manifest_json(bundle_root)
-	_Validator(Path(bundle_root), manifest, verify_digests).run()
+	_Validator(Path(bundle_root), manifest, verify_digests, check_members).run()
 	return manifest
 
 
@@ -138,19 +146,23 @@ def _is_number(value: Any) -> bool:
 
 
 class _Validator:
-	def __init__(self, root: Path, manifest: Dict[str, Any], verify_digests: bool):
+	def __init__(self, root: Path, manifest: Dict[str, Any], verify_digests: bool, check_members: bool):
 		self.root = root
 		self.path = root / MANIFEST_NAME
 		self.manifest = manifest
 		self.verify_digests = verify_digests
+		self.check_members = check_members
 
 	def fail(self, message: str) -> None:
 		raise ManifestError(f"{self.path}: {message} (replay bundle schema {SCHEMA_VERSION})")
 
-	def member(self, relative: Any, field: str) -> Path:
+	def member(self, relative: Any, field: str) -> Optional[Path]:
 		if not isinstance(relative, str):
 			self.fail(f"{field} must be a relative path string")
 		try:
+			if not self.check_members:
+				member_name(relative)
+				return None
 			path = resolve_bundle_member(self.root, relative)
 		except ManifestError as error:
 			self.fail(f"{field}: {error}")
@@ -251,12 +263,12 @@ class _Validator:
 			for key in ("bytes", "uncompressed_bytes"):
 				if not _is_int(chunk.get(key)) or chunk[key] < 0:
 					self.fail(f"{field}.{key} must be a non-negative integer")
-			if path.stat().st_size != chunk["bytes"]:
+			if path is not None and path.stat().st_size != chunk["bytes"]:
 				self.fail(f"{field}.bytes is {chunk['bytes']} but {chunk['path']} has {path.stat().st_size} bytes")
 			digest = chunk.get("sha256")
 			if not isinstance(digest, str) or not _SHA256.match(digest):
 				self.fail(f"{field}.sha256 must be 64 lowercase hexadecimal digits")
-			if self.verify_digests and file_sha256(path) != digest:
+			if self.verify_digests and path is not None and file_sha256(path) != digest:
 				self.fail(f"{field}: {chunk['path']} does not match its sha256")
 		if expected_first != count:
 			self.fail(f"the chunks cover {expected_first} snapshots but snapshots.count is {count}")
