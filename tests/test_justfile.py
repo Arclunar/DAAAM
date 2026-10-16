@@ -34,6 +34,12 @@ class JustfileTest(unittest.TestCase):
 		self.assertIn("tests.test_output_layout", output)
 		self.assertIn("tests.test_cluster_places_adapter", output)
 		self.assertIn("tests.test_scene_graph_utils", output)
+		for module in ("tests.test_replay_manifest", "tests.test_replay_datasets", "tests.test_replay_web_paths", "tests.test_replay_web_runs",
+				"tests.test_replay_web_server", "tests.test_replay_bundle", "tests.test_replay_workspace_browser"):
+			self.assertIn(module, output)
+		host, container = output.split("docker compose run", 1)
+		self.assertIn("tests.test_replay_web_server", host, "the service runs on the WSL host and is tested there")
+		self.assertIn("tests.test_replay_bundle", container.split("powershell", 1)[0], "the finalizer needs the container")
 		self.assertIn("RUN_BROWSER_TESTS", output)
 		self.assertIn("import selenium", output)
 		self.assertIn("browser test skipped", output)

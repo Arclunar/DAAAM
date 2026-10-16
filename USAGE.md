@@ -241,6 +241,22 @@ LiDAR 11.6 GB 和 cam3 原始深度 1.5 GB（DAAAM 用不到）。10 Hz，全序
 （显存和内存装不下两个）。脚本在 `scripts/make_coda_bag.sh`、`run_coda_chunks.sh`、`postprocess_coda.sh`，测试在
 `tests/test_coda_scripts.py` 和 `tests/test_coda_just.py`。
 
+**回看数据包**：`just coda-bag` 在 bag 完整关闭后往 bag 目录里写 `daaam_replay.json`（数据集类型、序列、起始帧、帧数、10 Hz、
+时间原点 = `timestamps/0.txt` 的第一行；先写临时文件再改名），录之前还会检查起止帧在序列范围内、`timestamps/0.txt` 存在。
+`just coda-run` 结束后只给**这次运行新建**的 `output/coda/out_<时间>/` 生成 `replay/` 数据包：CODa 的 ROS 流程不保留历史快照，
+所以数据包只有一个时间点，即最终的 `dsg.json`，放在这段 bag 的最后一帧（时间相对序列开头）；数据集类型、序列、起始帧和时间
+原点读自 sidecar，不从 bag 的名字推断，相机画面和 DAM 描述源帧从 `/data/CODa` 复制进去（cam0，按文件名里的数字排序）。
+在这之前录的 bag 没有 sidecar：管线照常跑完、结果保留，但命令以退出码 3 结束并提示用 `just coda-bag` 重录；`just coda-chunks`
+只复用带 sidecar 的 bag，旧 bag 会被重录一次。已有的 CODa 结果也可以手动补一个数据包（帧范围见 `output/coda_chunks.tsv`）：
+
+```bash
+docker compose run --rm -T daaam-ws python scripts/replay.py finalize --graph output/coda/out_<时间>/dsg.json \
+  --run output/coda/out_<时间> --dataset-kind coda --sequence 0 --dataset /data/CODa --fps 10 \
+  --start-frame 821 --frame-count 821 --out output/coda/out_<时间>/replay
+```
+
+然后在 `just replay-web` 里打开（见 9.0.1）。
+
 1. **下载**（WSL 里，不需要容器）。devkit 的 `download_split.py` 整包下载且不能续传，代理又会断连，所以用
    `scripts/download_coda_subset.py` 只取前 1000 帧的 cam0/cam1 和元数据（3.34 GB，约 25 分钟，可续传，逐文件 CRC）：
 
@@ -497,6 +513,8 @@ python scripts/run_pipeline.py /datasets/my_sequence \
 | `final_stats.json` | 离线入口生成的最终统计 |
 | `logs/` | 运行日志 |
 | `images/`、`grounding_images/` | 启用相应保存选项后的调试图像 |
+| `replay/` | `just tum-run` / `just tum-test` / `just coda-run` 生成的回看数据包，用 `just replay-web` 打开（9.0.1） |
+| `replay.rrd` | TUM 回看的 Rerun 录制（`just rerun-play`） |
 
 先检查 `dsg.json`、`corrections.yaml` 和 `background_objects.yaml` 是否完整，再进行
 后处理。中断运行时应等待优雅关闭完成，避免得到未写完的 YAML/JSON。
@@ -597,60 +615,74 @@ docker compose run --rm -T daaam-ws bash scripts/run_live_preview.sh 298 3
   查看器，跑完再用 9.1 节的静态可视化看；或者改流水线（让 CV 和 Hydra 重叠、跳帧、更粗的体素），
   这些会改变算法的行为，这里没有做。
 
-### 9.0.1 建图后回看（不开 RViz，拖进度条）
+### 9.0.1 建图后回看（回看工作区：一个页面，多个结果）
 
 不开 RViz 建图更快（见上面"速度"一条），建完再拖进度条看地图是怎么一点点长出来的。（原版 DAAAM-ROS 的
 ROS 2 流程里有类似的东西：`daaam_ros/nodes/rerun_visualizer_node.py` 把场景图、网格、图像和位姿带着时间
 戳记到 Rerun，可以拖 Rerun 的时间条回看；但它要跑 ROS 2 流程、会弹出原生 Rerun 窗口、默认每 10 秒才处理
-一次场景图、也不保存录制。这里的是离线脚本流程 `run_pipeline.py` 的对应物，单个网页，不依赖 ROS 和 Rerun。）
+一次场景图、也不保存录制。这里的是离线脚本流程 `run_pipeline.py` 的对应物，一个本地网页，不依赖 Rerun。）
 
 ```bash
 just tum-run        # 完整 298 帧、带 DAM，约 4 分钟；just tum-run 120 只跑前 120 帧
 just tum-run 298 fr1_room    # 换一个测试序列（序列名是最后一个参数；有哪些序列、怎么下载见 9.5）
-# 等价于：
-docker compose run --rm -T -e NAME=tum_replay daaam-ws bash scripts/run_replay.sh 298
+just replay-web     # 启动回看工作区（WSL 宿主机上只监听 127.0.0.1 的本地服务），Ctrl+C 停止
+# 浏览器打开 http://127.0.0.1:8765/replay.html （Windows 的浏览器也能直接打开这个地址）
 ```
 
-跑完会打印网页的位置：`output/tum_replay/out_<时间>/replay.html`。同一次运行的 `dsg.json`、`replay.html`、
-`replay.rrd`、`images/`、`logs/` 和 `hydra_output/` 都在这个唯一的 `out_<时间>` 目录里，不再由管线内部追加第二层
-`out_<时间>`。旧版本已经生成的双层目录仍可由 `tum-post` / `tum-summarize` 自动识别。网页是单个 HTML 文件（298 帧约
-21 MB），数据都在里面，不需要服务器和网络，也能拷到别的机器上看。在 Windows 里用资源管理器打开
-`\\wsl.localhost\Ubuntu-20.04\home\…\replay.html`，或把这个路径粘到浏览器地址栏；需要
-Chrome / Edge 80+、Firefox 113+ 或 Safari 16.4+（用到 `DecompressionStream` 和 WebGL）。
+`just tum-run` 等价于 `docker compose run --rm -T -e NAME=tum_replay daaam-ws bash scripts/run_replay.sh 298`。跑完会打印
+这次运行新建的结果目录 `output/tum_replay/out_<时间>/`、它的 `replay/` 回看数据包和 `replay.rrd`，并提示 `just replay-web`。
+同一次运行的 `dsg.json`、`replay/`、`replay.rrd`、`images/`、`logs/` 和 `hydra_output/` 都在这个唯一的 `out_<时间>`
+目录里；旧版本已经生成的双层目录仍可由 `tum-post` / `tum-summarize` 自动识别。
 
-原理：Hydra 大约每处理一帧就把完整场景图（含网格）通过 ZMQ 发布一次，RViz 看的就是这个流。
-`scripts/replay.py record` 订阅它，每 5 份存一个快照（`REPLAY_EVERY` 调整）；建图结束后
-`scripts/replay.py build` 把快照做成一个 WebGL 网页（模板是 `scripts/replay_viewer.html`），
-`scripts/run_replay.sh` 把这几步串起来。只订阅、不渲染，对建图速度没有可测的影响（120 帧不带 DAM：
-3.68 帧/秒，不发布时 3.39；298 帧带 DAM：每帧 0.38–0.39 秒，和不录制时一样），开着 RViz 才会慢
-（2.13 帧/秒）。参数和环境变量同 `scripts/run_tum_example.sh`；`REPLAY_KEEP=1`
-保留原始录制（`output/<NAME>/.replay-recording`），之后可以用
-`python scripts/replay.py build <录制目录> --run <某次运行的 out_* 目录> --dataset datasets/tum_fr1_desk --fps 15 --out replay.html`
-重新生成（`--dataset` 和 `--fps` 用来放右下角的相机画面，不给就没有）。
-别的数据集同理：给 `scripts/run_pipeline.py` 传 `--zmq-url tcp://127.0.0.1:8001`，再用
-`scripts/replay.py record/build`。
+**整个仓库只有一个回看页面**：根目录的 `replay.html`，由 `just replay-web` 提供（`python3 -m scripts.replay_web.server`，
+只用 Python 3.8 标准库，在 WSL 宿主机上运行，所以 WSL 能看到的任何目录都能打开）。结果目录里只放数据，不再生成
+`replay.html`；**旧结果里留下的自包含 `replay.html` 不能被新工作区打开，也没有兼容层**——需要回看旧结果时，用保留的录制
+重新做数据包（见下面"恢复"）。`replay.rrd` 照旧生成，是给 Rerun 的（`just rerun-play`），工作区不读它。
 
-页面上：
+**回看数据包 `replay/`**（`scripts/replay.py finalize` 写出，格式见 `scripts/replay_web/manifest.py`）：
 
-- 底部进度条：拖动、播放/暂停（空格）、单步（←/→）、倍速；`t` 是数据里的时间（由地点的更新时间推算），
-  不是墙钟时间。一打开就在最后一个快照（建完的地图）。
-- 左键旋转、右键或 Shift+左键平移、滚轮缩放、双击复位；点击物体框的中心看完整的 DAM 描述。
+| 文件 | 内容 |
+|---|---|
+| `manifest.json` | 版本 1 的清单，最后写入：数据集类型（`tum` / `coda`）、序列、时间原点、帧率、起始帧和帧数、快照编号与时间、每个数据块的相对路径 / 时间范围 / 快照数 / 大小 / SHA-256、相机、图像索引、物体描述和描述来源、实体目录、可选参考网格。只有带有效清单的目录才能打开 |
+| `timeline/NNNNNN.json.gz` | 时间轴数据块：每块各自 gzip 压缩，按快照数（默认 24）和未压缩大小（默认 8 MiB）切分，超大的单个快照单独成块；`fr3_long_office_household` 的 250 个快照是 17 块、每块不超过 8.3 MB |
+| `images/timeline/{rgb,depth}/` | 每个快照当时处理的那一帧的 RGB 和彩色深度小图（宽 320 px），同一帧只存一次 |
+| `images/descriptions/` | DAM 描述物体时实际用的那一帧（最宽 960 px），多个物体共用一帧时只存一次 |
+| `reference/reference.json.gz` | 可选的 1 cm 参考网格（9.6） |
+
+数据包先在旁边的临时目录 `.replay.<pid>.tmp` 里写好、校验（含 SHA-256），再整体改名替换；失败时旧数据包原样保留。
+清单里的路径都是数据包内的相对路径，服务端拒绝绝对路径、`..` 和指向包外的符号链接。
+
+工作区页面：
+
+- **打开结果**：上方输入框接受 `/home/…`、`/mnt/e/…`、`E:\…`（也可以是 `E:/…`，或资源管理器"复制为路径"带引号的形式）和
+  本发行版的 `\\wsl.localhost\Ubuntu-20.04\…` / `\\wsl$\Ubuntu-20.04\…`；也可以输入数据包目录 `…/replay` 或清单本身。
+  "output/ 里的结果"列出默认 `output/` 下（最多 4 层，跟随 `output/coda` 指向 E: 盘的软链接）所有有效数据包，最新的在前。
+  打不开时在页面下方提示原因，例如期望的 `…/replay/manifest.json` 路径。
+- **多个结果用标签页**（不做并排对比）：同一结果再打开会切到它的标签；拖动标签换顺序；标签有焦点时 ←/→/Home/End 切换、
+  Delete 关闭（关闭只释放服务里的会话，不删除任何文件）。刷新或重开浏览器后，打开的结果、顺序、当前标签和每个标签的视图
+  （时间、相机视角、图层开关、选中、隐藏、相机画面的位置）都会恢复；已经打不开的路径会被跳过并提示。只有当前标签渲染、
+  播放和解码图像：切到别的标签时播放暂停，切回来继续。
+- 底部进度条：拖动、播放/暂停（空格）、单步（←/→）、倍速；`t` 是数据里的时间（TUM 从 0 起，CODa 从序列第一帧的时间戳起），
+  不是墙钟时间。一打开就在最后一个快照（建完的地图）。首次只取包含当前快照的数据块和它前面一块，之后按需取。
+- 左键旋转、右键或 Shift+左键平移、滚轮缩放、双击复位。
 - 左侧可以切换和开关：网格的来源（1 cm 参考网格 / 动态 Hydra 网格 / 隐藏，见 9.6）和"只画顶点"、物体节点、
   物体框（仅选中 / 全部 / 隐藏）、标签（仅选中 / 全部 / 隐藏）、地点和地点连线、房间/楼宇、层间连线、相机轨迹；
   "层间距"把地点、房间、楼宇依次抬高，和 RViz 的分层显示一样（设成 0 就都在真实位置）。
 - 浮动的描述卡片默认只给选中的物体或地点显示。选"全部"会给所有物体、地点、房间和楼宇显示：卡片可能互相重叠，但哪些卡片
   存在只在换快照、选择、点右侧列表的眼睛或换模式时才变；转动、平移、缩放只改它们的位置，卡片只有在它自己的锚点跑出画面
-  或转到相机后面时才不显示，不会因为被别的卡片挡住而时有时无。选"隐藏"一键收起所有卡片（右侧的实体列表和详情不受影响）。
+  或转到相机后面时才不显示。选"隐藏"一键收起所有卡片（右侧的实体列表和详情不受影响）。
 - 选中的物体用琥珀色粗框（4 px，外面一圈深色光晕，八个角有圆点）画在最上层：不被网格遮住，物体框模式是"隐藏"时也显示，
   不拦截鼠标点击；物体的选中节点同样是琥珀色。
-- 新运行会在每条 DAM 描述里记录实际送给模型的 `frame_id` 和时间戳。点击地图物体或右侧列表行只会选中/高亮，不改变时间轴；
-  列表中每个物体都有“源帧”按钮，点击后弹窗显示 DAM 当时看到的那张原始 RGB 图，详情里也会标出“描述来源 frame …”。来源图只在建图完成后
-  由 `replay.py build --dataset …` 从数据集读取和压缩，在线管线不保存额外 JPEG，运行时只多保留两个标量。旧结果的 `corrections.yaml`
-  没有来源字段，重新 build 也无法反推，因此“源帧”按钮不可用。
-- 右下角是当时的 RGB 画面和彩色深度画面（蓝近红远、0–4 m，黑色是没测到），拖进度条时跟着换；点一下放大
-  或缩小，左侧"相机画面"可以关掉。画面取的是管线在这个快照时刚处理完的那一帧（数据时间 × 帧率），
-  每个快照一张（约 35 KB）；时间和帧号的对应用这次运行的 25 个关键帧位姿核对过，和数据集里该帧的位姿
-  完全一致。
+- **点击地图里的物体或地点、或右侧列表的一行，只选中和高亮，不改变时间轴。** 有描述来源的物体在列表里有"描述源帧"按钮：
+  弹窗显示 DAM 当时看到的那一帧（帧号、相机、时间戳和图像），打开、关闭都不改变时间；没有记录来源的物体显示灰色的
+  "无描述源帧"，不会用首次或最近的观测去猜。来源帧在建图完成后由 `finalize --dataset …` 从数据集复制进数据包，在线管线
+  不保存额外图片；数据集以后不再挂载也能看。CODa 的帧号按"起始帧 + frame_id − 1"换算，并用记录的图像时间戳核对：
+  节点丢过帧导致对不上时以时间戳为准，哪一帧都对不上就不显示。
+- **相机画面卡片**（当时的 RGB 和彩色深度图，蓝近红远、TUM 0–4 m / CODa 0–30 m，黑色是没测到）：拖动卡片的标题栏移动，
+  标题栏有焦点时方向键每次移 10 px（Shift 1 px）；点一下卡片放到最前，点图片放大或缩小；窗口缩小时卡片始终留在可见范围内；
+  位置、叠放顺序和大小按结果（标签）记住；左侧"重置相机布局"放回侧栏左边的默认位置；"相机画面"可以整体关掉。移动卡片
+  不改变时间轴和三维视角。画面取的是管线在这个快照时刚处理完的那一帧（数据时间 × 帧率）；缺图时显示占位和帧号。
+- 某个数据块损坏时，只有这个结果停止播放并在画面上方写出是哪一块；其他标签不受影响。
 
 说明：
 
@@ -659,6 +691,30 @@ Chrome / Edge 80+、Firefox 113+ 或 Safari 16.4+（用到 `DecompressionStream`
 - 物体要等跟踪窗口结束才进入场景图，所以大部分物体在后半段才出现；物体标签用的是
   `corrections.yaml` 里按语义标签取的 DAM 描述（整个时间轴上都一样），没有 DAM 时显示 `物体 O<编号>`。
 - 相机轨迹是位姿图的关键帧（几十个点），不是每帧的位姿。
+- CODa 的 ROS 流程不保留历史快照，它的数据包只有一个时间点：最终的 `dsg.json`（见 4.4）。CODa 的可通行区域
+  （TRAVERSABILITY）节点目前不作为"地点"画出来。
+
+原理：Hydra 大约每处理一帧就把完整场景图（含网格）通过 ZMQ 发布一次，RViz 看的就是这个流。
+`scripts/replay.py record` 订阅它，每 5 份存一个快照（`REPLAY_EVERY` 调整）；建图结束后
+`scripts/replay.py finalize` 把快照做成 `replay/` 数据包，`scripts/run_replay.sh` 把这几步串起来。只订阅、不渲染，
+对建图速度没有可测的影响（120 帧不带 DAM：3.68 帧/秒，不发布时 3.39；298 帧带 DAM：每帧 0.38–0.39 秒，和不录制时
+一样），开着 RViz 才会慢（2.13 帧/秒）。参数和环境变量同 `scripts/run_tum_example.sh`。
+
+**恢复**：建图、录制或数据包生成失败时，原始快照留在 `output/<NAME>/.replay-recording`（`REPLAY_KEEP=1` 时成功也保留），
+之后可以重新做数据包（`--dataset` 用来放相机画面和描述源帧，`--reference-mesh` 加上参考网格，都可以不给）：
+
+```bash
+docker compose run --rm -T daaam-ws python scripts/replay.py finalize output/tum_replay/.replay-recording \
+  --run output/tum_replay/out_<时间> --dataset-kind tum --sequence fr1_desk \
+  --dataset /datasets/tum_fr1_desk --fps 15 --out output/tum_replay/out_<时间>/replay
+```
+
+别的数据集同理：给 `scripts/run_pipeline.py` 传 `--zmq-url tcp://127.0.0.1:8001`，再用 `scripts/replay.py record/finalize`
+（`--dataset-kind` 必须明确给出，程序不会按目录名猜数据集）。
+
+**服务的边界**：只监听 127.0.0.1（`just replay-web host=localhost port=8766` 可以换端口，别的地址会被拒绝）；页面打开结果
+时只发送一次路径，之后只用服务给的随机会话编号；服务只发送清单里登记过的文件，没有通用的读文件或执行命令的接口；会改变
+状态的请求要求同源和启动时生成的 CSRF 令牌。服务的本地状态在仓库的 `.replay-web/`（已在 `.gitignore` 里）。
 
 ### 9.1 Rerun 可视化
 
@@ -759,7 +815,7 @@ TUM fr1/desk 在仓库里有两份：`datasets/raw/rgbd_dataset_freiburg1_desk/`
 just tum-list                              # 序列、压缩包大小、有没有下载、转换了多少帧
 just tum-fetch fr1_room fr3_walking_xyz    # 下载并转换（走 7890 代理，可断点续传；已转换的跳过）
 just tum-test 60 fr1_room                  # 前 60 帧、不带 DAM，快速检查
-just tum-run 298 fr1_room                  # 前 298 帧、带 DAM，生成回看网页
+just tum-run 298 fr1_room                  # 前 298 帧、带 DAM，生成回看数据包（just replay-web 查看）
 just tum-run all fr1_room                  # 帧数写 all 表示整个序列
 just tum-post fr1_room                     # 后处理该序列最近一次 tum-run：对象嵌入 + 地点/区域聚类
 just tum-summarize fr1_room                # 同上，再用 OpenAI 生成区域摘要
@@ -795,7 +851,7 @@ C: 盘的 WSL 虚拟磁盘里）。原始序列留着，想换抽帧间隔就用
 
 在这台机器上用 `just tum-run all <序列名>`（带 DAM、默认 5 cm 配置）实测：
 
-| 序列名 | 用时 | 物体 / 地点 / 房间 | 有 DAM 描述的标签 | 网格精度 / 覆盖（5 cm） | 容器内存峰值 | replay.html |
+| 序列名 | 用时 | 物体 / 地点 / 房间 | 有 DAM 描述的标签 | 网格精度 / 覆盖（5 cm） | 容器内存峰值 | 当时的回看网页 |
 |---|---|---|---|---|---|---|
 | `fr1_desk` | 约 4 分钟 | 130 / 23 / 1 | — | 90% / 80% | 约 9 GB | 21 MB |
 | `fr1_desk2` | 3 分 18 秒 | 127 / 29 / 1 | 161 | 91% / 72% | 9.5 GiB | 24 MB |
@@ -821,30 +877,31 @@ C: 盘的 WSL 虚拟磁盘里）。原始序列留着，想换抽帧间隔就用
   （83% / 45%）。原因没有逐项拆开；把网格渲染出来看，桌子等静态结构是完整的，走动的人在网格里留下零碎的残片。
 - **房间数**：地点和房间的阈值是在 `fr1_desk` 上调的（见 11 节“mesh 是碎片”），没有按场景再调：桌面序列得到 1 个房间，
   大场景得到 3 个。
-- **回看网页**：长序列的网页很大（`fr1_room` 108 MB，`fr3_long_office_household` 135 MB），浏览器里要加载几秒；
-  这几个新序列的网页都在浏览器里打开检查过（见各 `output/tum_replay_<序列名>/out_*/replay.html`）。
+- **回看**：上表最后一列是当时生成的自包含网页的大小（长序列 108–135 MB，整个加载）。现在的结果改为 `replay/` 数据包，
+  由 `just replay-web` 按块加载：`fr3_long_office_household` 保留的录制做成的数据包是 126 MB（17 个时间块 + 28 MB 参考网格
+  + 7.7 MB 图片），打开时只取最后两块，约 1 秒出第一帧。那几个旧网页不能在新工作区里打开。
 
-### 9.6 1 cm 参考网格（回看网页里的静态网格）
+### 9.6 1 cm 参考网格（回看工作区里的静态网格）
 
-回看网页默认带一个静态的 **1 cm 参考网格**：用 Open3D 的 TSDF（体素 1 cm、截断 4 cm、深度只取 4 m 以内、带颜色），把数据集
+回看数据包默认带一个静态的 **1 cm 参考网格**：用 Open3D 的 TSDF（体素 1 cm、截断 4 cm、深度只取 4 m 以内、带颜色），把数据集
 **整段序列**的每一帧 RGB-D 按准备好的相机位姿融合成一张网格。它和 Hydra 的网格互补：Hydra 的网格是建图过程中随时间变化的、
 5 cm 体素，用来看"当时 Hydra 有什么"；参考网格细得多、固定不变，用来判断物体框和场景几何对得准不准。它叫**参考网格，不是
-真值**：位姿虽然来自 TUM 的动捕真值，但深度图有噪声，标定和位姿插值有误差，TSDF 的参数也会影响表面。网页和这份文档里都不叫
+真值**：位姿虽然来自 TUM 的动捕真值，但深度图有噪声，标定和位姿插值有误差，TSDF 的参数也会影响表面。回看页面和这份文档里都不叫
 它"真值网格"。
 
 ```bash
 just reference-mesh fr1_desk              # 预先构建（或检查）这个序列的缓存；已有有效缓存就直接用，不重建
 just reference-mesh fr1_room rebuild      # 强制重建
 just tum-run 298                           # 默认 REFERENCE_MESH=auto：缓存有效就用，没有就在建图结束后建一次
-REFERENCE_MESH=off just tum-run 298        # 不要参考网格：和以前一样，页面里只有动态 Hydra 网格
+REFERENCE_MESH=off just tum-run 298        # 不要参考网格：数据包里只有动态 Hydra 网格
 REFERENCE_MESH=rebuild just tum-run 298    # 重建缓存；建不出来整条命令就失败（auto 只给警告）
 REFERENCE_MESH_CACHE=/datasets/cache/tum_fr1_desk just tum-run 298  # 数据集目录只读时把缓存放到别处（每个数据集一个目录）
 ```
 
 `just tum-run` 和 `just tum-test` 把 `REFERENCE_MESH`、`REFERENCE_MESH_CACHE` 原样传进容器。重建放在建图**结束之后**，不占建图的
 速度；直接用脚本是 `python scripts/build_reference_mesh.py <数据集目录> [--cache-dir DIR] [--force]`（只把缓存路径写到
-stdout，进度和警告写 stderr），`scripts/replay.py build … --reference-mesh <缓存>.npz` 把现成的缓存放进页面（用 `REPLAY_KEEP=1`
-保留录制，之后就能重新生成页面）。
+stdout，进度和警告写 stderr），`scripts/replay.py finalize … --reference-mesh <缓存>.npz` 把现成的缓存放进数据包的
+`reference/`（用 `REPLAY_KEEP=1` 保留录制，之后就能重新生成数据包）。
 
 - **缓存**：`<数据集>/.daaam/reference_mesh/open3d_tsdf_1cm.npz`（`positions` / `colors` / `normals` / `triangles` 四个数组，
   不抽稀）和 `open3d_tsdf_1cm.json`（清单：指纹、参数、帧数、顶点和三角形数、范围、Python / NumPy / Open3D 的版本）。两个
@@ -852,12 +909,12 @@ stdout，进度和警告写 stderr），`scripts/replay.py build … --reference
 - **什么时候失效**：指纹覆盖 `camera_info.json`、`pose/poses.txt`、`timestamps.txt` 的内容，`rgb/` 和 `depth/` 里每个文件的
   名字、大小和修改时间，重建参数和缓存格式的版本；任何一项变了（包括把数据集拷到别处——修改时间会变）都会重建一次，清单损坏、
   数组文件和清单对不上也一样。重建只要几十秒（见下表）。
-- **页面里**：左侧"网格"下拉有三项：`1 cm 参考网格`（默认）、`动态 Hydra 网格`、`隐藏网格`，下面一行说明当前是哪一种（参考网格会
+- **回看页面里**：左侧"网格"下拉有三项：`1 cm 参考网格`（默认）、`动态 Hydra 网格`、`隐藏网格`，下面一行说明当前是哪一种（参考网格会
   写明"整段序列的重建，不是真值"）。参考网格是静态的：拖进度条时它不变，也不会重新上传显存；"提亮"和"只画顶点"对当前的网格
-  生效。没有参考网格的页面（`REFERENCE_MESH=off`、旧页面）没有第一项，默认就是动态网格。页面仍然是单个自包含的 HTML，不访问网络；
-  索引超过 65,535 个顶点用 32 位索引，浏览器不支持时退回只画顶点并在说明里提示。
+  生效。没有参考网格的数据包（`REFERENCE_MESH=off`）没有第一项，默认就是动态网格。参考网格是数据包里单独的
+  `reference/reference.json.gz`，打开结果时只取一次；索引超过 65,535 个顶点用 32 位索引，浏览器不支持时退回只画顶点并在说明里提示。
 - **依赖和失败**：需要 Open3D（`requirements.txt` 里的 `open3d==0.19.0`，wheel 约 450 MB）；只嵌入已有缓存不需要它。
-  `REFERENCE_MESH=auto` 下 Open3D 没装、数据集只读（提示用 `REFERENCE_MESH_CACHE`）或重建失败，都只打印警告，页面照常做出来，
+  `REFERENCE_MESH=auto` 下 Open3D 没装、数据集只读（提示用 `REFERENCE_MESH_CACHE`）或重建失败，都只打印警告，数据包照常做出来，
   只是没有参考网格。帧缺 RGB、深度或位姿、解码失败会被计数、跳过并警告（超过 10% 单独强调）；标定不对、图像尺寸和
   `camera_info.json` 对不上、一帧都融合不进去、网格为空是致命错误。
 - **本机的 Open3D**：2026-10-16 经你同意，在容器工作区的 venv 里用 `pip install --no-deps open3d==0.19.0` 只装了 wheel
@@ -877,11 +934,11 @@ stdout，进度和警告写 stderr），`scripts/replay.py build … --reference
 | `fr3_long_office_household` | 1243 | 26 s | 1,565,579 / 2,872,450 | 39.6 MB | 1.8 GB |
 
 端到端用 `REFERENCE_MESH=rebuild just tum-run 298`（`fr1_desk`）：建图仍是 298/298 帧、130 个物体 / 23 个地点 / 1 个房间，和原来一样；建图
-结束后重建 6 秒；参考网格在页面里的负载 14.3 MB，页面从 21 MB 变成 36.5 MB（`.rrd` 不受影响，22 MB）。页面多出来的大小约是缓存
-文件的 0.75 倍，大序列会明显变大（`fr1_room` 的缓存 61.8 MB，页面要多出约 45 MB，原来就有 108 MB）；构建时会打印参考网格的
-顶点数、三角形数、负载大小和最终页面大小，页面超过 100 MB 会提示，**不会**悄悄把网格抽稀。
+结束后重建 6 秒；参考网格的负载 14.3 MB（当时内嵌进单个网页，页面从 21 MB 变成 36.5 MB；`.rrd` 不受影响，22 MB）。现在它是数据包里
+单独的成员，只在打开结果时下载一次，不会让时间轴的数据块变大（`tum-test 30` 的 `fr1_desk` 数据包：参考网格 14.5 MB，8 个快照的
+时间轴 0.3 MB）；`finalize` 会打印参考网格的顶点数、三角形数和负载大小，**不会**悄悄把网格抽稀。
 
-在浏览器里（`fr1_desk` 的真实页面）打开检查过：默认是参考网格；切到动态网格是 20,165 个顶点（当前快照），切到隐藏是 0；在参考网格
+在浏览器里（`fr1_desk` 当时的真实页面）打开检查过：默认是参考网格；切到动态网格是 20,165 个顶点（当前快照），切到隐藏是 0；在参考网格
 下拖动进度条经过三个快照，没有重新上传；"全部"标签下 155 张卡片，转动和缩放后卡片集合不变；"隐藏"后没有可见的卡片，右侧
 130 个物体的列表还在。
 
@@ -897,12 +954,24 @@ stdout，进度和警告写 stderr），`scripts/replay.py build … --reference
 
 #### 测试
 
-`just test` 一次跑完：宿主机上的测试、容器里的测试（包括 `tests/test_reference_mesh.py`：指纹和缓存契约、位姿求逆、帧跳过、Open3D 日志
-不进 stdout、真 Open3D 重建一面 1 m 外的墙；`tests/test_replay_reference_mesh.py`：嵌入、单独的量化网格、32 位索引、
-畸形缓存被拒绝并写明路径、嵌入时不导入 Open3D、模板里没有网络引用；`tests/test_run_replay.py`：`auto / off / rebuild`、缓存目录、
-自动失败时仍出动态页面、`rebuild` 失败时整个运行失败并保留原始快照、非法取值在管线启动前就失败）和 Windows 上带 Chrome 的真实浏览器测试
-（`tests/test_replay_browser.py`：三种网格切换且不重复上传、标签集合在转动时不变、全局隐藏、选中框的颜色 / 光晕 /
-像素 / 点击穿透）。浏览器测试需要 Windows 的 Python 装了 Selenium 和 Chrome，否则 `just test` 会提示它被跳过。
+`just test` 一次跑完三部分：
+
+- 宿主机（Python 3.8 标准库）：回看数据包清单的契约和路径穿越边界（`tests/test_replay_manifest.py`）、TUM / CODa 的数据集布局
+  （`tests/test_replay_datasets.py`）、各种路径写法和已打开结果的注册表（`tests/test_replay_web_paths.py`、`test_replay_web_runs.py`）、
+  在临时端口上真正起服务的 HTTP 契约（`tests/test_replay_web_server.py`：CSRF / 同源 / Host 检查、gzip 数据块和缓存头、
+  只能取清单里登记的图像、`/etc/passwd` 之类拿不到），以及原有的脚本和 justfile 测试。
+- 容器：数据包生成（`tests/test_replay_bundle.py`：清单最后写入、按快照数和字节数分块、图片在包外、原子发布与失败回退、
+  CODa 按数字排序和时间原点、从最终 `dsg.json` 生成单快照数据包）、`tests/test_reference_mesh.py`（指纹和缓存契约、位姿求逆、
+  帧跳过、Open3D 日志不进 stdout、真 Open3D 重建一面 1 m 外的墙）、`tests/test_replay_reference_mesh.py`（参考网格单独量化、
+  32 位索引、畸形缓存被拒绝且不留数据包、不导入 Open3D、查看器源码不引用外部网络）、`tests/test_run_replay.py`（`auto / off / rebuild`、
+  缓存目录、失败时保留原始快照、不再生成网页）。
+- Windows 上带 Chrome 的真实浏览器测试（`tests/test_replay_browser.py`、`tests/test_replay_workspace_browser.py`）：测试进程在
+  Windows 的 Python 里驱动 Chrome，`wsl.exe` 在 WSL 里启动 `tests/replay_web_fixture_server.py`（用真正的 `finalize` 生成数据包并
+  起服务），Chrome 通过 WSL 的 localhost 转发访问它。覆盖三种网格切换且不重复上传、标签集合在转动时不变、选中框的颜色 / 光晕 /
+  像素 / 点击穿透、描述源帧不改时间、按时间戳播放、首屏只取两个数据块、损坏的数据块只影响一个结果、多标签页各自的时间和
+  渲染、后台暂停与恢复、刷新后恢复视图、相机画面的拖动 / 置顶 / 键盘 / 不出界 / 重置。浏览器测试需要 Windows 的 Python 装了
+  Selenium 和 Chrome，否则 `just test` 会提示它被跳过；在装了 Selenium 和 Chrome 的 Linux 上可以直接
+  `RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v`。
 
 ## 10. OC-NaVQA 评测
 

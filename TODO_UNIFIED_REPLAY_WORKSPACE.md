@@ -201,16 +201,18 @@ Provide one persistent multi-turn conversation per canonical result path.
 
 Follow `2026-10-16-unified-replay-core-implementation.md`:
 
-- [ ] Task 1: define and validate the replay bundle manifest.
-- [ ] Task 2: finalize recordings into chunked replay bundles.
-- [ ] Task 3: switch TUM/CODa production from per-result HTML to bundles.
-- [ ] Task 4: normalize arbitrary result paths and register open runs.
-- [ ] Task 5: serve the root application and immutable bundle assets.
-- [ ] Task 6: implement isolated multi-result tabs and workspace persistence.
-- [ ] Task 7: port the existing WebGL viewer to HTTP chunk loading, then remove
-      `scripts/replay_viewer.html` only after parity is tested.
-- [ ] Task 8: implement draggable, tab-aware current-time camera cards.
-- [ ] Task 9: document and verify the core migration end to end.
+- [x] Task 1: define and validate the replay bundle manifest. (`7cac138`)
+- [x] Task 2: finalize recordings into chunked replay bundles. (`d1fb283`)
+- [x] Task 3: switch TUM/CODa production from per-result HTML to bundles. (`2d3504f`)
+- [x] Task 4: normalize arbitrary result paths and register open runs. (`77e27ab`)
+- [x] Task 5: serve the root application and immutable bundle assets. (`a096e21`)
+- [x] Task 6: implement isolated multi-result tabs and workspace persistence. (`b9990c4`)
+- [x] Task 7: port the existing WebGL viewer to HTTP chunk loading, then remove
+      `scripts/replay_viewer.html` only after parity is tested. (`aa6b007`; the
+      `build` subcommand was removed here rather than in Task 3, so that every
+      intermediate commit kept its browser tests green)
+- [x] Task 8: implement draggable, tab-aware current-time camera cards. (`2cd9c8d`)
+- [x] Task 9: document and verify the core migration end to end.
 
 ### Phase 2 — Processing and hot reload
 

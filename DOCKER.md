@@ -128,6 +128,14 @@ ROS_DOMAIN_ID=42 docker compose run --rm daaam
 docker compose run --rm -v /宿主机/数据路径:/datasets:ro daaam
 ```
 
+## 回看工作区（宿主机上的本地服务）
+
+`just replay-web` 不在容器里运行：它是 WSL 宿主机上的 `python3 -m scripts.replay_web.server`，只用 Python 3.8
+标准库，只监听 `127.0.0.1`，这样任何 WSL 能看到的结果目录（包括 `/mnt/e/...`）都能打开，而不用把整个 WSL
+挂进容器。回看数据包本身（`replay/`）由容器里的 `scripts/replay.py finalize` 生成，`just tum-run`、`just tum-test`
+和 `just coda-run` 会自动调用它。服务的本地状态放在仓库的 `.replay-web/`（已被 git 忽略），停掉服务后可以直接删除。
+用法见 [USAGE.md](USAGE.md) 9.0.1 节。
+
 ## 清理
 
 普通的 `docker compose down` 不会删除工作区。只有确定不再需要容器内手动
