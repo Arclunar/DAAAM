@@ -138,6 +138,25 @@ class JustfileTest(unittest.TestCase):
 			self.assertRegex(text, r"-e REFERENCE_MESH(?![\w=])", recipe)
 			self.assertIn("-e REFERENCE_MESH_CACHE", text, recipe)
 
+	def test_tum_run_reports_the_new_result_bundle_without_searching_for_a_page(self) -> None:
+		for args in ((), ("30", "fr1_room")):
+			output = self._dry_run("tum-run", *args)
+			text = output.stdout + output.stderr
+			self.assertEqual(output.returncode, 0, text)
+			self.assertIn("scripts/run_replay.sh", text)
+			self.assertNotIn("replay.html", text)
+			self.assertIn("-newer", text, "only a result created by this run is reported")
+			self.assertIn("replay/manifest.json", text)
+			self.assertIn("just replay-web", text)
+			self.assertIn("replay.rrd", text)
+
+	def test_the_replay_recipes_describe_bundles_instead_of_pages(self) -> None:
+		text = (REPO / "justfile").read_text(encoding="utf-8")
+		for recipe in ("tum-test frames=", "tum-run frames="):
+			comment = text.split(recipe, 1)[0].rstrip().splitlines()[-1]
+			self.assertIn("replay/", comment, recipe)
+			self.assertNotIn("replay.html", comment, recipe)
+
 	def test_old_replay_recipe_is_removed(self) -> None:
 		result = self._dry_run("replay")
 		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)

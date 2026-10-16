@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import stat
@@ -10,6 +11,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPTS = ("make_coda_bag.sh", "run_coda_chunks.sh", "postprocess_coda.sh", "run_coda_example.sh")
+CODA_ORIGIN = "1673884185.589118"
+SIDECAR = {"dataset_kind": "coda", "sequence": "0", "start_frame": 821, "frame_count": 821, "fps": 10.0, "time_origin": 1673884185.589118}
 
 
 class CodaScriptTest(unittest.TestCase):
@@ -44,7 +47,8 @@ class CodaScriptTest(unittest.TestCase):
 			if [ -n "${bag:-}" ]; then
 			  if [ "${FAKE_BAG_FAILS:-0}" = 1 ]; then exit 3; fi
 			  dir="${bag%.bag}_20260101_00000${FAKE_STAMP:-1}.bag"
-			  mkdir -p "$dir" && : > "$dir/metadata.yaml"
+			  mkdir -p "$dir"
+			  [ "${FAKE_NO_METADATA:-0}" = 1 ] || : > "$dir/metadata.yaml"
 			fi
 			exit 0
 			""",
@@ -79,6 +83,48 @@ class MakeCodaBagTest(CodaScriptTest):
 	def setUp(self) -> None:
 		super().setUp()
 		self._fake_ros2()
+		(self.coda / "timestamps").mkdir()
+		stamps = [float(CODA_ORIGIN) + 0.1 * index for index in range(8213)]
+		(self.coda / "timestamps" / "0.txt").write_text(CODA_ORIGIN + "\n" + "".join("%.6f\n" % t for t in stamps[1:]), encoding="utf-8")
+
+	def _sidecar(self, bag: str) -> dict:
+		return json.loads((self.coda / bag / "daaam_replay.json").read_text(encoding="utf-8"))
+
+	def test_a_complete_bag_gets_the_replay_sidecar(self) -> None:
+		result = self._run("make_coda_bag.sh", "0", "1000")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		bag = "coda_0_with_depth_20260101_000001.bag"
+		self.assertEqual(
+			self._sidecar(bag),
+			{"dataset_kind": "coda", "sequence": "0", "start_frame": 0, "frame_count": 1000, "fps": 10.0, "time_origin": 1673884185.589118},
+		)
+		self.assertEqual(sorted(p.name for p in (self.coda / bag).iterdir()), ["daaam_replay.json", "metadata.yaml"], "no temporary file is left")
+		self.assertIn("daaam_replay.json", result.stdout)
+
+	def test_a_bag_to_the_end_of_the_sequence_records_the_remaining_frames(self) -> None:
+		result = self._run("make_coda_bag.sh", "500", "0", "tail")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		sidecar = self._sidecar("tail_20260101_000001.bag")
+		self.assertEqual((sidecar["start_frame"], sidecar["frame_count"]), (500, 7713))
+
+	def test_an_unclosed_bag_gets_no_sidecar(self) -> None:
+		result = self._run("make_coda_bag.sh", "0", "10", FAKE_NO_METADATA="1")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertEqual(list(self.coda.rglob("daaam_replay.json")), [])
+
+	def test_a_range_beyond_the_sequence_is_rejected_before_recording(self) -> None:
+		for args in (("8213", "1"), ("8000", "500"), ("9000", "0")):
+			result = self._run("make_coda_bag.sh", *args)
+			self.assertEqual(result.returncode, 2, (args, result.stdout + result.stderr))
+			self.assertIn("8213 frames", result.stderr)
+		self.assertEqual(self._calls(), "")
+
+	def test_without_the_sequence_timestamps_no_bag_is_recorded(self) -> None:
+		(self.coda / "timestamps" / "0.txt").unlink()
+		result = self._run("make_coda_bag.sh", "0", "10")
+		self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+		self.assertIn("timestamps/0.txt", result.stderr)
+		self.assertEqual(self._calls(), "")
 
 	def test_the_whole_sequence_has_no_end_frame(self) -> None:
 		result = self._run("make_coda_bag.sh")
@@ -118,6 +164,7 @@ class MakeCodaBagTest(CodaScriptTest):
 		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 		self.assertIn("No complete bag", result.stderr)
 		self.assertNotIn("Bag:", result.stdout)
+		self.assertFalse((old / "daaam_replay.json").exists(), "an older bag of the same name gets no sidecar")
 
 
 class RunCodaChunksTest(CodaScriptTest):
@@ -134,7 +181,7 @@ class RunCodaChunksTest(CodaScriptTest):
 			#!/usr/bin/env bash
 			echo "bag $*" >> "$CALLS"
 			dir="$CODA_ROOT_DIR/$3_20260101_000001.bag"
-			if [ "${FAKE_NO_BAG:-}" != "$3" ]; then mkdir -p "$dir" && : > "$dir/metadata.yaml"; fi
+			if [ "${FAKE_NO_BAG:-}" != "$3" ]; then mkdir -p "$dir" && : > "$dir/metadata.yaml" && echo '{}' > "$dir/daaam_replay.json"; fi
 			""",
 		)
 		# run_coda_example.sh: records its environment, writes a launch.log with 5 processed frames and names the result
@@ -190,17 +237,28 @@ class RunCodaChunksTest(CodaScriptTest):
 		bag = self.coda / "coda_0_f0-5_20250101_000000.bag"
 		bag.mkdir()
 		(bag / "metadata.yaml").write_text("", encoding="utf-8")
+		(bag / "daaam_replay.json").write_text("{}", encoding="utf-8")
 		self._run("run_coda_chunks.sh", "2")
 		calls = self._calls()
 		self.assertNotIn("bag 0 5 coda_0_f0-5", calls)
 		self.assertIn(f"run bag={bag} ", calls)
 		self.assertIn("bag 5 5 coda_0_f5-10", calls)
 
+	def test_a_bag_recorded_before_the_replay_sidecar_is_recorded_again(self) -> None:
+		old = self.coda / "coda_0_f0-5_20250101_000000.bag"
+		old.mkdir()
+		(old / "metadata.yaml").write_text("", encoding="utf-8")
+		self._run("run_coda_chunks.sh", "2")
+		calls = self._calls()
+		self.assertIn("bag 0 5 coda_0_f0-5\n", calls)
+		self.assertNotIn(f"run bag={old} ", calls)
+
 	def test_a_bag_of_another_frame_range_is_not_reused(self) -> None:
 		# 2 chunks of 5 frames: a complete bag of frames 0-4 (another split) must not stand in for frames 0-5
 		bag = self.coda / "coda_0_f0-4_20250101_000000.bag"
 		bag.mkdir()
 		(bag / "metadata.yaml").write_text("", encoding="utf-8")
+		(bag / "daaam_replay.json").write_text("{}", encoding="utf-8")
 		self._run("run_coda_chunks.sh", "2")
 		self.assertIn("bag 0 5 coda_0_f0-5\n", self._calls())
 
@@ -395,6 +453,121 @@ class RunCodaExampleBagNameTest(CodaScriptTest):
 		self.assertIn("WARNING", self._run("run_coda_example.sh", str(short), LONG_BAG_FRAMES="1000").stderr)
 		long_bag = self._bag_with_frames(8213, "long.bag")
 		self.assertNotIn("WARNING", self._run("run_coda_example.sh", str(long_bag), LONG_BAG_FRAMES="10000").stderr)
+
+
+class RunCodaExampleReplayTest(CodaScriptTest):
+	"""After the run, the result created by this invocation gets a one-snapshot replay bundle from its final graph."""
+
+	NEW = "output/coda/out_20261017_000001"
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.flag = self.root / "bag-played"
+		self._write_executable(self.root / "fakebin" / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+		self._write_executable(
+			self.root / "fakebin" / "ros2",
+			"""
+			#!/usr/bin/env bash
+			echo "ros2 $*" >> "$CALLS"
+			case "$1 $2" in
+			"launch daaam_ros")
+				echo "ROS components initialized"
+				/bin/sleep 0.1   # the run takes time: its result is newer than the marker taken before the launch
+				if [ "${FAKE_NO_RESULT:-0}" != 1 ]; then mkdir -p output/coda/out_20261017_000001 && echo '{}' > output/coda/out_20261017_000001/dsg.json; fi
+				for i in $(seq 1 200); do [ -f "$FLAG" ] && break; /bin/sleep 0.05; done
+				exit "${FAKE_LAUNCH_RC:-0}"
+				;;
+			"service call") : > "$FLAG" ;;
+			esac
+			exit 0
+			""",
+		)
+		self._write_executable(
+			self.root / "fakebin" / "python",
+			"""
+			#!/usr/bin/env bash
+			echo "python $*" >> "$CALLS"
+			if [ "$1" = scripts/replay.py ] && [ "$2" = finalize ]; then
+			out=""; prev=""
+			for a in "$@"; do if [ "$prev" = --out ]; then out="$a"; fi; prev="$a"; done
+			[ "${FAKE_FINALIZE_RC:-0}" = 0 ] || exit "${FAKE_FINALIZE_RC}"
+			mkdir -p "$out" && : > "$out/manifest.json"
+			fi
+			exit 0
+			""",
+		)
+		self.older = self.root / "data" / "output" / "coda" / "out_20261016_000000"
+		self.older.mkdir(parents=True)
+		(self.older / "dsg.json").write_text("{}", encoding="utf-8")
+		os.utime(self.older, (1000, 1000))
+		# the name says frames 5-9: the sidecar, not the name, says what the bag holds
+		self.bag = self.coda / "coda_0_f5-9_20260101_000001.bag"
+		self.bag.mkdir()
+		(self.bag / "metadata.yaml").write_text("", encoding="utf-8")
+
+	def _sidecar(self, value=None) -> None:
+		(self.bag / "daaam_replay.json").write_text(json.dumps(SIDECAR if value is None else value), encoding="utf-8")
+
+	def _run_example(self, **env: str) -> subprocess.CompletedProcess:
+		return self._run("run_coda_example.sh", str(self.bag), FLAG=str(self.flag), **env)
+
+	def _finalize_calls(self) -> list:
+		return [line for line in self._calls().splitlines() if "scripts/replay.py finalize" in line]
+
+	def test_the_new_result_is_finalized_with_the_sidecar_metadata(self) -> None:
+		self._sidecar()
+		result = self._run_example()
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		calls = self._finalize_calls()
+		self.assertEqual(len(calls), 1, self._calls())
+		call = calls[0]
+		self.assertIn(f"--graph {self.NEW}/dsg.json --run {self.NEW}", call)
+		self.assertIn("--dataset-kind coda --sequence 0", call)
+		self.assertIn(f"--dataset {self.coda}", call)
+		self.assertIn("--fps 10.0 --time-origin 1673884185.589118", call)
+		self.assertIn("--start-frame 821 --frame-count 821", call)
+		self.assertIn(f"--out {self.NEW}/replay", call)
+		self.assertTrue((self.root / self.NEW / "replay" / "manifest.json").is_file())
+		self.assertFalse((self.older / "replay").exists(), "an older result never gets the bundle")
+		self.assertIn(f"Results: {self.NEW}", result.stdout)
+		self.assertIn("just replay-web", result.stdout)
+
+	def test_a_bag_without_a_sidecar_keeps_the_result_and_fails_the_artifact(self) -> None:
+		result = self._run_example()
+		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertEqual(self._finalize_calls(), [])
+		self.assertTrue((self.root / self.NEW / "dsg.json").is_file())
+		self.assertFalse((self.root / self.NEW / "replay").exists())
+		self.assertIn("daaam_replay.json", result.stderr)
+		self.assertIn("just coda-bag", result.stderr)
+		self.assertIn(f"Results: {self.NEW}", result.stdout, "the mapping result is still reported")
+
+	def test_a_malformed_sidecar_is_not_used(self) -> None:
+		self._sidecar({**SIDECAR, "dataset_kind": "tum"})
+		result = self._run_example()
+		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertEqual(self._finalize_calls(), [])
+		self.assertIn("daaam_replay.json", result.stderr)
+
+	def test_without_a_new_result_nothing_is_attached_to_an_older_one(self) -> None:
+		self._sidecar()
+		result = self._run_example(FAKE_NO_RESULT="1")
+		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertEqual(self._finalize_calls(), [])
+		self.assertFalse((self.older / "replay").exists())
+		self.assertNotIn("Results:", result.stdout)
+
+	def test_a_failed_pipeline_keeps_its_exit_code(self) -> None:
+		self._sidecar()
+		result = self._run_example(FAKE_LAUNCH_RC="4")
+		self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+
+	def test_a_failed_finalize_fails_the_artifact_but_keeps_the_result(self) -> None:
+		self._sidecar()
+		result = self._run_example(FAKE_FINALIZE_RC="1")
+		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertTrue((self.root / self.NEW / "dsg.json").is_file())
+		self.assertIn(f"Results: {self.NEW}", result.stdout)
 
 
 if __name__ == "__main__":

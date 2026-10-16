@@ -45,7 +45,7 @@ tum-list:
 tum-fetch +names:
     docker compose run --rm -T -e https_proxy={{ proxy }} daaam-ws python scripts/fetch_tum.py get {{ names }}
 
-# 使用 TUM RGB-D 数据快速端到端测试；默认 30 帧、不带 DAM，生成 replay.html 和 replay.rrd；seq 选序列(just tum-list)
+# 使用 TUM RGB-D 数据快速端到端测试；默认 30 帧、不带 DAM，生成 replay/ 回看数据包(用 just replay-web 打开)和 replay.rrd；seq 选序列(just tum-list)
 tum-test frames="30" seq="fr1_desk":
     docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_rrd_test{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e EXTRA_OVERRIDES=workers.num_grounding_workers=0 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }} 15
 
@@ -53,9 +53,9 @@ tum-test frames="30" seq="fr1_desk":
 live-test seq="fr1_desk":
     docker compose run --rm -T -e KEEP_VIEWER=0 -e SEQ={{ seq }} -e NAME=tum_live_test{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e EXTRA_OVERRIDES=workers.num_grounding_workers=0 daaam-ws bash scripts/run_live_preview.sh 120 15
 
-# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay.html 和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
+# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay/ 回看数据包(用 just replay-web 打开)和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
 tum-run frames="298" seq="fr1_desk":
-    @marker=$(mktemp); docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e REPLAY_EVERY=5 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }}; rc=$?; page=$(find output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -name replay.html -newer "$marker" 2>/dev/null | head -n 1); rm -f "$marker"; if [ -n "$page" ]; then rrd=$(dirname "$page")/replay.rrd; echo; echo "回看网页: $PWD/$page"; printf '在 Windows 里打开(资源管理器或浏览器地址栏): \\\\wsl.localhost\\%s%s\n' "$WSL_DISTRO_NAME" "$(echo "$PWD/$page" | tr / '\\')"; if [ -f "$rrd" ]; then echo "Rerun 录制: $PWD/$rrd"; echo "播放命令: just rerun-play '$rrd'"; fi; fi; exit $rc
+    @marker=$(mktemp); docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e REPLAY_EVERY=5 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }}; rc=$?; result=$(find output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -mindepth 1 -maxdepth 1 -type d -name 'out_*' -newer "$marker" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-); rm -f "$marker"; if [ -n "$result" ]; then echo; echo "结果目录: $PWD/$result"; if [ -f "$result/replay/manifest.json" ]; then echo "回看: just replay-web(在页面的结果列表里打开它,或输入上面的目录)"; fi; if [ -f "$result/replay.rrd" ]; then echo "Rerun 录制: $PWD/$result/replay.rrd"; echo "播放命令: just rerun-play '$result/replay.rrd'"; fi; fi; exit $rc
 
 # 后处理指定 TUM 环境最近一次 tum-run 结果:对象句子嵌入 → 地点聚类成区域;runs 可写一个或多个 out_<时间> 目录名
 tum-post seq="fr1_desk" *runs: _coda-guard

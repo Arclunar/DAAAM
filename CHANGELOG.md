@@ -10,6 +10,11 @@ All notable changes to this project are documented in this file.
 - Added the versioned replay bundle contract (`scripts/replay_web/manifest.py`, schema 1). A mapping result is openable in the replay workspace only when its `replay/manifest.json` is finalized and valid: required keys and types are checked without silent defaults, chunks must cover the snapshots in order with matching sizes (digests on request), and every chunk, image and reference member must be a normalized relative path that stays inside the bundle after following symlinks. JSON state is written through a temporary sibling and an atomic rename. `tests/test_replay_manifest.py` covers the schema and the path-traversal boundary.
 - Added `TODO_UNIFIED_REPLAY_WORKSPACE.md`, a complete AI handoff for the approved single-entry replay workspace. It records the current implementation status, authoritative design and plan commits, settled TUM/CODa bundle and service contracts, hot-reload/job/Agent safety boundaries, phased checklist, verification expectations and the supersession of per-result HTML assumptions.
 
+### Changed
+
+- New mapping results no longer contain a generated `replay.html`. `scripts/run_replay.sh` (`just tum-run`, `just tum-test`) finalizes `RUN/replay/` with the explicit dataset kind `tum` and the run's sequence and prints the result directory and `just replay-web` instead of a file path; `just tum-run` reports only a result created by its own invocation. Old self-contained pages are intentionally not supported by the new workspace.
+- `scripts/make_coda_bag.sh` (`just coda-bag`) checks the requested frame range against `timestamps/0.txt` before recording and, once the bag is closed, atomically writes `daaam_replay.json` into it (dataset kind, sequence, first frame, frame count, 10 Hz, time origin). `scripts/run_coda_example.sh` (`just coda-run`) finalizes a one-snapshot replay bundle from the final `dsg.json` of the result created by its own run, using that sidecar rather than the bag name; a bag without the sidecar keeps its mapping result but exits with status 3 and prints the `just coda-bag` command that records a supported bag. `scripts/run_coda_chunks.sh` reuses only bags that carry the sidecar and records older ones again.
+
 ## 2026-10-16
 
 ### Added

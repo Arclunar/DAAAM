@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Run the TUM example without RViz while the scene graph is recorded, then build two timed review artifacts: a
-# self-contained WebGL page and a native Rerun recording (output/<NAME>/out_*/replay.{html,rrd}).
+# Run the TUM example without RViz while the scene graph is recorded, then finalize two timed review artifacts: the
+# versioned replay data bundle (output/<NAME>/out_*/replay/, opened in the replay workspace started by `just replay-web`)
+# and a native Rerun recording (output/<NAME>/out_*/replay.rrd). No HTML page is written into the result.
 #
 # Inside the daaam-ws container:
 #   docker compose run --rm -T daaam-ws bash scripts/run_replay.sh [MAX_FRAMES] [TARGET_FPS]
 #   docker compose run --rm -T daaam-ws bash scripts/run_replay.sh 298
 #
-# The page also shows the RGB and depth image of each moment (from DATASET, FPS: as in scripts/run_tum_example.sh).
-# The arguments and the environment overrides are those of scripts/run_tum_example.sh. Environment: ZMQ_URL (default
-# tcp://127.0.0.1:8001), REPLAY_EVERY (keep every n-th scene graph, default 5; about one is published per frame),
-# REPLAY_KEEP=1 (keep the raw recording in output/<NAME>/.replay-recording, to rebuild the page with scripts/replay.py).
+# The bundle also holds the RGB and depth image of each moment and the exact DAM source frames (from DATASET, FPS: as in
+# scripts/run_tum_example.sh). The arguments and the environment overrides are those of scripts/run_tum_example.sh.
+# Environment: ZMQ_URL (default tcp://127.0.0.1:8001), REPLAY_EVERY (keep every n-th scene graph, default 5; about one is
+# published per frame), REPLAY_KEEP=1 (keep the raw recording in output/<NAME>/.replay-recording, to finalize the bundle
+# again with `python scripts/replay.py finalize`).
 #
-# 1 cm reference mesh: after the mapping run (so it costs the run no speed) the page gets a static Open3D TSDF mesh of the
+# 1 cm reference mesh: after the mapping run (so it costs the run no speed) the bundle gets a static Open3D TSDF mesh of the
 # whole dataset (scripts/build_reference_mesh.py; cached in <DATASET>/.daaam/reference_mesh/, built once, reused by every later
-# replay of the same dataset) that it can show instead of Hydra's mesh. REFERENCE_MESH=auto (default) reuses a valid cache or
-# builds it, and still produces the dynamic-only page when that fails (Open3D missing, read-only dataset: see below);
-# off skips it; rebuild replaces the cache, and a failure then makes the whole run fail. REFERENCE_MESH_CACHE=DIR keeps the
-# cache files in DIR instead (a read-only dataset; one directory per dataset). The Rerun recording is not affected.
+# replay of the same dataset) that the viewer can show instead of Hydra's mesh. REFERENCE_MESH=auto (default) reuses a valid
+# cache or builds it, and still produces the dynamic-only bundle when that fails (Open3D missing, read-only dataset: see
+# below); off skips it; rebuild replaces the cache, and a failure then makes the whole run fail. REFERENCE_MESH_CACHE=DIR
+# keeps the cache files in DIR instead (a read-only dataset; one directory per dataset). The Rerun recording is not affected.
 set -eo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -59,9 +61,9 @@ fi
 
 run_dir="$(find "output/${NAME}" -mindepth 1 -maxdepth 1 -type d -name 'out_*' -newer "${run_marker}" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"
 rm -f "${run_marker}"
-dataset_args=()
+dataset_args=(--fps "${FPS}")
 if [ -d "${DATASET}/rgb" ]; then
-  dataset_args=(--dataset "${DATASET}" --fps "${FPS}")  # the page then shows the RGB and depth image of each moment
+  dataset_args=(--dataset "${DATASET}" --fps "${FPS}")  # the bundle then holds the RGB and depth image of each moment
 fi
 if [ -n "${run_dir}" ]; then
   reference_args=()
@@ -76,12 +78,16 @@ if [ -n "${run_dir}" ]; then
       echo "REFERENCE_MESH=rebuild: the 1 cm reference mesh could not be built" >&2
       [ "${rc}" -ne 0 ] || rc=1
     else
-      echo "1 cm reference mesh unavailable; building the dynamic-only replay (REFERENCE_MESH=off silences this)" >&2
+      echo "1 cm reference mesh unavailable; finalizing the dynamic-only replay (REFERENCE_MESH=off silences this)" >&2
     fi
   fi
-  if python scripts/replay.py build "${RECORDING}" --run "${run_dir}" --title "${NAME} / $(basename "${run_dir}")" "${dataset_args[@]}" "${reference_args[@]}" --out "${run_dir}/replay.html" \
+  if python scripts/replay.py finalize "${RECORDING}" \
+      --run "${run_dir}" --dataset-kind tum --sequence "${SEQ}" \
+      --title "${NAME} / $(basename "${run_dir}")" \
+      "${dataset_args[@]}" "${reference_args[@]}" --out "${run_dir}/replay" \
     && python scripts/replay.py rrd "${RECORDING}" --run "${run_dir}" --fps "${FPS}" --out "${run_dir}/replay.rrd"; then
-    echo "Review page: ${run_dir}/replay.html"
+    echo "Result: ${run_dir}"
+    echo "Replay bundle: ${run_dir}/replay (open it with: just replay-web)"
     echo "Rerun recording: ${run_dir}/replay.rrd"
 	  if [ "${rc}" -eq 0 ] && [ "${recorder_rc}" -eq 0 ]; then
 	    [ "${REPLAY_KEEP:-0}" = 1 ] || rm -rf "${RECORDING}"
@@ -89,7 +95,7 @@ if [ -n "${run_dir}" ]; then
 	    echo "Replay artifacts may be partial; raw snapshots kept at ${RECORDING}" >&2
 	  fi
   else
-    echo "Failed to build one or more replay artifacts; raw snapshots kept at ${RECORDING}" >&2
+    echo "Failed to finalize one or more replay artifacts; raw snapshots kept at ${RECORDING}" >&2
     [ "${rc}" -ne 0 ] || rc=1
   fi
 else

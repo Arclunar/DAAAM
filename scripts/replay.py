@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Review a mapping run without RViz: record the scene graph while Hydra builds it, then build one web page with a time
-slider from the recording.
+"""Review a mapping run without RViz: record the scene graph while Hydra builds it, then finalize the recording into the
+run's replay data bundle, which the replay workspace (`just replay-web`, the repository's single replay.html) plays.
 
 Hydra publishes the whole scene graph (mesh included) over ZMQ after every backend update, about once per frame; that
-stream is what RViz shows. `record` subscribes to it and keeps every n-th graph as a compact snapshot. `build` turns the
-snapshots into a self-contained HTML file (data inlined, WebGL rendering, no server and no internet access needed) with
-a progress bar to drag; `rrd` writes the same timed snapshots to a native Rerun recording. Subscribing costs the pipeline
+stream is what RViz shows. `record` subscribes to it and keeps every n-th graph as a compact snapshot. `finalize` turns
+the snapshots into RUN/replay/ (scripts/replay_bundle.py: bounded gzip timeline chunks, camera and DAM source images, a
+manifest written last); `rrd` writes the same timed snapshots to a native Rerun recording. Subscribing costs the pipeline
 nothing measurable; RViz is what slows a live run down.
 
-scripts/run_replay.sh does all of this around a pipeline run. By hand:
+scripts/run_replay.sh does all of this around a TUM pipeline run. By hand:
 	python scripts/replay.py record --out /tmp/rec [--zmq-url tcp://127.0.0.1:8001] [--every 5]   # stop with Ctrl-C
-	python scripts/replay.py build /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --dataset datasets/tum_fr1_desk --out replay.html
+	python scripts/replay.py finalize /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --dataset-kind tum --sequence fr1_desk \
+		--dataset datasets/tum_fr1_desk --fps 15 --out output/NAME/out_YYYYMMDD_HHMMSS/replay
 	python scripts/replay.py rrd /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --out replay.rrd
-With --dataset the page also shows the RGB and depth image of the frame the pipeline had processed at each moment.
-With --reference-mesh CACHE.npz (written by scripts/build_reference_mesh.py, the 1 cm Open3D TSDF reference mesh of the
-whole dataset) the page can switch between that static mesh and Hydra's time-varying one; it is embedded once, in a
-payload of its own. Open3D is not needed to embed a cache.
+A run without a recording (CODa) is finalized from its final graph: `finalize --graph RUN/dsg.json --dataset-kind coda
+--sequence 0 --start-frame S --frame-count N ...` (scripts/run_coda_example.sh passes the bag's daaam_replay.json).
+With --dataset the bundle also holds the RGB and depth image of the frame the pipeline had processed at each moment and the
+exact frames DAM described objects from. With --reference-mesh CACHE.npz (written by scripts/build_reference_mesh.py, the
+1 cm Open3D TSDF reference mesh of the whole dataset) the viewer can switch between that static mesh and Hydra's
+time-varying one; it is stored once, as a member of its own. Open3D is not needed to use a cache.
 """
 
 import argparse
@@ -737,7 +740,7 @@ def main() -> int:
 	p.add_argument("--every", type=int, default=5, help="keep every n-th graph (about one is published per frame)")
 	p.set_defaults(func=record)
 
-	p = sub.add_parser("build", help="turn a recording into a self-contained HTML page")
+	p = sub.add_parser("build", help="legacy self-contained HTML page (being replaced by finalize and the replay workspace)")
 	p.add_argument("recording", help="directory written by `record`")
 	p.add_argument("--run", help="pipeline output directory of the run (object descriptions are read from its corrections.yaml)")
 	p.add_argument("--out", default="replay.html")
