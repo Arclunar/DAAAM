@@ -7,7 +7,9 @@ temporary directory, and prints one JSON line {"base": URL, "root": DIR} when it
 is one JSON command and gets one JSON reply line ({"error": ...} on failure); the commands build replay bundles with
 the real finalizer and change files the way a pipeline or a processing job would (scene graph files are published by
 atomic rename, as the processing scripts do). Processing jobs run on a fake process runner instead of docker: the
-commands job_emit / job_finish play the part of the container. End of input stops the service and deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
+commands job_emit / job_finish play the part of the container. Questions are answered by a scripted fake of the Agent
+worker (agent_answer / agent_hold / agent_release / agent_fail / agent_key / agent_requests / agent_reset): no model, no
+docker, and the API keys the service looks for are placeholders that agent_key can take away. End of input stops the service and deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
 """
 
 import json
@@ -27,6 +29,7 @@ import numpy as np
 from scripts.replay_bundle import BundleOptions, finalize_bundle
 from scripts.replay_web.jobs import JobManager
 from scripts.replay_web.server import ServerConfig, create_server
+from tests.replay_agent_fakes import ScriptedAgent
 from tests.replay_fixtures import write_graph
 from tests.test_replay_jobs import FakeRunner
 
@@ -237,8 +240,25 @@ def main() -> int:
 	root = Path(tempfile.mkdtemp(prefix="daaam-replay-browser-"))
 	fixtures = Fixtures(root)
 	jobs = FakeJobs(root)
+	agent = ScriptedAgent()
+	keys = {"OPENAI_API_KEY": "placeholder-for-the-fixture-service", "ANTHROPIC_API_KEY": "placeholder-for-the-fixture-service"}
 	server = create_server(ServerConfig(repo_root=REPO, output_root=fixtures.output, state_root=root / "state",
-		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0, graph_interval=0.2), jobs=jobs.manager)
+		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0, graph_interval=0.2, agent_models=("gpt-5-mini", "claude-sonnet-4-5"),
+		stage_root=root / "stage"), jobs=jobs.manager, agent=agent)
+	server.service.chat.environ = keys   # the keys the chat sees are the test's, not this machine's environment or .env
+	server.service.chat.repo_root = root   # (only their presence is ever looked at)
+
+	def set_key(present: bool, variable: str = "OPENAI_API_KEY") -> Dict[str, Any]:
+		if present:
+			keys[variable] = "placeholder-for-the-fixture-service"
+		else:
+			keys.pop(variable, None)
+		return {}
+
+	def reset_agent() -> Dict[str, Any]:
+		agent.reset()
+		set_key(True)
+		return set_key(True, "ANTHROPIC_API_KEY")
 	thread = threading.Thread(target=server.serve_forever, daemon=True)
 	thread.start()
 	commands: Dict[str, Callable[..., Dict[str, Any]]] = {
@@ -254,6 +274,13 @@ def main() -> int:
 		"job_finish": jobs.finish,
 		"job_api_key": jobs.set_api_key,
 		"job_reset": jobs.reset,
+		"agent_requests": lambda: {"requests": agent.asked()},
+		"agent_answer": lambda text: (setattr(agent, "answer", lambda request: text), {})[1],
+		"agent_hold": lambda: (agent.hold(), {})[1],
+		"agent_release": lambda: (agent.release(), {})[1],
+		"agent_fail": lambda mode=None: (agent.fail(mode), {})[1],
+		"agent_key": set_key,
+		"agent_reset": reset_agent,
 	}
 
 	def reply(value: Dict[str, Any]) -> None:

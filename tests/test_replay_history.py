@@ -112,9 +112,15 @@ class PersistenceTest(HistoryTestCase):
 		store.append_user("q", model=MODEL, graph=RAW)
 
 		error = store.append_error("the model is unavailable", model=MODEL, graph=RAW)
+		coded = store.append_error("no key", code="provider-auth")
 
-		self.assertEqual([m.role for m in store.messages()], ["user", "error"])
-		self.assertEqual((error.model, error.graph_name), (MODEL, "dsg.json"))
+		self.assertEqual([m.role for m in store.messages()], ["user", "error", "error"])
+		self.assertEqual((error.model, error.graph_name, error.context), (MODEL, "dsg.json", None))
+		self.assertEqual((coded.context, coded.model, coded.graph_name), ({"code": "provider-auth"}, None, None))
+		self.assertEqual(self.store().messages()[-1], coded)
+		for bad in ("", "Provider Auth", "x" * 80, 7):
+			with self.assertRaises(HistoryError):
+				store.append_error("x", code=bad)
 
 	def test_nothing_is_created_for_a_result_nobody_asked_about(self):
 		store = self.store()
@@ -417,10 +423,44 @@ class ContextTest(HistoryTestCase):
 
 		self.assertEqual(store.context_messages(), [
 			{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
-			{"role": "user", "content": "q2"},
 			{"role": "user", "content": "q3"}, {"role": "assistant", "content": "a3"},
-		])
+		], "q2 failed: it stays in the history but is not part of the conversation")
 		self.assertNotIn("summary", json.loads((store.directory / "meta.json").read_text(encoding="utf-8")))
+
+	def test_a_question_that_got_no_answer_is_not_part_of_the_conversation(self):
+		store = self.store()
+		self.exchange(store, "q1", "a1")
+		store.append_user("failed once", model=MODEL, graph=UPDATED)
+		store.append_error("provider down", model=MODEL, graph=UPDATED)
+		store.append_user("failed twice", model=MODEL, graph=UPDATED)
+		store.append_error("provider down", model=MODEL, graph=UPDATED)
+		self.exchange(store, "the retry", "answered")
+		store.append_user("still unanswered", model=MODEL, graph=UPDATED)   # asked last, no answer yet
+
+		turns = store.context_messages()
+
+		self.assertEqual([turn["content"] for turn in turns], ["q1", "a1", "the retry", "answered"])
+
+	def test_a_boundary_between_a_question_and_its_answer_does_not_hide_the_answer(self):
+		store = self.store()
+		store.append_user("q1", model=MODEL, graph=RAW)
+		store.append_boundary(UPDATED)
+		store.append_assistant("a1", model=MODEL, graph=UPDATED)
+
+		self.assertEqual([turn["content"] for turn in store.context_messages()], ["q1", "a1"])
+
+	def test_the_window_holds_at_most_a_fixed_number_of_turns(self):
+		store = self.store()
+		with mock.patch.object(history.os, "fsync"):
+			for number in range(400):
+				self.exchange(store, "q%d" % number, "a%d" % number)
+
+		turns = store.context_messages()
+
+		self.assertLessEqual(len(turns), history.WINDOW_TURNS + 1, "the turns plus one summary")
+		self.assertEqual(turns[-1], {"role": "assistant", "content": "a399"})
+		self.assertTrue(turns[0]["content"].startswith("Earlier conversation summary:"))
+		self.assertEqual(turns[1]["role"], "user")
 
 	def long_history(self, count=200, graphs=(RAW, UPDATED, SUMMARIZED), question="Q%03d " + "where? " * 40, answer="A%03d " + "here. " * 120):
 		store = self.store()

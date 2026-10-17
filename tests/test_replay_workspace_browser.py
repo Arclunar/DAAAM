@@ -504,5 +504,261 @@ class WorkspaceTasksBrowserTest(WorkspaceBrowserTestCase):
 		self.assertEqual(severe_logs(self.driver), [])
 
 
+@unittest.skipUnless(RUN_BROWSER_TESTS, "set RUN_BROWSER_TESTS=1 to run the real-browser workspace tests")
+class WorkspaceChatBrowserTest(WorkspaceBrowserTestCase):
+	"""The question panel of a result tab. The Agent worker is a scripted fake: the test decides what it answers and when."""
+
+	PANE = "section.result-pane:not([hidden])"
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.fixtures.call("agent_reset")
+		self.fixtures.call("job_reset")
+		self.addCleanup(lambda: self.fixtures.call("agent_reset"))
+		self.addCleanup(lambda: self.fixtures.call("job_reset"))
+		self.result = self.fixtures.call("make_result", name="chat_tum", kind="tum", sequence="fr1_desk")["path"]
+		self.fixtures.call("write_graph", path=self.result, name="dsg_updated.json", objects=[7, 8])
+
+	def open_chat(self, path: Optional[str] = None) -> None:
+		self.open_workspace()
+		self.open_result(path or self.result)
+		self.show_chat()
+
+	def show_chat(self) -> None:
+		self.wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=chat]"))
+		self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=chat]").click()
+
+	def control(self, role: str):
+		return self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-role={role}]")
+
+	def text(self, role: str) -> str:
+		return self.control(role).text
+
+	def wait_ready(self) -> None:
+		self.wait.until(lambda d: self.control("chat-status").text == "可以提问")
+
+	def rows(self):
+		return self.script("""
+			return [...document.querySelectorAll('section.result-pane:not([hidden]) [data-role=chat-messages] > *')].map((row) => ({
+				role: row.dataset.messageRole || (row.dataset.role === 'chat-boundary-pending' ? 'pending' : 'empty'),
+				head: (row.querySelector('.chat-message__head') || {}).textContent || '',
+				text: (row.querySelector('.chat-message__body') || row).textContent,
+			})).filter((row) => row.role !== 'empty');
+		""")
+
+	def roles(self):
+		return [row["role"] for row in self.rows()]
+
+	def wait_for_roles(self, expected) -> None:
+		self.wait.until(lambda d: self.roles() == expected)
+
+	def ask(self, question: str) -> None:
+		field = self.control("chat-input")
+		field.clear()
+		field.send_keys(question)
+		self.wait.until(lambda d: self.control("chat-send").is_enabled())
+		self.control("chat-send").click()
+
+	def asked(self):
+		return self.fixtures.call("agent_requests")["requests"]
+
+	def test_a_question_is_answered_and_a_follow_up_carries_the_conversation(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.assertFalse(self.control("chat-send").is_enabled(), "nothing to send yet")
+		self.assertEqual(self.control("chat-model").get_attribute("value"), "gpt-5-mini")
+		self.assertTrue(self.control("chat-context").is_selected(), "the current view goes along by default")
+		self.ask("桌子旁边有什么?")
+		self.wait_for_roles(["user", "assistant"])
+		rows = self.rows()
+		self.assertEqual(rows[0]["text"], "桌子旁边有什么?")
+		self.assertEqual(rows[1]["text"], "答复 1:桌子旁边有什么?(收到 0 条历史)")
+		self.assertIn("gpt-5-mini", rows[1]["head"])
+		self.assertIn("dsg_updated.json", rows[1]["head"], "an answer names the scene graph it was computed against")
+		self.wait.until(lambda d: self.control("chat-status").text == "可以提问")
+		self.ask("它是什么颜色?")
+		self.wait_for_roles(["user", "assistant", "user", "assistant"])
+		self.assertIn("收到 2 条历史", self.rows()[3]["text"])
+		requests = self.asked()
+		self.assertEqual(requests[1]["conversation"], [
+			{"role": "user", "content": "桌子旁边有什么?"}, {"role": "assistant", "content": "答复 1:桌子旁边有什么?(收到 0 条历史)"},
+		])
+		self.assertEqual((requests[0]["model"], requests[0]["dataset"]["kind"]), ("gpt-5-mini", "tum"))
+		self.driver.refresh()   # the conversation belongs to the result: it is still there after a reload
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"))
+		self.wait_for_tabs(1)
+		self.show_chat()
+		self.wait_for_roles(["user", "assistant", "user", "assistant"])
+		self.assertEqual(self.rows()[2]["text"], "它是什么颜色?")
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_two_results_keep_separate_conversations_and_clearing_one_leaves_the_other(self) -> None:
+		other = self.fixtures.call("make_result", name="chat_coda", kind="coda", sequence="0", outside=True)["path"]
+		self.fixtures.call("write_graph", path=other, name="dsg_updated.json", objects=[7, 8])
+		self.open_chat()
+		self.wait_ready()
+		self.ask("first result question")
+		self.wait_for_roles(["user", "assistant"])
+		self.open_result(other)
+		self.show_chat()
+		self.wait_ready()
+		self.assertEqual(self.roles(), [], "another result starts with an empty conversation")
+		self.ask("second result question")
+		self.wait_for_roles(["user", "assistant"])
+		self.assertEqual(self.asked()[1]["conversation"], [], "the first result's questions are not sent for the second")
+		self.assertEqual(self.asked()[1]["dataset"]["kind"], "coda")
+		self.tab_for(self.result).click()
+		self.show_chat()
+		self.wait.until(lambda d: self.rows() and self.rows()[0]["text"] == "first result question")
+		self.control("chat-clear").click()
+		self.assertTrue(self.control("chat-confirm").is_displayed(), "clearing asks first")
+		self.control("chat-clear-no").click()
+		self.assertEqual(self.roles(), ["user", "assistant"])
+		self.control("chat-clear").click()
+		self.control("chat-clear-yes").click()
+		self.wait_for_roles([])
+		self.tab_for(other).click()
+		self.show_chat()
+		self.wait.until(lambda d: self.rows() and self.rows()[0]["text"] == "second result question")
+		self.assertEqual(self.roles(), ["user", "assistant"])
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_a_new_graph_version_shows_a_boundary_and_the_next_answer_names_it(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.ask("before the change")
+		self.wait_for_roles(["user", "assistant"])
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.wait.until(lambda d: "pending" in self.roles())
+		pending = [row for row in self.rows() if row["role"] == "pending"][0]
+		self.assertIn("dsg_updated.json", pending["text"])
+		self.assertIn("clustered_dsg.json", pending["text"])
+		self.wait.until(lambda d: self.control("chat-status").text == "可以提问")
+		self.ask("after the change")
+		self.wait_for_roles(["user", "assistant", "boundary", "user", "assistant"])
+		rows = self.rows()
+		self.assertIn("clustered_dsg.json", rows[2]["text"])
+		self.assertIn("dsg_updated.json", rows[1]["head"], "the old answer keeps its own provenance")
+		self.assertIn("clustered_dsg.json", rows[4]["head"])
+		self.assertNotEqual(self.asked()[0]["graph_version"], self.asked()[1]["graph_version"])
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_the_current_view_goes_along_only_while_the_box_is_checked(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.script("window.replayDebug.selectEntity('object', 7)")
+		self.ask("what is this?")
+		self.wait_for_roles(["user", "assistant"])
+		context = self.asked()[0]["context"]
+		self.assertIsInstance(context["replay_time"], (int, float))
+		self.assertEqual(sorted(context["camera"]), ["distance", "pitch", "target", "yaw"])
+		self.assertTrue(context["selected_entity"].startswith("object 7: "), context)
+		self.assertIn("含当前视图", self.rows()[0]["head"])
+		self.wait.until(lambda d: self.control("chat-status").text == "可以提问")
+		self.control("chat-context").click()
+		self.assertFalse(self.control("chat-context").is_selected())
+		self.ask("and now?")
+		self.wait_for_roles(["user", "assistant", "user", "assistant"])
+		self.assertEqual(self.asked()[1]["context"], {})
+		self.assertNotIn("含当前视图", self.rows()[2]["head"])
+
+	def test_the_panel_says_why_it_cannot_ask_until_postprocess_has_run(self) -> None:
+		import json
+		from tests.replay_fixtures import graph_document
+		raw = graph_document("raw")
+		raw["metadata"] = {}   # a mapping result: no sentence embeddings yet
+		for node in raw["nodes"]:
+			node["attributes"].get("metadata", {}).pop("sentence_embedding_feature", None)
+		raw_result = self.fixtures.call("make_result", name="chat_raw", kind="tum", sequence="fr1_desk")["path"]
+		self.fixtures.call("write_text", path=raw_result, name="dsg.json", text=json.dumps(raw))
+		self.open_chat(raw_result)
+		self.wait.until(lambda d: "postprocess" in self.text("chat-note"))
+		self.assertFalse(self.control("chat-send").is_enabled())
+		self.control("chat-input").send_keys("can I ask yet?")
+		self.assertFalse(self.control("chat-send").is_enabled(), "typing alone does not make an unready graph askable")
+		self.fixtures.call("write_graph", path=raw_result, name="dsg_updated.json", objects=[7, 8])
+		self.wait.until(lambda d: self.control("chat-send").is_enabled())
+		self.assertEqual(self.text("chat-note"), "")
+		self.control("chat-send").click()
+		self.wait_for_roles(["user", "assistant"])
+		self.assertEqual(self.asked()[0]["question"], "can I ask yet?")
+
+	def test_a_question_can_be_left_and_its_answer_is_there_later(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.fixtures.call("agent_hold")
+		self.ask("a slow question")
+		self.wait.until(lambda d: "查询场景: get_matching_subjects" in self.text("chat-progress"))
+		self.assertFalse(self.control("chat-send").is_displayed())
+		self.control("chat-stop").click()
+		self.wait.until(lambda d: "已停止显示" in self.text("chat-note"))
+		self.assertEqual(self.roles(), ["user"], "the stored question stays, the answer is not here yet")
+		self.fixtures.call("agent_release")
+		self.wait_for_roles(["user", "assistant"])
+		self.assertEqual(self.rows()[1]["text"], "答复 1:a slow question(收到 0 条历史)")
+		self.wait.until(lambda d: self.control("chat-status").text == "可以提问")
+
+	def test_a_failed_question_shows_the_reason_and_a_retry_does_not_replay_it(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.fixtures.call("agent_fail", mode="after")
+		self.ask("will fail")
+		self.wait_for_roles(["user", "error"])
+		self.assertIn("API key", self.rows()[1]["text"])
+		self.assertEqual(self.control("chat-input").get_attribute("value"), "", "the question left the box: it is in the conversation")
+		self.fixtures.call("agent_fail", mode=None)
+		self.wait.until(lambda d: self.control("chat-retry").is_enabled())
+		self.control("chat-retry").click()
+		self.wait_for_roles(["user", "error", "user", "assistant"])
+		self.assertEqual(self.asked()[1]["question"], "will fail")
+		self.assertEqual(self.asked()[1]["conversation"], [], "the attempt that failed is not part of the conversation")
+
+	def test_a_worker_that_cannot_be_reached_leaves_the_question_and_an_error_to_retry_from(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.fixtures.call("agent_fail", mode="unavailable")
+		self.ask("is anybody there?")
+		self.wait_for_roles(["user", "error"])
+		self.assertIn("问答服务没有启动", self.rows()[1]["text"])
+		self.assertIn("问答服务没有启动", self.text("chat-note"))
+		self.assertEqual(self.control("chat-input").get_attribute("value"), "", "the question is in the conversation: it is not offered twice")
+		self.fixtures.call("agent_fail", mode=None)
+		self.wait.until(lambda d: self.control("chat-retry").is_enabled())
+		self.control("chat-retry").click()
+		self.wait_for_roles(["user", "error", "user", "assistant"])
+		self.assertEqual(self.rows()[3]["text"], "答复 2:is anybody there?(收到 0 条历史)", "the worker had been asked once before it failed")
+		self.assertEqual(self.asked()[1]["conversation"], [], "the attempt that never reached the worker is not part of the conversation")
+
+	def test_a_question_that_is_refused_stays_in_the_box_and_is_not_stored(self) -> None:
+		self.open_chat()
+		self.wait_ready()
+		self.fixtures.call("agent_key", present=False)   # the key went away after the page had looked
+		self.ask("will it be refused?")
+		self.wait.until(lambda d: "OPENAI_API_KEY" in self.text("chat-note"))
+		self.assertEqual(self.control("chat-input").get_attribute("value"), "will it be refused?", "nothing was asked: the text is still there")
+		self.assertEqual(self.roles(), [], "a refused question is not part of the conversation")
+		self.assertEqual(self.asked(), [])
+		self.assertIn("没有 key", self.text("chat-model"), "the models follow the keys that exist")
+		self.assertFalse(self.control("chat-send").is_enabled())
+
+	def test_a_question_can_be_asked_while_a_job_runs_and_the_new_graph_follows(self) -> None:
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])   # a finished mapping result: jobs may run
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.open_chat()
+		self.wait_ready()
+		self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=tasks]").click()
+		self.wait.until(lambda d: self.control("task-summarize").is_enabled())
+		self.control("task-summarize").click()
+		self.wait.until(lambda d: "运行中" in self.text("task-status"))
+		self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=chat]").click()
+		self.ask("asked while the job runs")
+		self.wait_for_roles(["user", "assistant"])
+		self.assertIn("clustered_dsg.json", self.rows()[1]["head"], "the last valid graph answers, and says which")
+		self.fixtures.call("job_finish", code=0, files=["clustered_dsg_with_summaries.json", "region_summaries.yaml"], path=self.result, rooms=[["office", "a desk area"]])
+		self.wait.until(lambda d: "pending" in self.roles())
+		self.assertIn("clustered_dsg_with_summaries.json", [row for row in self.rows() if row["role"] == "pending"][0]["text"])
+		self.assertEqual(severe_logs(self.driver), [])
+
+
 if __name__ == "__main__":
 	unittest.main()

@@ -1,4 +1,5 @@
 """The host-side client of the replay Agent worker, against the real worker module with a fake Agent (no Docker, no models)."""
+import contextlib
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from scripts.replay_web import agent_client
 from scripts.replay_web.agent_client import (
-	AgentClient, AgentCrashed, AgentRequestFailed, AgentTimeout, AgentUnavailable, StagingError, default_argv, stage_file,
+	AgentClient, AgentCrashed, AgentRequestFailed, AgentTimeout, AgentUnavailable, StagingChanged, StagingError, default_argv, stage_file,
 )
 from scripts.replay_web.agent_protocol import RequestError, parse_request
 from tests.replay_fixtures import graph_document
@@ -62,7 +63,18 @@ class ClientTestCase(unittest.TestCase):
 	def spawn(self, argv, **options):
 		process = subprocess.Popen(argv, **options)
 		self.spawned.append((argv, process))
+		self.addCleanup(self.reap, process)
 		return process
+
+	@staticmethod
+	def reap(process):
+		"""Nothing a test started may outlive it: stop, wait for, and close the pipes of the worker."""
+		if process.poll() is None:
+			process.kill()
+		process.wait()
+		for stream in (process.stdin, process.stdout, process.stderr):
+			with contextlib.suppress(Exception):
+				stream.close()
 
 	def client(self, **options):
 		options.setdefault("argv", [sys.executable, str(LAUNCHER), "--repo-root", str(self.repo), "--idle-seconds", "0"])
@@ -433,15 +445,23 @@ class WorkerProcessTest(ClientTestCase):
 	"""The worker as a process of its own: how it ends."""
 
 	def start(self, *extra):
-		return subprocess.Popen(
+		process = subprocess.Popen(
 			[sys.executable, str(LAUNCHER), "--repo-root", str(self.repo)] + list(extra),
 			stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(REPO),
 			env=dict(os.environ, PYTHONUNBUFFERED="1"),
 		)
 
+		def finish():
+			process.kill()
+			process.wait()
+			for stream in (process.stdin, process.stdout, process.stderr):
+				stream.close()
+
+		self.addCleanup(finish)
+		return process
+
 	def test_an_idle_worker_ends_cleanly_while_its_input_is_still_open(self):
 		process = self.start("--idle-seconds", "0.5")
-		self.addCleanup(process.kill)
 		self.assertEqual(json.loads(process.stdout.readline())["type"], "ready")
 
 		code = process.wait(timeout=20)
@@ -453,7 +473,6 @@ class WorkerProcessTest(ClientTestCase):
 
 	def test_end_of_input_ends_the_worker_cleanly(self):
 		process = self.start("--idle-seconds", "0")
-		self.addCleanup(process.kill)
 		self.assertEqual(json.loads(process.stdout.readline())["type"], "ready")
 
 		process.stdin.close()
@@ -470,6 +489,13 @@ class CommandTest(unittest.TestCase):
 			"-e", "HF_HOME=/data/hf_cache", "-e", "PYTHONUNBUFFERED=1", "-e", "REPLAY_AGENT_MODELS=gpt-5-mini,claude-sonnet-4-5",
 			"daaam-ws", "python", "-m", "scripts.replay_web.agent_worker",
 		])
+
+	def test_an_idle_time_is_passed_to_the_worker_when_one_is_configured(self):
+		argv = default_argv(("gpt-5-mini",), idle_seconds=120)
+
+		self.assertEqual(argv[argv.index("daaam-ws") - 2:argv.index("daaam-ws")], ["-e", "REPLAY_AGENT_IDLE_SECONDS=120"])
+		self.assertNotIn("REPLAY_AGENT_IDLE_SECONDS", " ".join(default_argv(("gpt-5-mini",))))
+		self.assertIn("REPLAY_AGENT_IDLE_SECONDS=0", default_argv(("gpt-5-mini",), idle_seconds=0), "0 means never")
 
 	def test_the_container_name_stays_in_the_workspaces_own_namespace(self):
 		self.assertEqual(agent_client.AGENT_CONTAINER, "daaam-replay-agent")
@@ -526,8 +552,9 @@ class StagingTest(unittest.TestCase):
 		path, digest = self.source()
 		path.write_bytes(b'{"graph": 2}')   # a hot reload replaced it after the digest was taken
 
-		with self.assertRaises(StagingError):
+		with self.assertRaises(StagingChanged):
 			stage_file(self.repo, KEY, path, digest)
+		self.assertTrue(issubclass(StagingChanged, StagingError))
 
 		self.assertEqual(list(self.cache().iterdir()) if self.cache().exists() else [], [])
 

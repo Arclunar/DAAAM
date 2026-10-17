@@ -5,6 +5,8 @@
 // viewer uses to start and stop rendering. Open paths, their order, the active tab and each tab's viewer state are kept
 // in localStorage (never the service's run IDs, which change when the service restarts).
 //
+// Every tab has a question panel (chat.js) for its result alone: its conversation lives in the service, not in the tab.
+//
 // Every tab, active or not, follows its result's scene graph and processing jobs through the service's event stream. A new
 // graph version is fetched at once, but only the active tab applies it to its viewer (state, time and camera kept); a
 // background tab shows a marker and applies the newest version when it is activated. Each tab's task panel keeps its jobs
@@ -12,6 +14,7 @@
 // (busy), or ended (done, failed) while it was away.
 
 import { ApiError, ReplayApi } from './api.js';
+import { ChatPanel } from './chat.js';
 import { ReplayDataSource } from './replay_data.js';
 import { TaskPanel } from './tasks.js';
 import { ReplayViewer } from './viewer.js';
@@ -217,6 +220,7 @@ export class WorkspaceApp {
     if (this.mountViewer) {
       tab.viewer = this.mountViewer(tab, this);
       this.mountTasks(tab);
+      this.mountChat(tab);
       return;
     }
     const summary = element('div', 'pane-summary');
@@ -235,6 +239,16 @@ export class WorkspaceApp {
     tab.tasks = new TaskPanel({ api: this.api, runId: () => tab.runId, onChange: () => this.refreshMarker(tab) });
     tab.tasks.attach(container);
     tab.tasks.setActive(tab.active);
+  }
+
+  mountChat(tab) {
+    const container = tab.viewer?.el?.['chat-panel'];
+    tab.chat?.destroy();
+    tab.chat = null;
+    if (!container) return;
+    tab.chat = new ChatPanel({ api: this.api, runId: () => tab.runId, viewContext: () => tab.viewer?.viewContext?.() || null });
+    tab.chat.attach(container);
+    tab.chat.setActive(tab.active);
   }
 
   // The bundle of an open tab was published again: replace the viewer, keep the tab and its saved view.
@@ -262,9 +276,10 @@ export class WorkspaceApp {
     this.markGraph(tab, false);
     tab.unwatch = this.api.events(tab.runId, {
       state: (data) => this.onRunState(tab, data),
-      graph: () => { this.refreshGraph(tab); tab.tasks?.refreshSoon(); },
+      graph: () => { this.refreshGraph(tab); tab.tasks?.refreshSoon(); tab.chat?.refreshSoon(); },
       'job-state': (data) => tab.tasks?.onJobState(data.job),
       'job-log': (data) => tab.tasks?.onJobLog(data),
+      chat: (data) => tab.chat?.onChatEvent(data),
       'artifact-error': (data) => this.onArtifactError(tab, data),
       closed: (data) => this.onRunClosed(tab, data),
       connection: (info) => this.onConnection(info),
@@ -273,6 +288,7 @@ export class WorkspaceApp {
 
   onRunState(tab, data) {
     if (data && data.jobs) tab.tasks?.applyState(data.jobs);
+    if (data && data.chat) tab.chat?.applyState(data.chat);
     const graph = data && data.graph;
     if (!graph) return;
     if (!graph.scanned) { tab.viewer?.setGraphPending?.(); return; }
@@ -403,6 +419,7 @@ export class WorkspaceApp {
       current.pane.dispatchEvent(new CustomEvent('replay-tab-deactivated', { detail: { tabId: current.tabId } }));
       current.viewer?.deactivate?.();
       current.tasks?.setActive(false);
+      current.chat?.setActive(false);
       current.active = false;
       current.pane.hidden = true;
       current.button.setAttribute('aria-selected', 'false');
@@ -416,6 +433,7 @@ export class WorkspaceApp {
       next.pane.hidden = false;
       next.viewer?.activate?.();
       next.tasks?.setActive(true);
+      next.chat?.setActive(true);
       this.applyGraph(next);
       this.flushNotices(next);
     }
@@ -434,6 +452,7 @@ export class WorkspaceApp {
     if (tab.active) tab.pane.dispatchEvent(new CustomEvent('replay-tab-deactivated', { detail: { tabId } }));
     tab.unwatch?.();
     tab.tasks?.destroy();
+    tab.chat?.destroy();
     tab.viewer?.destroy?.();
     tab.pane.remove();
     tab.item.remove();

@@ -12,7 +12,9 @@ serves only:
   /api/events?run=...&run=... for several over one connection, since a browser allows only a few per origin). Processing
   jobs (scripts/replay_web/jobs.py) run in the daaam-ws container: POST /api/runs/{id}/jobs {"stage", "replace"} starts one
   of three allowlisted stages, GET lists them with what each stage may do now, POST /api/jobs/{id}/cancel stops one; their
-  progress arrives on the event streams.
+  progress arrives on the event streams. The chat (scripts/replay_web/chat.py): GET /api/runs/{id}/chat is the conversation
+  of a result and whether its graph can answer questions, POST streams the answer to one question as server-sent events (the
+  answers come from one shared Agent worker in the container), DELETE forgets the conversation.
 
 There is no general file-read or command endpoint. The service binds 127.0.0.1 only and refuses requests whose Host
 header is not this loopback address (a DNS-rebound page cannot read it); POST and DELETE also need the page's Origin
@@ -37,9 +39,12 @@ import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
+from scripts.replay_web.agent_client import AgentClient, default_argv
+from scripts.replay_web.agent_protocol import allowed_models
 from scripts.replay_web.artifacts import GRAPH_PRIORITY, ArtifactMonitor
+from scripts.replay_web.chat import ChatError, ChatManager, Turn
 from scripts.replay_web.events import EventBroker, SubscriptionClosed, encode_sse
 from scripts.replay_web.jobs import JobError, JobManager, JobRecord, JobSpec, JobStage
 from scripts.replay_web.manifest import SCHEMA_VERSION, ManifestError, resolve_bundle_member
@@ -79,6 +84,10 @@ class ServerConfig:
 	scan_depth: int = 4
 	graph_interval: float = 2.0   # seconds between looks at the scene graph files of the open results
 	max_jobs: int = 1   # processing jobs that may run at the same time (the others wait their turn)
+	agent_models: Optional[Tuple[str, ...]] = None   # the models a question may name (default: $REPLAY_AGENT_MODELS, else gpt-5-mini)
+	agent_enabled: bool = True   # False: no question is accepted and no worker is ever started
+	agent_idle_seconds: Optional[float] = None   # the Agent worker ends after this long without a question (default: its own 15 minutes)
+	stage_root: Optional[Path] = None   # the repository root as the worker sees it, where graph snapshots are staged (default: repo_root; tests)
 	sse_heartbeat: float = 15.0   # an idle event stream sends a comment this often, which also reveals closed connections
 
 
@@ -110,7 +119,7 @@ class RunAssets:
 class ReplayService:
 	"""State behind the HTTP handler: one per server."""
 
-	def __init__(self, config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None):
+	def __init__(self, config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None, agent: Any = None):
 		self.config = config
 		self.registry = registry or RunRegistry(config.output_root, config.distro, config.scan_depth)
 		self.csrf_token = secrets.token_urlsafe(32)
@@ -124,6 +133,11 @@ class ReplayService:
 		self.jobs.path_of_run = self._path_of_run
 		self.jobs.run_of_path = self._run_of_path
 		self.jobs.on_finished = self._job_finished
+		models = config.agent_models or allowed_models()
+		self.agent = agent if agent is not None else AgentClient(
+			argv=default_argv(models, idle_seconds=config.agent_idle_seconds), models=models, repo_root=config.repo_root)
+		self.chat = ChatManager(config.repo_root, config.state_root, self.registry, self.monitor, self.agent, models=models,
+			publish=self.broker.publish, enabled=config.agent_enabled, stage_root=config.stage_root)
 
 	def _path_of_run(self, run_id: str) -> Optional[Path]:
 		try:
@@ -147,11 +161,12 @@ class ReplayService:
 		"""Stop the jobs, the monitor and every event stream; idempotent."""
 		self.jobs.shutdown()
 		self.monitor.stop()
+		self.chat.stop()
 		self.broker.close()
 
 	def state_payload(self, run_id: str) -> Dict[str, Any]:
 		"""What a page needs to catch up with a result: sent first on every new event stream and after a gap."""
-		return {"graph": self.monitor.status(run_id), "jobs": self.jobs.state_for_run(run_id)}
+		return {"graph": self.monitor.status(run_id), "jobs": self.jobs.state_for_run(run_id), "chat": self.chat.state(run_id)}
 
 	def graph_payload(self, run_id: str) -> Dict[str, Any]:
 		self.run(run_id)
@@ -185,13 +200,13 @@ class ReplayService:
 			return cached
 
 	def config_payload(self) -> Dict[str, Any]:
-		return {
+		return dict({
 			"schema_version": SCHEMA_VERSION,
 			"csrf_token": self.csrf_token,
 			"limits": {"json_body_bytes": JSON_BODY_LIMIT},
 			"output_root": str(self.config.output_root),
 			"distro": self.config.distro,
-		}
+		}, **self.chat.config_payload())
 
 	def results_payload(self) -> Dict[str, Any]:
 		return {"output_root": str(self.config.output_root), "results": [item.to_json() for item in self.registry.discover()]}
@@ -240,9 +255,33 @@ class ReplayService:
 			raise HttpError(400, "replace must be true or false", "request")
 		spec = JobSpec(run_id=run.run_id, result_path=run.canonical_path, dataset_kind=run.manifest["dataset"]["kind"], stage=stage, replace=replace)
 		try:
-			return {"job": self.jobs.start(spec).to_json()}
+			started = {"job": self.jobs.start(spec).to_json()}
 		except JobError as error:
 			raise HttpError(error.status, str(error), error.code) from error
+		self.chat.release_for_job()   # an idle Agent worker gives its models back to the GPU for the job
+		return started
+
+	def chat_history(self, run_id: str) -> Dict[str, Any]:
+		run = self.run(run_id)
+		try:
+			return self.chat.history(run)
+		except ChatError as error:
+			raise HttpError(error.status, error.message, error.code) from error
+
+	def begin_chat(self, run_id: str, body: Mapping[str, Any]) -> Turn:
+		"""Record a question of an open result; the turn streams the answer. The refusals are plain HTTP errors."""
+		run = self.run(run_id)
+		try:
+			return self.chat.begin(run, body)
+		except ChatError as error:
+			raise HttpError(error.status, error.message, error.code) from error
+
+	def clear_chat(self, run_id: str) -> None:
+		run = self.run(run_id)
+		try:
+			self.chat.clear(run)
+		except ChatError as error:
+			raise HttpError(error.status, error.message, error.code) from error
 
 	def cancel_job(self, job_id: str) -> Dict[str, Any]:
 		try:
@@ -251,10 +290,11 @@ class ReplayService:
 			raise HttpError(error.status, str(error), error.code) from error
 
 	def close(self, run_id: str) -> None:
-		self.run(run_id)
+		run = self.run(run_id)
 		self.registry.close(run_id)
 		with self._lock:
 			self._assets.pop(run_id, None)
+		self.chat.forget(run)   # the worker may drop the result's cached graph; its conversation stays on disk
 		self.broker.publish(run_id, "closed", {"reason": "closed"})   # other pages that show this result
 		self.broker.forget(run_id)
 
@@ -442,6 +482,15 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 				if method == "GET":
 					return self.send_json(200, service.jobs_payload(run_id))
 				raise HttpError(405, "method not allowed", "method")
+			if rest == ["chat"]:
+				if method == "GET":
+					return self.send_json(200, service.chat_history(run_id))
+				if method == "POST":
+					return self.stream_chat(run_id, self.read_json())
+				if method == "DELETE":
+					service.clear_chat(run_id)
+					return self.send_json(204, None)
+				raise HttpError(405, "method not allowed", "method")
 			if method != "GET":
 				raise HttpError(405, "method not allowed", "method")
 			if rest == ["manifest"]:
@@ -507,6 +556,32 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 				self.wfile.write(encode_sse(event, service.broker.epoch))
 				self.wfile.flush()
 
+	def stream_chat(self, run_id: str, body: Mapping[str, Any]) -> None:
+		"""One question as server-sent events (`turn`, `progress`, `delta`, then `complete` or `error`). Everything that can be
+		refused is refused first, as a plain JSON error; the stream starts with the first event. A page that leaves does not
+		stop the turn: its answer is stored all the same."""
+		turn = self.service.begin_chat(run_id, body)
+		started = False
+
+		def emit(name: str, data: Dict[str, Any]) -> None:
+			nonlocal started
+			if not started:
+				started = True
+				self.close_connection = True
+				self.send_response(200)
+				self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+				self.send_header("Cache-Control", "no-store")
+				self.send_header("X-Content-Type-Options", "nosniff")
+				self.send_header("Connection", "close")
+				self.end_headers()
+			self.wfile.write(f"event: {name}\ndata: {json.dumps(data, separators=(',', ':'), ensure_ascii=False)}\n\n".encode("utf-8"))
+			self.wfile.flush()
+
+		try:
+			turn.run(emit)
+		except ChatError as error:   # raised only while nothing was streamed: a plain response is still possible
+			raise HttpError(error.status, error.message, error.code) from error
+
 	def bundle_member(self, assets: RunAssets, relative: str, query: Dict[str, List[str]]) -> Path:
 		version = query.get("v", [None])[0]
 		if version is not None and version != assets.version:
@@ -567,12 +642,12 @@ class ReplayHTTPServer(ThreadingHTTPServer):
 		super().server_close()
 
 
-def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None) -> ReplayHTTPServer:
+def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None, agent: Any = None) -> ReplayHTTPServer:
 	"""A bound (not yet serving) server; the port is the configured one, or a free one for port 0. Tests pass a `jobs`
-	manager that runs no docker."""
+	manager that runs no docker and an `agent` client that starts no worker."""
 	if config.host not in LOOPBACK_HOSTS:
 		raise ValueError(f"the replay service binds a loopback address only (127.0.0.1 or localhost), not {config.host}")
-	service = ReplayService(config, registry, jobs)
+	service = ReplayService(config, registry, jobs, agent)
 	server = ReplayHTTPServer((LOOPBACK_HOSTS[config.host], config.port), make_handler(service), service)
 	service.port = server.server_address[1]
 	return server
@@ -595,12 +670,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument("--scan-depth", type=int, default=4)
 	parser.add_argument("--graph-interval", type=float, default=2.0, help="seconds between looks at the scene graph files of the open results")
 	parser.add_argument("--max-jobs", type=int, default=1, help="processing jobs that may run at once (default 1: the others wait)")
+	parser.add_argument("--agent-models", default=None, help="models a question may name, comma separated (default: $REPLAY_AGENT_MODELS, else gpt-5-mini)")
+	parser.add_argument("--no-agent", action="store_true", help="switch the question panel off: no question is accepted and no worker is started")
+	parser.add_argument("--agent-idle-seconds", type=float, default=None,
+		help="the Agent worker ends after this many seconds without a question (default 900; 0: never)")
 	parser.add_argument("--open", action="store_true", help="also open the page in the Windows browser")
 	args = parser.parse_args(argv)
 	config = ServerConfig(
 		repo_root=REPO_ROOT, output_root=Path(args.output_root), state_root=Path(args.state_root),
 		distro=os.environ.get("WSL_DISTRO_NAME", ""), host=args.host, port=args.port, scan_depth=args.scan_depth,
 		graph_interval=max(0.2, args.graph_interval), max_jobs=max(1, args.max_jobs),
+		agent_models=allowed_models({"REPLAY_AGENT_MODELS": args.agent_models}) if args.agent_models else None,
+		agent_enabled=not args.no_agent, agent_idle_seconds=args.agent_idle_seconds,
 	)
 	try:
 		server = create_server(config)

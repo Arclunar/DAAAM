@@ -313,7 +313,7 @@ def parse_event(line: Any) -> Optional[Dict[str, Any]]:
 
 # ---------------------------------------------------------------------------------------------- secrets and errors
 _SECRETS = (
-	(re.compile(r"\bsk-[A-Za-z0-9_-]{6,}"), "sk-***"),
+	(re.compile(r"(?:(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{6,}|sk-[A-Za-z0-9_-]{20,})"), "sk-***"),
 	(re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
 	(re.compile(r"(?i)((?:api[_-]?key|token|secret|password|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+"), r"\1***"),
 )

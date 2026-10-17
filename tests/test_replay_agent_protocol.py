@@ -314,6 +314,7 @@ class RedactTest(unittest.TestCase):
 			"OPENAI_API_KEY=plain-secret-value other=1",
 			"token='plain-secret-value'",
 			"password: hunter2hunter2",
+			"glued to a word: LEAKsk-proj-abcdefghijklmnopqrstuvwxyz0123",
 		]
 		for line in cases:
 			with self.subTest(line=line[:30]):

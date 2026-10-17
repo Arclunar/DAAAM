@@ -11,10 +11,53 @@ export class ApiError extends Error {
 }
 
 const run = (runId) => `/api/runs/${encodeURIComponent(runId)}`;
+
+// The ApiError of a response that is not ok: the service's own message and code when it sent them.
+async function failure(response) {
+  let message = `${response.status} ${response.statusText}`;
+  let code = null;
+  try {
+    const data = await response.json();
+    if (data && data.error) message = data.error;
+    if (data && data.code) code = data.code;
+  } catch (error) { /* not JSON */ }
+  return new ApiError(response.status, message, code);
+}
+
+// Server-sent events from a fetch body (EventSource cannot POST): calls onEvent({ event, data }) per complete frame.
+async function readEvents(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const frame = (text) => {
+    let event = 'message';
+    const data = [];
+    for (const line of text.split('\n')) {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+    }
+    if (!data.length) return;
+    let parsed;
+    try { parsed = JSON.parse(data.join('\n')); } catch (error) { return; }
+    try { onEvent({ event, data: parsed }); } catch (error) { console.error(`replay chat handler "${event}" failed`, error); }
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      frame(buffer.slice(0, end));
+      buffer = buffer.slice(end + 2);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) frame(buffer);
+}
 const withVersion = (url, version) => (version ? `${url}?v=${encodeURIComponent(version)}` : url);
 
 // The event types the service sends (scripts/replay_web/events.py); a handler object names the ones it wants.
-const EVENT_TYPES = ['state', 'graph', 'artifact-error', 'closed', 'job-state', 'job-log'];
+const EVENT_TYPES = ['state', 'graph', 'artifact-error', 'closed', 'job-state', 'job-log', 'chat'];
 
 // One server-sent events connection for all the results this page has open. A browser allows only a handful of
 // connections per origin, so a stream per tab would starve the chunk and image requests; instead the single stream is
@@ -30,7 +73,7 @@ export class EventHub {
     this.connected = null;
   }
 
-  // handlers: { state(data), graph(data), 'artifact-error'(data), closed(data), 'job-state'(data), 'job-log'(data), connection({connected}) };
+  // handlers: { state(data), graph(data), 'artifact-error'(data), closed(data), 'job-state'(data), 'job-log'(data), chat(data), connection({connected}) };
   // returns the unsubscribe function
   subscribe(runId, handlers) {
     let handlerSet = this.watchers.get(runId);
@@ -120,18 +163,12 @@ export class ReplayApi {
       throw new ApiError(0, '回看服务没有响应:它还在运行吗?(just replay-web)', 'network');
     }
     if (!response.ok) {
-      let message = `${response.status} ${response.statusText}`;
-      let code = null;
-      try {
-        const data = await response.json();
-        if (data && data.error) message = data.error;
-        if (data && data.code) code = data.code;
-      } catch (error) { /* not JSON */ }
-      if (mutating && code === 'csrf' && !tokenRefreshed) {
+      const error = await failure(response);
+      if (mutating && error.code === 'csrf' && !tokenRefreshed) {
         await this.config();
         return this.request(path, { method, body }, true);
       }
-      throw new ApiError(response.status, message, code);
+      throw error;
     }
     return response.status === 204 ? null : response.json();
   }
@@ -152,6 +189,35 @@ export class ReplayApi {
   // stage: 'postprocess' | 'summarize' | 'all'; replace: the person agreed to replace the outputs that exist already.
   async startJob(runId, stage, replace = false) { return this.request(`${run(runId)}/jobs`, { method: 'POST', body: { stage, replace } }); }
   async cancelJob(jobId) { return this.request(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {} }); }
+  // The conversation of a result: { messages, busy, query: { ready, reason, graph }, agent: { enabled, models, default_model } }.
+  async chat(runId) { return this.request(`${run(runId)}/chat`); }
+  async clearChat(runId) { return this.request(`${run(runId)}/chat`, { method: 'DELETE' }); }
+  // Ask a question of a result: { question, model, include_view_context, view_context }. The answer arrives as events
+  // { event: 'turn' | 'progress' | 'delta' | 'complete' | 'error', data } passed to onEvent; resolves when the stream ends.
+  // A refusal before the stream starts (not ready, busy, no key, …) rejects with an ApiError; `signal` stops reading.
+  async askChat(runId, body, onEvent, { signal } = {}, tokenRefreshed = false) {
+    if (!this.settings) await this.config();
+    let response;
+    try {
+      response = await this.fetch(`${run(runId)}/chat`, {
+        method: 'POST', credentials: 'same-origin', cache: 'no-store', signal,
+        headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json', 'X-Replay-CSRF': this.settings.csrf_token },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      throw new ApiError(0, '回看服务没有响应:它还在运行吗?(just replay-web)', 'network');
+    }
+    if (!response.ok) {
+      const error = await failure(response);
+      if (error.code === 'csrf' && !tokenRefreshed) {
+        await this.config();
+        return this.askChat(runId, body, onEvent, { signal }, true);
+      }
+      throw error;
+    }
+    await readEvents(response, onEvent);
+  }
   // Follow what changes in an open result (see EventHub.subscribe); returns the function that stops following it.
   events(runId, handlers) {
     if (!this.hub) this.hub = new EventHub();

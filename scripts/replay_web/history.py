@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -29,6 +30,8 @@ ROLES = ("user", "assistant", "boundary", "error")
 CONTEXT_KEYS = ("replay_time", "camera", "selected_entity")   # the replay view a question may carry
 
 MESSAGES, META, QUARANTINE, TRASH = "messages.jsonl", "meta.json", "quarantine.jsonl", ".trash-"
+_CODE = re.compile(r"[a-z][a-z0-9-]{0,39}")
+WINDOW_TURNS = 200              # the newest whole turns a question is sent with, at most (older ones are summarized)
 DEFAULT_CONTEXT_CHARS = 48000   # the conversation a question is sent with, in characters ...
 DEFAULT_CONTEXT_BYTES = 60000   # ... and in UTF-8 bytes (a provider call accepts 64 KiB of conversation and replay context)
 LINE_CHARS = 400                # one line of the summary of older exchanges
@@ -395,11 +398,14 @@ class ConversationStore:
 		with self._lock:
 			return self._append("assistant", content, model, reference, None)
 
-	def append_error(self, content: str, *, model: Optional[str] = None, graph: Any = None) -> ChatMessage:
-		"""A visible failure row. It is kept in the history but never sent to a model."""
+	def append_error(self, content: str, *, model: Optional[str] = None, graph: Any = None, code: Optional[str] = None) -> ChatMessage:
+		"""A visible failure row, optionally with a short code the page can phrase itself (kept in `context`). It is kept in the
+		history but never sent to a model."""
+		if code is not None and not (isinstance(code, str) and _CODE.fullmatch(code)):
+			raise HistoryError("an error code is a short lowercase token")
 		reference = GraphRef.of(graph) if graph is not None else None
 		with self._lock:
-			return self._append("error", content, model, reference, None)
+			return self._append("error", content, model, reference, {"code": code} if code is not None else None)
 
 	def append_boundary(self, graph: Any) -> Optional[ChatMessage]:
 		"""Record that the conversation moved to another graph version.
@@ -416,23 +422,39 @@ class ConversationStore:
 			return self._append("boundary", text, None, reference, {"from": {"name": previous.name, "version": previous.version}})
 
 	# -------------------------------------------------------------- what a model is sent
-	def context_messages(self, max_chars: int = DEFAULT_CONTEXT_CHARS, max_bytes: int = DEFAULT_CONTEXT_BYTES) -> List[Dict[str, str]]:
+	@staticmethod
+	def _answered(messages: List[ChatMessage]) -> List[ChatMessage]:
+		"""The rows of a conversation a model may see: every answer, and the questions that got one. A question whose attempt
+		failed (an error row, or nothing yet, follows it) stays visible in the history but is not part of the conversation."""
+		turns: List[ChatMessage] = []
+		for index, message in enumerate(messages):
+			if message.role == "assistant":
+				turns.append(message)
+			elif message.role == "user":
+				following = next((later.role for later in messages[index + 1:] if later.role in ("user", "assistant", "error")), None)
+				if following == "assistant":
+					turns.append(message)
+		return turns
+
+	def context_messages(self, max_chars: int = DEFAULT_CONTEXT_CHARS, max_bytes: int = DEFAULT_CONTEXT_BYTES,
+			max_turns: int = WINDOW_TURNS) -> List[Dict[str, str]]:
 		"""The earlier conversation of a new question as provider-neutral {"role", "content"} turns.
 
-		Boundary and error rows are never sent. The newest whole messages that fit two thirds of the budget are kept; older
+		Boundary and error rows are never sent, nor are questions that got no answer. At most `max_turns` of the newest whole
+		messages that fit two thirds of the budget are kept; older
 		exchanges become one extractive line each (question, answer, the graph the answer came from; at most LINE_CHARS
 		characters) under "Earlier conversation summary:", newest first until the rest of the budget is used, with the number of
 		exchanges that did not fit. The result stays within `max_chars` characters and `max_bytes` UTF-8 bytes. No model is
 		involved: the same history always gives the same turns.
 		"""
 		with self._lock:
-			turns = [message for message in self._load() if message.role in ("user", "assistant")]
+			turns = self._answered(self._load())
 			window_chars, window_bytes = max(1, max_chars * 2 // 3), max(1, max_bytes * 2 // 3)
 			window: List[ChatMessage] = []
 			used_chars = used_bytes = 0
 			for message in reversed(turns):
 				chars, size = _cost(message.content)
-				if window and (used_chars + chars > window_chars or used_bytes + size > window_bytes):
+				if window and (len(window) >= max_turns or used_chars + chars > window_chars or used_bytes + size > window_bytes):
 					break
 				if not window and (chars > window_chars or size > window_bytes):
 					message = ChatMessage(message.message_id, message.role, clip_message(message.content[:window_chars], window_bytes),

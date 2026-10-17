@@ -66,13 +66,16 @@ class AgentRequestFailed(AgentError):
 	"""The worker reported an error for this request (its code and message come from the worker, validated)."""
 
 
-def default_argv(models: Sequence[str]) -> List[str]:
-	"""The fixed worker command. The only variable parts are the model names, which agent_protocol.allowed_models vetted."""
-	return [
+def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None) -> List[str]:
+	"""The fixed worker command. The only variable parts are the model names, which agent_protocol.allowed_models vetted, and
+	the worker's idle time in seconds (a number; 0 means never; by default the worker's own fifteen minutes)."""
+	argv = [
 		"docker", "compose", "run", "--rm", "-T", "--name", AGENT_CONTAINER,
 		"-e", "HF_HOME=/data/hf_cache", "-e", "PYTHONUNBUFFERED=1", "-e", "%s=%s" % (MODELS_ENV, ",".join(models)),
-		"daaam-ws", "python", "-m", "scripts.replay_web.agent_worker",
 	]
+	if idle_seconds is not None:
+		argv += ["-e", "REPLAY_AGENT_IDLE_SECONDS=%g" % float(idle_seconds)]
+	return argv + ["daaam-ws", "python", "-m", "scripts.replay_web.agent_worker"]
 
 
 def _docker(arguments: List[str], name: str, run: Callable[..., Any]) -> None:
@@ -244,6 +247,8 @@ class AgentClient:
 			pass
 		finally:
 			self._ended(process, generation)
+			with contextlib.suppress(Exception):
+				process.stdout.close()
 
 	def _read_stderr(self, process: Any, generation: int) -> None:
 		try:
@@ -257,6 +262,9 @@ class AgentClient:
 					self._log(line)
 		except (OSError, ValueError):
 			pass
+		finally:
+			with contextlib.suppress(Exception):
+				process.stderr.close()
 
 	def _dispatch(self, event: Dict[str, Any]) -> None:
 		if event["type"] == "ready":
@@ -275,6 +283,7 @@ class AgentClient:
 			waiting = [pending for pending in self._pending.values() if pending.generation == generation]
 		for pending in waiting:
 			pending.events.put(_DIED)
+		self._close_stdin(process)   # the pipes of a worker that is gone are not kept open
 
 	def _close_stdin(self, process: Any) -> None:
 		with self._writer:
@@ -438,6 +447,10 @@ class StagingError(ValueError):
 	"""A graph snapshot that cannot be staged; the message names no host path."""
 
 
+class StagingChanged(StagingError):
+	"""The file is no longer the one that was validated (it was replaced, e.g. by a hot reload): look at the new version."""
+
+
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _SUFFIXES = (".json", ".background.yaml")
@@ -528,7 +541,7 @@ def stage_file(repo_root: Path, history_key: str, source: Path, digest: str, suf
 				writer.flush()
 				os.fsync(writer.fileno())
 		if hasher.hexdigest() != digest:
-			raise StagingError("the file changed after it was validated")
+			raise StagingChanged("the file changed after it was validated")
 		os.replace(str(temporary), str(final))
 	except OSError:
 		_remove(temporary)
