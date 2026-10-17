@@ -27,10 +27,10 @@ run:
 exec:
     @cid=$(docker ps -q --filter label=com.docker.compose.service=daaam-ws | head -n 1); if [ -z "$cid" ]; then echo "没有正在运行的 DAAAM 容器"; exit 1; fi; docker exec -it "$cid" bash
 
-# 运行回归测试:宿主机上的标准库测试(含回看服务)、容器里的测试(含数据包生成),以及 Windows 上带 Chrome 的真实浏览器测试
+# 运行回归测试:宿主机上的标准库测试(含回看服务及其问答)、容器里的测试(含数据包生成和场景问答 Agent;问答测试全用假模型,不请求模型服务),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
-    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs -v
-    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils -v
+    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat -v
+    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query -v
     @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 
 # 重新分析当前源码并生成可离线打开的 process_frame 函数调用图
@@ -139,4 +139,4 @@ coda-view run:
 
 # 内部:已有别的管线 / 深度估计 / 后处理 / 问答的容器在跑就不启动(显存和 WSL 内存装不下两个)
 _coda-guard:
-    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|demo_query|daaam_node' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理或问答的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它" >&2; exit 1; fi
+    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|demo_query|agent_worker|daaam_node' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理或问答的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它(回看页面的问答 worker 叫 daaam-replay-agent,空闲 15 分钟会自己退出)" >&2; exit 1; fi

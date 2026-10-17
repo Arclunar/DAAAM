@@ -9,7 +9,11 @@ untouched):
 - Phase 1 (unified replay core) and Phase 2 (scene graph hot reload and web-triggered processing) are implemented, covered
   by host, container and real-browser tests, and verified end to end against real TUM and CODa results through the real
   service and Docker (see the commit hashes in the checklist below);
-- Phase 3 (Agent chat) is in progress; the checklist below shows which tasks are done.
+- Phase 3 (Agent chat) is implemented, covered by host, container and real-browser tests, and verified end to end through the real
+  service, the Docker worker and a real model (`gpt-5-mini`) against a copy of a real TUM result and a copy of an older real CODa result (given a replay bundle by hand, with an assumed frame range): a question and a
+  pronoun follow-up, a reload, a graph change with its boundary and new provenance, one worker for two results, the worker released
+  by a processing job and stopped with the service (see the commit hashes in the checklist below). Not exercised: Anthropic models
+  (no key on this machine).
 
 Do not restart requirements discovery unless the repository or user intent has materially changed. Read the approved
 design and plans in full before editing.
@@ -230,8 +234,8 @@ Follow `2026-10-16-replay-web-agent-implementation.md`:
 - [x] Task 2: load TUM/CODa query graphs and cache Agent instances. (`3c88963`)
 - [x] Task 3: persist isolated histories and graph boundaries. (`926b074`)
 - [x] Task 4: run one long-lived Agent worker through NDJSON. (`d363e31`)
-- [x] Task 5: stream per-tab chat through the service and browser.
-- [ ] Task 6: verify persistent multi-turn behaviour and document operations.
+- [x] Task 5: stream per-tab chat through the service and browser. (`f4ee270`; the real runs then led to `3b5e545`, which hands an exported API key to the worker by name, and `60ad682`, which keeps the newest rows in view)
+- [x] Task 6: verify persistent multi-turn behaviour and document operations.
 
 ## Required Working Method
 

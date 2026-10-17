@@ -738,7 +738,7 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize output/tum
 下方提示一次。背景标签页只更新标签上的小蓝点，切过去时才应用最新版本（所以不会白白占用渲染）。服务重启或别的页面关掉了
 这个结果时，标签页会按路径自动重新打开并保持原来的视图。
 
-只想回看时，原始 `dsg.json` 就够用；区域摘要和以后的场景问答要用到后处理的结果。
+只想回看时，原始 `dsg.json` 就够用；区域摘要要用到后处理的结果，页面里的问答（9.0.3 节）要用带句向量的 `dsg_updated.json` 或更靠后的文件。
 
 ### 9.0.2 在页面里做后处理（Postprocess / Summarize / 全部运行）
 
@@ -776,6 +776,71 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize output/tum
   Postprocess 约 34 秒、Summarize（2 次 OpenAI 调用）约 36 秒。第一次后处理要加载 sentence-t5-xl（2.5 GB，缓存在
   `/data/hf_cache`）。
 
+### 9.0.3 在页面里问场景问题（问答）
+
+每个结果标签页的右侧栏有三页：实体 / 任务 / **问答**。对话**属于这个结果**：服务把它存在 `.replay-web/history/`，刷新页面、换一个
+窗口、重启服务后都还在，别的结果看不到它；"清空对话"（会先确认）只删这个结果的记录，不影响别的结果，文件不会被删。
+
+**前提**
+
+- 结果当前显示的场景图要带句向量，也就是跑过 Postprocess：`dsg_updated.json`、`clustered_dsg*.json` 可以，原始 `dsg.json` 不行——
+  面板写"请先运行 postprocess（场景图要有句子嵌入才能提问）"，发送按钮灰着。"任务"页在跑 Postprocess / Summarize 时也能提问，用的是
+  最后一个有效的场景图（回答上写着是哪个文件）。
+- 模型的 API key：OpenAI 的模型要 `OPENAI_API_KEY`，`claude-*` 要 `ANTHROPIC_API_KEY`。放在仓库的 `.env` 里（容器自己读），或在启动
+  服务的 shell 里 `export`（服务只把变量**名**交给 `docker compose run -e NAME`，值由 Docker 从环境里复制，不会出现在任何命令行上）。页面只知道
+  "有 / 没有"：没有 key 的模型在下拉框里灰着并写"（没有 key）"，面板写出缺哪个变量；key 的值不会发给浏览器，也不会写进记录。
+- Docker 在运行：回答来自 `daaam-ws` 容器里的一个共享进程（见下面的"worker"）。
+- 能选的模型是白名单：环境变量 `REPLAY_AGENT_MODELS`（逗号分隔，默认只有 `gpt-5-mini`，第一个是默认），或者
+  `python3 -m scripts.replay_web.server --agent-models gpt-5-mini,claude-sonnet-4-5`；`--no-agent` 把问答整个关掉（面板灰着，
+  不会启动任何容器）。`just replay-web` 不带这些参数，要用就直接运行上面的命令（和 `--max-jobs` 一样）。
+
+**怎么问**
+
+- 在输入框里写问题（最多 4000 字），`Ctrl+Enter` 或"发送"。一个结果同一时间只回答一个问题；不同结果的问题在同一个 worker 里排队，状态行
+  写"排队中，前面还有 N 个问题"。
+- 回答时状态行显示进度：`第 N 轮`、`查询场景: <工具名>`、`正在整理答案…`；答案是模型整理好之后一次出现的（长答案分块到达），不是逐字生成。**不显示**提示词、工具的参数和返回的原始内容，
+  也不显示模型的推理文字（就算服务商返回了）。
+- 助手只有四个**只读**的场景工具：`get_matching_subjects`、`get_objects_in_radius`、`get_region_information`、
+  `get_agent_trajectory_information`。Postprocess、Summarize 这些任务**不是**助手的工具，助手不能启动任务，也读不到别的文件或命令。
+- **多轮**：后面的问题会带上这个结果里已经得到回答的问题和答案（最多 56,000 字节、200 轮，更早的压成每轮一行的摘要）；出错或没得到回答的
+  问题不会进入上下文。所以可以直接用代词，例如先问"场景里有电话吗？"，再问"它旁边还有什么？"。
+- **包含当前视图上下文**（默认勾选）：把时间轴上的时间、选中的实体和 3D 相机位置一起告诉助手，这样可以问"这是什么？"。选中的实体页面只发编号，
+  描述由服务从场景图里读出；场景图里没有的编号被丢掉。取消勾选就只发问题。问题上的"含当前视图"标记表示那一问带了视图。
+- **停止显示**：不再等这个答案；助手仍会答完，答案之后出现在对话里（页面每 2 秒看一次，最多 5 分钟，之后重新打开标签页再看）。关掉页面也一样。
+- 出错时对话里出现一条红色的固定说明和"重试"：worker 没启动（Docker 没开？）、超时、模型服务拒绝了 key / 限流 / 连不上、这个账号用不了所选模型、
+  场景图还不能回答……失败的那一问留在对话里，重试不会把它当作上下文。
+
+**场景图版本**
+
+- 每条回答写着 `模型 · 场景图文件 · 版本短码`（短码是文件内容 SHA-256 的前 6 位）。提问那一刻选中的场景图是这一问用的版本；提问过程中热更新
+  换了文件，只影响**下一个**问题。
+- 热更新选中了另一个场景图后，对话末尾先出现虚线提示"场景图已更新：A → B。下一个问题会用新的版本。"，下一次提问时它变成一条分隔行；旧回答保留
+  自己的出处。
+
+**记录和缓存（都在 `.replay-web/` 里，已被 git 忽略；停掉服务后可以删除）**
+
+- `history/<结果规范路径的 SHA-256>/messages.jsonl`：每行一条（问题 / 回答 / 分隔 / 出错），带模型、场景图文件名和版本、提问时的视图；
+  `meta.json` 记着结果的路径。**不存**提示词、工具参数、模型的推理文字，更没有 key。
+- `cache/<同一个键>/<场景图 SHA-256>.json`：交给 worker 的场景图快照（CODa 还有 `….background.yaml`），每个结果只留最新 2 份，整个目录有
+  大小上限；worker 只读这里，不读结果目录。
+
+**worker（容器 `daaam-replay-agent`）**
+
+- 第一次提问时启动：`docker compose run --rm -T --name daaam-replay-agent … daaam-ws python -m scripts.replay_web.agent_worker`。所有标签页和结果共用
+  这一个进程（不会一个标签页起一个模型进程），句向量模型和 CLIP 只加载一次，最近用的两个场景图留在内存里。它的日志显示在服务的终端里
+  （`[replay-web] agent: …`，key 形状的字符串会被遮盖）；CODa 场景图的 CLIP（PE-Core）在网络不好时会先打印几行 huggingface.co 重试警告，缓存里有就不影响回答。
+- 本机实测（gpt-5-mini，TUM fr1_desk2 和一个 CODa 序列 0 的结果同时打开）：worker 冷启动后的第一个问题约 2.5 分钟（模型加载占大头），之后每个
+  问题 30–60 秒（主要是模型自己的 2–3 轮调用）；换一个结果的第一个问题多加载一次场景图。两个结果的对话互不影响。CODa 的回答里时间是相对序列开头的秒数
+  （数据包清单里的时间原点），不是绝对时间戳。
+- 空闲 15 分钟后自己退出，把显存还回去（`--agent-idle-seconds N` 改，`0` = 不退出）；在页面里启动 Postprocess / Summarize 时，空闲的 worker 会立刻
+  退出（实测不到 1 秒容器就没了）；Ctrl+C 停服务时它跟着退出（实测 0.4 秒）；下一个问题会再启动它。服务被强杀（`kill -9`）时，worker 在标准输入
+  关闭后自己退出；万一还在：`docker stop daaam-replay-agent`。
+- 命令行里经过 `_coda-guard` 的重活（`just tum-post`、`tum-summarize`、`coda-depth`、`coda-run`、`coda-chunks`、`coda-post`、`coda-summarize`、`coda-ask`）看得到
+  这个 worker：它在跑时这些命令拒绝启动（显存装不下两个），提示里写着办法——等它空闲退出，或 `docker stop daaam-replay-agent`。页面里的任务不受影响
+  （启动时会先让空闲的 worker 退出）。
+- worker 的容器名是固定的（`daaam-replay-agent`），服务启动 worker 前会先 `docker rm -f` 同名的残留容器（强杀服务后可能留下）。所以**同一台机器上只开一个回看服务**：
+  第二个服务启动 worker 时会把第一个服务的 worker 当残留删掉，那边正在回答的问题以"问答进程中途退出了"失败，重试即可。
+
 ### 9.1 Rerun 可视化
 
 ```bash
@@ -788,20 +853,25 @@ python scripts/run_static_visualizer.py \
 Docker 用户需要先按照 [DOCKER.md](DOCKER.md) 配置 X11。无 GUI 环境可使用
 `--no-spawn`，或在有桌面的机器上读取输出文件。
 
-### 9.2 交互式场景问答
+### 9.2 交互式场景问答（命令行）
 
-该入口当前使用 CODa 序列的起始时间信息，因此 `--seq-id` 应是项目支持的
-CODa 序列编号。
+日常用页面里的问答（9.0.3 节）；命令行入口 `scripts/demo_query.py` 适合在容器里直接试，TUM 和 CODa 的场景图都能问。用同一套加载和
+只读工具（和页面里的问答一样）：
 
 ```bash
 export OPENAI_API_KEY=sk-...
+# TUM：时间从 0 开始，不需要序列号
+python scripts/demo_query.py \
+  --dsg-path output/tum_replay/out_<时间>/clustered_dsg.json \
+  --dataset-kind tum
+# CODa：--seq-id 给出序列开头的时间（也可以用 --time-origin 直接给）
 python scripts/demo_query.py \
   --dsg-path output/my_run/clustered_dsg_with_summaries.json \
   --seq-id 0 \
   --model-name gpt-5-mini
 ```
 
-启动后直接输入问题；输入空行或按 `Ctrl+C` 退出。
+启动后直接输入问题；输入空行或按 `Ctrl+C` 退出。只给 `--seq-id` 时仍按 CODa 序列处理。
 
 ### 9.3 查看数据集的图像和视频
 

@@ -46,6 +46,26 @@ class JustfileTest(unittest.TestCase):
 		self.assertIn("import selenium", output)
 		self.assertIn("browser test skipped", output)
 
+	def test_test_recipe_runs_the_agent_suites_without_asking_a_provider(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, output)
+		host, rest = output.split("docker compose run", 1)
+		container = rest.split("powershell", 1)[0]
+		for module in ("tests.test_replay_history", "tests.test_replay_agent_protocol", "tests.test_replay_agent_client", "tests.test_replay_chat"):
+			self.assertIn(module, host, "the service side of the chat is standard library only and is tested on the host: " + module)
+		for module in ("tests.test_scene_agent_conversation", "tests.test_replay_query"):
+			self.assertIn(module, container, "the Agent and the scene graph loader need the container: " + module)
+		for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+			self.assertNotIn(key, output, "the suites use fake providers: no command of the recipe hands over a key")
+
+	def test_the_container_guard_sees_the_replay_agent_worker(self) -> None:
+		for recipe in ("tum-post", "coda-post"):
+			result = self._dry_run(recipe)
+			text = result.stdout + result.stderr
+			self.assertEqual(result.returncode, 0, text)
+			self.assertIn("agent_worker", text, recipe + ": an idle chat worker holds models on the GPU, so a heavy job started from a terminal waits for it")
+
 	def test_bare_just_keeps_live_preview_as_the_default(self) -> None:
 		result = subprocess.run(
 			["just", "--dry-run"],

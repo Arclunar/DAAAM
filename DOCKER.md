@@ -147,6 +147,18 @@ docker stop daaam-replay-job-<编号>            # 脚本会先清掉自己的�
 ls -a output/…/out_…/ | grep replay-job         # 强杀后可能留下的 .replay-job-* 临时文件，可以直接删除
 ```
 
+页面里的问答由一个共享的 Agent worker 回答：服务在宿主机上启动 `docker compose run --rm -T --name daaam-replay-agent -e REPLAY_AGENT_MODELS=… daaam-ws python -m scripts.replay_web.agent_worker`，
+第一次提问时才启动，所有标签页和结果共用这一个容器（模型只加载一次）。它只读服务放在 `.replay-web/cache/` 里的场景图快照，没有 shell 或文件读取入口，
+API key 由容器自己从仓库的 `.env` 读（或由服务按变量名从它的环境里复制，值不出现在命令行上）。空闲 15 分钟（`--agent-idle-seconds`）、
+启动页面里的后处理任务、或服务停止时它会退出；服务被强行杀掉时它在标准输入关闭后自己退出。容器名固定，启动前服务会先 `docker rm -f` 同名的残留容器，
+所以同一台机器上只开一个回看服务（第二个会把第一个的 worker 当残留删掉）。页面里的任务不把它算作另一条管线（启动任务时服务先让空闲的 worker 退出），
+而 `just tum-post`、`coda-run` 等经过 `_coda-guard` 的命令行重活会把在跑的 worker 当作"问答的容器"，拒绝启动直到它退出。可以手动检查和清理：
+
+```bash
+docker ps --filter name=daaam-replay-agent     # worker 还在不在
+docker stop daaam-replay-agent                 # 手动停掉（下一个问题会重新启动它）
+```
+
 ## 清理
 
 普通的 `docker compose down` 不会删除工作区。只有确定不再需要容器内手动
