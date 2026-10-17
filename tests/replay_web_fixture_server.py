@@ -6,7 +6,8 @@ It serves the repository's replay workspace on an ephemeral loopback port, with 
 temporary directory, and prints one JSON line {"base": URL, "root": DIR} when it listens. After that every stdin line
 is one JSON command and gets one JSON reply line ({"error": ...} on failure); the commands build replay bundles with
 the real finalizer and change files the way a pipeline or a processing job would (scene graph files are published by
-atomic rename, as the processing scripts do). End of input stops the service and deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
+atomic rename, as the processing scripts do). Processing jobs run on a fake process runner instead of docker: the
+commands job_emit / job_finish play the part of the container. End of input stops the service and deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
 """
 
 import json
@@ -15,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -23,8 +25,10 @@ import cv2
 import numpy as np
 
 from scripts.replay_bundle import BundleOptions, finalize_bundle
+from scripts.replay_web.jobs import JobManager
 from scripts.replay_web.server import ServerConfig, create_server
 from tests.replay_fixtures import write_graph
+from tests.test_replay_jobs import FakeRunner
 
 REPO = Path(__file__).resolve().parents[1]
 CODA_ORIGIN = 1673884185.589118
@@ -179,11 +183,56 @@ class Fixtures:
 		return {}
 
 
+class FakeJobs:
+	"""The fake container of the processing jobs: the test decides what it prints, writes and exits with."""
+
+	def __init__(self, root: Path):
+		self.runner = FakeRunner()
+		self.api_key = True
+		self.manager = JobManager(state_root=root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: self.api_key,
+			busy_check=lambda: None, stop_container=lambda job_id: None, grace=0.3, stop_wait=0.3)
+
+	def calls(self) -> Dict[str, Any]:
+		return {"calls": [call["argv"] for call in self.runner.calls]}
+
+	def emit(self, line: str, index: int = -1) -> Dict[str, Any]:
+		self.runner.processes[index].emit(line)
+		return {}
+
+	def finish(self, code: int = 0, files: Optional[List[str]] = None, path: Optional[str] = None, index: int = -1, rooms: Any = False) -> Dict[str, Any]:
+		"""Write the files the stage publishes (scene graphs through the fixtures' writer), then exit with `code`."""
+		for name in files or []:
+			target = Path(path) / name
+			if name.endswith(".json"):
+				write_graph(target, name, atomic=True, objects=[7, 8], rooms=rooms if name.startswith("clustered_dsg_with") else False)
+			else:
+				target.write_text("region_summaries: []\n", encoding="utf-8")
+		self.runner.processes[index].finish(code)
+		return {}
+
+	def set_api_key(self, present: bool) -> Dict[str, Any]:
+		self.api_key = bool(present)
+		return {}
+
+	def reset(self) -> Dict[str, Any]:
+		"""End every unfinished fake job and forget the commands run so far, so that a test starts with a free slot and
+		sees only its own calls."""
+		for process in self.runner.processes:
+			process.finish(143)
+		deadline = time.monotonic() + 10
+		while time.monotonic() < deadline and any(job.state in ("queued", "running") for job in self.manager._jobs.values()):
+			time.sleep(0.02)
+		self.runner.calls.clear()
+		self.runner.processes.clear()
+		return {}
+
+
 def main() -> int:
 	root = Path(tempfile.mkdtemp(prefix="daaam-replay-browser-"))
 	fixtures = Fixtures(root)
+	jobs = FakeJobs(root)
 	server = create_server(ServerConfig(repo_root=REPO, output_root=fixtures.output, state_root=root / "state",
-		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0, graph_interval=0.2))
+		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0, graph_interval=0.2), jobs=jobs.manager)
 	thread = threading.Thread(target=server.serve_forever, daemon=True)
 	thread.start()
 	commands: Dict[str, Callable[..., Dict[str, Any]]] = {
@@ -194,6 +243,11 @@ def main() -> int:
 		"write_graph": fixtures.write_graph,
 		"write_text": fixtures.write_text,
 		"remove_file": fixtures.remove_file,
+		"job_calls": jobs.calls,
+		"job_emit": jobs.emit,
+		"job_finish": jobs.finish,
+		"job_api_key": jobs.set_api_key,
+		"job_reset": jobs.reset,
 	}
 
 	def reply(value: Dict[str, Any]) -> None:

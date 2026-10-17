@@ -14,7 +14,7 @@ const run = (runId) => `/api/runs/${encodeURIComponent(runId)}`;
 const withVersion = (url, version) => (version ? `${url}?v=${encodeURIComponent(version)}` : url);
 
 // The event types the service sends (scripts/replay_web/events.py); a handler object names the ones it wants.
-const EVENT_TYPES = ['state', 'graph', 'artifact-error', 'closed'];
+const EVENT_TYPES = ['state', 'graph', 'artifact-error', 'closed', 'job-state', 'job-log'];
 
 // One server-sent events connection for all the results this page has open. A browser allows only a handful of
 // connections per origin, so a stream per tab would starve the chunk and image requests; instead the single stream is
@@ -30,7 +30,8 @@ export class EventHub {
     this.connected = null;
   }
 
-  // handlers: { state(data), graph(data), 'artifact-error'(data), closed(data), connection({connected}) }; returns the unsubscribe function
+  // handlers: { state(data), graph(data), 'artifact-error'(data), closed(data), 'job-state'(data), 'job-log'(data), connection({connected}) };
+  // returns the unsubscribe function
   subscribe(runId, handlers) {
     let handlerSet = this.watchers.get(runId);
     if (!handlerSet) { handlerSet = new Set(); this.watchers.set(runId, handlerSet); }
@@ -146,6 +147,11 @@ export class ReplayApi {
   async manifest(runId) { return this.request(`${run(runId)}/manifest`); }
   // The active scene graph: { scanned, version, document, artifacts, priority }; version and document are null without a graph.
   async graph(runId) { return this.request(`${run(runId)}/graph`); }
+  // The processing jobs of a result and what each stage may do now: { jobs, logs, actions }.
+  async jobs(runId) { return this.request(`${run(runId)}/jobs`); }
+  // stage: 'postprocess' | 'summarize' | 'all'; replace: the person agreed to replace the outputs that exist already.
+  async startJob(runId, stage, replace = false) { return this.request(`${run(runId)}/jobs`, { method: 'POST', body: { stage, replace } }); }
+  async cancelJob(jobId) { return this.request(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST', body: {} }); }
   // Follow what changes in an open result (see EventHub.subscribe); returns the function that stops following it.
   events(runId, handlers) {
     if (!this.hub) this.hub = new EventHub();

@@ -1,6 +1,7 @@
 """Real-browser tests of the replay workspace: tabs, restoration, the result list, scene graph hot reload (RUN_BROWSER_TESTS=1)."""
 
 import unittest
+from typing import Optional
 
 from tests.replay_browser_support import RUN_BROWSER_TESTS, ActionChains, By, FixtureService, Keys, WebDriverWait, make_driver, severe_logs
 
@@ -334,6 +335,172 @@ class WorkspaceGraphBrowserTest(WorkspaceBrowserTestCase):
 		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"))
 		self.wait_for_tabs(1)
 		self.wait_for_badge(self.result, "clustered_dsg.json")
+		self.assertEqual(severe_logs(self.driver), [])
+
+
+class WorkspaceTasksBrowserTest(WorkspaceBrowserTestCase):
+	"""Postprocess, Summarize and 全部运行 from the page. The container is a fake: the test prints, writes and exits for it."""
+
+	PANE = "section.result-pane:not([hidden])"
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.fixtures.call("job_reset")
+		self.addCleanup(lambda: self.fixtures.call("job_api_key", present=True))
+		self.addCleanup(lambda: self.fixtures.call("job_reset"))
+		self.result = self.fixtures.call("make_result", name="task_tum", kind="tum", sequence="fr1_desk")["path"]
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])
+
+	def open_tasks(self, path: Optional[str] = None) -> None:
+		self.open_workspace()
+		self.open_result(path or self.result)
+		self.show_tasks()
+
+	def show_tasks(self) -> None:
+		self.wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=tasks]"))
+		self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=tasks]").click()
+
+	def control(self, role: str):
+		return self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-role={role}]")
+
+	def text(self, role: str) -> str:
+		return self.control(role).text
+
+	def wait_for_text(self, role: str, text: str) -> None:
+		self.wait.until(lambda d: text in self.text(role))
+
+	def wait_enabled(self, role: str, enabled: bool = True) -> None:
+		self.wait.until(lambda d: self.control(role).is_enabled() == enabled)
+
+	def badge(self) -> str:
+		return self.script("return document.querySelector('section.result-pane:not([hidden]) [data-role=graph-badge]').dataset.graph")
+
+	def wait_for_badge(self, name: str) -> None:
+		self.wait.until(lambda d: self.badge() == name)
+
+	def calls(self):
+		return self.fixtures.call("job_calls")["calls"]
+
+	def test_postprocess_runs_streams_its_output_and_promotes_the_new_graph(self) -> None:
+		self.open_tasks()
+		self.wait_for_badge("dsg.json")
+		self.wait_enabled("task-postprocess")
+		self.assertTrue(self.control("task-all").is_enabled())
+		self.assertFalse(self.control("task-summarize").is_enabled(), "the summaries need the clustering first")
+		self.assertIn("Postprocess", self.text("task-note"))
+		self.assertFalse(self.control("task-cancel").is_enabled())
+		self.control("task-postprocess").click()
+		self.wait_for_text("task-status", "运行中")
+		self.wait_enabled("task-postprocess", False)
+		self.fixtures.call("job_emit", line="=== sentence embeddings")
+		self.wait_for_text("task-log", "sentence embeddings")
+		command = self.calls()[0]
+		self.assertEqual(command[-4:], ["--atomic", "--stage", "postprocess", "/selected-result"])
+		self.assertIn("PLACES_LAYER=PLACES", command, "TUM settings come from the manifest")
+		self.fixtures.call("job_finish", code=0, files=["dsg_updated.json", "clustered_dsg.json"], path=self.result)
+		self.wait_for_badge("clustered_dsg.json")
+		self.wait_for_text("task-status", "空闲")
+		self.wait_for_text("task-jobs", "成功")
+		self.wait_enabled("task-summarize")
+		self.assertIn("sentence embeddings", self.text("task-log"), "the output stays after the job")
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_summarize_follows_postprocess_and_brings_the_room_summaries(self) -> None:
+		self.fixtures.call("write_graph", path=self.result, name="dsg_updated.json", objects=[7, 8])
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.open_tasks()
+		self.wait_for_badge("clustered_dsg.json")
+		self.wait_enabled("task-summarize")
+		self.control("task-summarize").click()
+		self.wait_for_text("task-status", "Summarize")
+		self.assertEqual(self.calls()[0][-3:], ["--stage", "summarize", "/selected-result"])
+		self.fixtures.call("job_finish", code=0, files=["clustered_dsg_with_summaries.json", "region_summaries.yaml"], path=self.result, rooms=[["office", "a desk area"]])
+		self.wait_for_badge("clustered_dsg_with_summaries.json")
+		self.assertIn("1 个房间(1 个有摘要)", self.script("return document.querySelector('section.result-pane:not([hidden]) [data-role=graph-badge]').textContent"))
+
+	def test_running_a_stage_again_needs_an_explicit_confirmation(self) -> None:
+		self.fixtures.call("write_graph", path=self.result, name="dsg_updated.json", objects=[7, 8])
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.open_tasks()
+		self.wait_for_text("task-postprocess", "重新运行 Postprocess")
+		self.control("task-postprocess").click()
+		self.wait.until(lambda d: self.control("task-confirm").is_displayed())
+		self.assertIn("dsg_updated.json", self.text("task-confirm"))
+		self.control("task-confirm-no").click()
+		self.wait.until(lambda d: not self.control("task-confirm").is_displayed())
+		self.assertEqual(self.calls(), [], "declining starts nothing")
+		self.control("task-postprocess").click()
+		self.wait.until(lambda d: self.control("task-confirm").is_displayed())
+		self.control("task-confirm-yes").click()
+		self.wait_for_text("task-status", "运行中")
+		self.assertEqual(len(self.calls()), 1)
+		self.assertTrue(self.script("return window.replayWorkspace.activeTab().tasks.jobs[0].replace"))
+
+	def test_a_running_job_can_be_cancelled_and_the_graph_stays(self) -> None:
+		self.open_tasks()
+		self.wait_for_badge("dsg.json")
+		self.wait_enabled("task-postprocess")
+		self.control("task-postprocess").click()
+		self.wait_for_text("task-status", "运行中")
+		self.wait_enabled("task-cancel")
+		self.control("task-cancel").click()
+		self.wait_for_text("task-jobs", "已取消")
+		self.wait_for_text("task-status", "空闲")
+		self.wait_enabled("task-postprocess")
+		self.assertEqual(self.badge(), "dsg.json")
+		self.assertFalse(self.control("task-cancel").is_enabled())
+
+	def test_a_failed_job_shows_its_exit_status_and_can_be_retried_without_touching_the_graph(self) -> None:
+		self.open_tasks()
+		self.wait_for_badge("dsg.json")
+		self.wait_enabled("task-postprocess")
+		self.control("task-postprocess").click()
+		self.wait_for_text("task-status", "运行中")
+		self.fixtures.call("job_emit", line="the embedding step failed")
+		self.fixtures.call("job_finish", code=3)
+		self.wait_for_text("task-jobs", "失败")
+		self.assertIn("exit status 3", self.text("task-jobs"))
+		self.assertIn("the embedding step failed", self.text("task-log"))
+		self.assertEqual(self.badge(), "dsg.json", "a failed job never changes the shown graph")
+		self.wait_enabled("task-postprocess")
+		self.control("task-retry").click()
+		self.wait_for_text("task-status", "运行中")
+		self.assertEqual(len(self.calls()), 2)
+
+	def test_without_an_api_key_the_summary_stages_say_why(self) -> None:
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.fixtures.call("job_api_key", present=False)
+		self.open_tasks()
+		self.wait_for_badge("clustered_dsg.json")
+		self.wait_enabled("task-summarize", False)
+		self.assertIn("OPENAI_API_KEY", self.text("task-note"))
+		self.assertTrue(self.control("task-postprocess").is_enabled() or "重新运行" in self.text("task-postprocess"))
+
+	def test_a_background_tab_keeps_its_own_jobs_marks_their_end_and_shows_them_when_opened(self) -> None:
+		other = self.fixtures.call("make_result", name="task_coda", kind="coda", sequence="0", outside=True)["path"]
+		self.fixtures.call("write_graph", path=other, name="dsg.json", objects=[7, 8])
+		self.open_tasks()
+		self.wait_for_badge("dsg.json")
+		self.wait_enabled("task-postprocess")
+		self.control("task-postprocess").click()
+		self.wait_for_text("task-status", "运行中")
+		self.fixtures.call("job_emit", line="first result output")
+		self.open_result(other)
+		self.show_tasks()
+		marker = lambda: self.script("return document.querySelector('.tab[data-path=\"' + arguments[0] + '\"]').parentElement.querySelector('.tab__marker').className", self.result)
+		self.wait.until(lambda d: "busy" in marker().split())
+		self.assertEqual(self.text("task-log"), "", "another result's output never shows here")
+		self.wait_for_text("task-jobs", "还没有运行过任务")
+		self.fixtures.call("job_emit", line="more output")
+		self.fixtures.call("job_finish", code=0, files=["dsg_updated.json", "clustered_dsg.json"], path=self.result)
+		self.wait.until(lambda d: "done" in marker().split())
+		self.assertNotIn("busy", marker().split())
+		self.tab_for(self.result).click()
+		self.wait_for_text("task-log", "more output")
+		self.assertIn("first result output", self.text("task-log"))
+		self.wait_for_badge("clustered_dsg.json")
+		self.assertNotIn("done", marker().split(), "looking at the tab clears the marker")
+		self.assertEqual(self.calls()[0][-4:][-1], "/selected-result")
 		self.assertEqual(severe_logs(self.driver), [])
 
 

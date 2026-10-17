@@ -679,6 +679,45 @@ class JobShutdownTest(JobTestCase):
 		fresh.transition("succeeded")
 
 
+class JobAvailabilityTest(JobTestCase):
+	def test_each_stage_reports_whether_it_may_run_and_whether_it_needs_confirmation(self) -> None:
+		manager = self.manager()
+		raw = self.result("raw")
+		actions = manager.availability(raw)
+		self.assertEqual(set(actions), {"postprocess", "summarize", "all"})
+		self.assertEqual(actions["postprocess"], {"available": True, "confirm": False, "existing": [], "code": None, "reason": None})
+		self.assertFalse(actions["summarize"]["available"])
+		self.assertEqual(actions["summarize"]["code"], "prerequisite")
+		self.assertIn("Postprocess", actions["summarize"]["reason"])
+		self.assertTrue(actions["all"]["available"])
+		clustered = self.result("clustered", "dsg_updated.json", "clustered_dsg.json")
+		actions = manager.availability(clustered)
+		self.assertEqual((actions["postprocess"]["available"], actions["postprocess"]["confirm"]), (True, True))
+		self.assertEqual(actions["postprocess"]["existing"], ["dsg_updated.json", "clustered_dsg.json"])
+		self.assertEqual((actions["summarize"]["available"], actions["summarize"]["confirm"]), (True, False))
+		self.assertEqual((actions["all"]["available"], actions["all"]["confirm"]), (True, True))
+		self.assertEqual(manager.availability(self.root / "missing")["postprocess"]["code"], "prerequisite")
+
+	def test_without_an_api_key_only_the_summary_stages_are_unavailable(self) -> None:
+		manager = self.manager(api_key_check=lambda: False)
+		actions = manager.availability(self.result("clustered", "clustered_dsg.json"))
+		self.assertTrue(actions["postprocess"]["available"])
+		for stage in ("summarize", "all"):
+			self.assertEqual((actions[stage]["available"], actions[stage]["code"]), (False, "api-key"))
+
+	def test_an_unfinished_job_blocks_every_stage_until_it_ends(self) -> None:
+		path = self.result("tum")
+		manager = self.manager()
+		job = manager.start(self.spec(path))
+		self.wait_state(manager, job.job_id, "running")
+		for stage, action in manager.availability(path).items():
+			with self.subTest(stage=stage):
+				self.assertEqual((action["available"], action["code"]), (False, "conflict"))
+		self.runner.processes[0].finish(1)
+		self.wait_state(manager, job.job_id, "failed")
+		self.assertTrue(manager.availability(path)["postprocess"]["available"])
+
+
 class JobSerializationTest(JobTestCase):
 	def test_the_browser_view_of_a_job_has_no_host_path_and_is_json(self) -> None:
 		path = self.result("tum")
@@ -709,7 +748,7 @@ class JobSerializationTest(JobTestCase):
 		self.wait_state(manager, job.job_id, "failed")
 		state = manager.state_for_run("a")
 		self.assertEqual(state["logs"], {job.job_id: ["=== sentence embeddings"]}, "the newest job keeps its log for the failure display")
-		self.assertEqual(manager.state_for_run("unknown"), {"jobs": [], "logs": {}})
+		self.assertEqual(manager.state_for_run("unknown"), {"jobs": [], "logs": {}, "actions": {}})
 
 
 if __name__ == "__main__":

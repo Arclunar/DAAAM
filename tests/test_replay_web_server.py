@@ -503,6 +503,138 @@ class ReplayServerJobsWiringTest(ReplayServerTestCase):
 		self.assertEqual([item["job_id"] for item in state["jobs"]], [job.job_id])
 
 
+class ReplayServerJobsApiTest(ReplayServerTestCase):
+	"""POST /api/runs/{id}/jobs, GET /api/runs/{id}/jobs and POST /api/jobs/{id}/cancel, with a job manager that runs no docker."""
+
+	def make_server(self):
+		write_graph(self.result / "dsg.json", atomic=True)
+		write_graph(self.coda / "dsg.json", atomic=True)
+		self.runner = FakeRunner()
+		self.jobs = JobManager(state_root=self.root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: self.api_key,
+			busy_check=lambda: self.busy, stop_container=lambda job_id: None, grace=0.05, stop_wait=0.05)
+		self.addCleanup(self.jobs.shutdown)
+		return create_server(self.server_config(), jobs=self.jobs)
+
+	api_key = True
+	busy = None
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.opened = self.open_result(self.result)
+		self.run = f"/api/runs/{self.opened['run_id']}"
+
+	def start(self, body, path=None, **kwargs):
+		return self.mutate("POST", (path or self.run) + "/jobs", body, **kwargs)
+
+	def test_a_stage_starts_and_its_job_is_listed_with_what_each_stage_may_do(self) -> None:
+		status, started = self.start({"stage": "postprocess"})
+		self.assertEqual(status, 201, started)
+		job = started["job"]
+		self.assertEqual((job["stage"], job["dataset_kind"], job["replace"], job["run_id"]), ("postprocess", "tum", False, self.opened["run_id"]))
+		self.assertRegex(job["job_id"], r"^[0-9a-f]{16}$")
+		self.wait_for(lambda: self.runner.processes, message="the job to start")
+		listing = self.get_json(self.run + "/jobs")
+		self.assertEqual([item["job_id"] for item in listing["jobs"]], [job["job_id"]])
+		self.assertEqual(listing["jobs"][0]["state"], "running")
+		self.assertEqual({name: action["available"] for name, action in listing["actions"].items()}, {"postprocess": False, "summarize": False, "all": False})
+		self.assertEqual(listing["actions"]["postprocess"]["code"], "conflict")
+		text = json.dumps(listing)
+		self.assertNotIn(str(self.result), text, "the browser never sees host paths")
+		self.runner.processes[0].emit("=== sentence embeddings")
+		listing = self.wait_for(lambda: (lambda data: data if data["logs"] else None)(self.get_json(self.run + "/jobs")), message="the log")
+		self.assertEqual(listing["logs"], {job["job_id"]: ["=== sentence embeddings"]})
+
+	def test_the_command_follows_the_manifest_not_the_request(self) -> None:
+		other = self.open_result(self.coda)
+		self.assertEqual(self.start({"stage": "postprocess"})[0], 201)
+		self.assertEqual(self.start({"stage": "all"}, path=f"/api/runs/{other['run_id']}")[0], 201)
+		self.wait_for(lambda: len(self.runner.calls) == 1, message="the first job")
+		tum = self.runner.calls[0]["argv"]
+		self.assertIn("PLACES_LAYER=PLACES", tum)
+		self.assertEqual(tum[-4:], ["--atomic", "--stage", "postprocess", "/selected-result"])
+		self.assertEqual(tum[tum.index("-v") + 1], "%s:/selected-result" % self.result)
+		self.runner.processes[0].finish(1)
+		self.wait_for(lambda: len(self.runner.calls) == 2, message="the queued CODa job")
+		coda = self.runner.calls[1]["argv"]
+		self.assertNotIn("PLACES_LAYER=PLACES", coda)
+		self.assertEqual(coda[-4:], ["--atomic", "--stage", "all", "/selected-result"])
+		self.assertEqual(coda[coda.index("-v") + 1], "%s:/selected-result" % self.coda)
+
+	def test_mutations_need_the_page_origin_and_the_token(self) -> None:
+		self.assertEqual(self.start({"stage": "postprocess"}, csrf=False)[0], 403)
+		self.assertEqual(self.start({"stage": "postprocess"}, origin=False)[0], 403)
+		self.assertEqual(self.start({"stage": "postprocess"}, extra={"X-Replay-CSRF": "wrong"})[0], 403)
+		self.assertEqual(self.mutate("POST", "/api/jobs/0123456789abcdef/cancel", {}, csrf=False)[0], 403)
+		self.assertEqual(self.mutate("POST", "/api/jobs/0123456789abcdef/cancel", {}, origin=False)[0], 403)
+		self.assertEqual(self.runner.calls, [])
+		status, headers, _ = self.request("GET", self.run + "/jobs", headers={"Host": f"evil.example:{self.port}"})
+		self.assertEqual(status, 403)
+
+	def test_bad_requests_are_refused_before_anything_runs(self) -> None:
+		for body in ({}, {"stage": 1}, {"stage": None}, {"stage": "postprocess", "extra": 1}, {"replace": True}):
+			with self.subTest(body=body):
+				status, error = self.start(body)
+				self.assertEqual((status, error["code"]), (400, "request"), error)
+		for stage in ("everything", "POSTPROCESS", "", "postprocess; id", "--atomic"):
+			with self.subTest(stage=stage):
+				status, error = self.start({"stage": stage})
+				self.assertEqual((status, error["code"]), (400, "stage"), error)
+		self.assertEqual(self.start({"stage": "postprocess", "replace": "yes"})[1]["code"], "request")
+		self.assertEqual(self.start({"stage": "postprocess"}, path="/api/runs/nope")[0], 404)
+		self.assertEqual(self.request("POST", self.run + "/jobs", b"{", {"X-Replay-CSRF": self.csrf, "Origin": self.base})[0], 400)
+		self.assertEqual(self.runner.calls, [])
+
+	def test_prerequisites_confirmation_conflicts_and_the_key_are_reported_with_codes(self) -> None:
+		status, error = self.start({"stage": "summarize"})
+		self.assertEqual((status, error["code"]), (422, "prerequisite"), error)
+		self.assertIn("Postprocess", error["error"])
+		self.api_key = False
+		status, error = self.start({"stage": "all"})
+		self.assertEqual((status, error["code"]), (422, "api-key"), error)
+		self.api_key = True
+		self.busy = "another DAAAM container is running (run_coda_example)"
+		status, error = self.start({"stage": "postprocess"})
+		self.assertEqual((status, error["code"]), (409, "busy"), error)
+		self.busy = None
+		(self.result / "dsg_updated.json").write_text("{}", encoding="utf-8")
+		status, error = self.start({"stage": "postprocess"})
+		self.assertEqual((status, error["code"]), (409, "confirm"), error)
+		self.assertIn("dsg_updated.json", error["error"])
+		self.assertEqual(self.runner.calls, [])
+		status, started = self.start({"stage": "postprocess", "replace": True})
+		self.assertEqual(status, 201, started)
+		status, error = self.start({"stage": "postprocess", "replace": True})
+		self.assertEqual((status, error["code"]), (409, "conflict"), error)
+
+	def test_a_job_is_cancelled_by_id_and_unknown_or_finished_ones_are_refused(self) -> None:
+		status, started = self.start({"stage": "postprocess"})
+		job_id = started["job"]["job_id"]
+		self.wait_for(lambda: self.runner.processes, message="the job to start")
+		status, cancelled = self.mutate("POST", f"/api/jobs/{job_id}/cancel", {})
+		self.assertEqual(status, 200, cancelled)
+		self.assertTrue(cancelled["job"]["cancel_requested"])
+		self.wait_for(lambda: self.get_json(self.run + "/jobs")["jobs"][0]["state"] == "cancelled", message="the cancellation")
+		status, error = self.mutate("POST", f"/api/jobs/{job_id}/cancel", {})
+		self.assertEqual((status, error["code"]), (409, "state"), error)
+		for bad in ("0123456789abcdef", "nope", "..%2F..%2Fetc"):
+			with self.subTest(job=bad):
+				self.assertEqual(self.mutate("POST", f"/api/jobs/{bad}/cancel", {})[0], 404)
+		self.assertEqual(self.request("GET", f"/api/jobs/{job_id}/cancel")[0], 405)
+		self.assertEqual(self.mutate("DELETE", f"/api/jobs/{job_id}/cancel")[0], 405)
+
+	def test_the_jobs_of_one_result_are_not_listed_for_another(self) -> None:
+		other = self.open_result(self.coda)
+		self.assertEqual(self.start({"stage": "postprocess"})[0], 201)
+		self.wait_for(lambda: self.runner.processes, message="the job to start")
+		mine = self.get_json(self.run + "/jobs")
+		theirs = self.get_json(f"/api/runs/{other['run_id']}/jobs")
+		self.assertEqual(len(mine["jobs"]), 1)
+		self.assertEqual(theirs["jobs"], [])
+		self.assertTrue(theirs["actions"]["postprocess"]["available"], "a job of the first result does not block the second")
+		self.assertEqual(self.request("GET", "/api/runs/nope/jobs")[0], 404)
+		self.assertEqual(self.mutate("DELETE", self.run + "/jobs")[0], 405)
+
+
 class ReplayServerApplicationTest(ReplayServerTestCase):
 	def test_the_single_root_page_and_its_static_files(self) -> None:
 		status, headers, data = self.request("GET", "/")

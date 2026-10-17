@@ -525,7 +525,8 @@ class JobManager:
 		return self._log(job_id).tail(lines)
 
 	def state_for_run(self, run_id: str, recent: int = 5, log_lines: int = 100) -> Dict[str, Any]:
-		"""What a page needs to show a result's jobs: the newest few, and the output of those still running and of the newest."""
+		"""What a page needs to show a result's jobs: the newest few, the output of those still running and of the newest,
+		and what each stage may do now (`availability`)."""
 		jobs = self.list_for_run(run_id)[:recent]
 		logs = {}
 		for index, job in enumerate(jobs):
@@ -533,7 +534,8 @@ class JobManager:
 				tail = self.log_tail(job.job_id, log_lines)
 				if tail:
 					logs[job.job_id] = tail
-		return {"jobs": [job.to_json() for job in jobs], "logs": logs}
+		path = self.path_of_run(run_id) if self.path_of_run is not None else (jobs[0].result_path if jobs else None)
+		return {"jobs": [job.to_json() for job in jobs], "logs": logs, "actions": self.availability(path) if path is not None else {}}
 
 	# ------------------------------------------------------------------ starting
 	def start(self, spec: JobSpec) -> JobRecord:
@@ -577,22 +579,52 @@ class JobManager:
 				if job.result_path == path and job.state in ("queued", "running"):
 					raise JobConflict("job %s of this result is still %s: wait for it or cancel it" % (job.job_id, job.state))
 
-	def _check_prerequisites(self, spec: JobSpec, path: Path) -> None:
-		def present(name: str) -> bool:
-			try:
-				return (path / name).stat().st_size > 0
-			except OSError:
-				return False
+	@staticmethod
+	def _present(path: Path, name: str) -> bool:
+		try:
+			return (path / name).stat().st_size > 0
+		except OSError:
+			return False
 
+	def _refusal(self, stage: JobStage, path: Path) -> Optional[Tuple[str, str]]:
+		"""Why a stage cannot run on this result at all, as (code, message); None when it can."""
 		if not (path / "dsg.json").is_file():
-			raise JobRefused("this result has no dsg.json: only a finished mapping result can be processed", "prerequisite")
-		if spec.stage is JobStage.SUMMARIZE and not present("clustered_dsg.json"):
-			raise JobRefused("Summarize needs clustered_dsg.json: run Postprocess first", "prerequisite")
-		if spec.stage is not JobStage.POSTPROCESS and not self.api_key_check():
-			raise JobRefused("the region summaries are written by OpenAI: put OPENAI_API_KEY=... into the .env file in the repository directory", "api-key")
+			return "prerequisite", "this result has no dsg.json: only a finished mapping result can be processed"
+		if stage is JobStage.SUMMARIZE and not self._present(path, "clustered_dsg.json"):
+			return "prerequisite", "Summarize needs clustered_dsg.json: run Postprocess first"
+		if stage is not JobStage.POSTPROCESS and not self.api_key_check():
+			return "api-key", "the region summaries are written by OpenAI: put OPENAI_API_KEY=... into the .env file in the repository directory"
+		return None
+
+	def _check_prerequisites(self, spec: JobSpec, path: Path) -> None:
+		refusal = self._refusal(spec.stage, path)
+		if refusal is not None:
+			raise JobRefused(refusal[1], refusal[0])
 		existing = [name for name in spec.stage.outputs if (path / name).exists()]
 		if existing and not spec.replace:
 			raise JobRefused("%s already produced %s; confirm to run it again and replace them" % (spec.stage.label, ", ".join(existing)), "confirm")
+
+	def availability(self, path: Path) -> Dict[str, Dict[str, Any]]:
+		"""What each stage can do for a result right now, from the files and jobs on record: the page's buttons follow this.
+
+		available: it may be started; confirm: it may, but only after the person agreed to replace `existing` outputs;
+		code/reason: why it may not (conflict, prerequisite, api-key).
+		"""
+		path = Path(path)
+		with self._lock:
+			unfinished = next((job for job in self._jobs.values() if job.result_path == path and job.state in ("queued", "running")), None)
+		actions: Dict[str, Dict[str, Any]] = {}
+		for stage in JobStage:
+			existing = [name for name in stage.outputs if (path / name).exists()]
+			if unfinished is not None:
+				refusal: Optional[Tuple[str, str]] = ("conflict", "a job of this result is still %s" % unfinished.state)
+			else:
+				refusal = self._refusal(stage, path)
+			actions[stage.value] = {
+				"available": refusal is None, "confirm": refusal is None and bool(existing), "existing": existing,
+				"code": refusal[0] if refusal else None, "reason": refusal[1] if refusal else None,
+			}
+		return actions
 
 	# ------------------------------------------------------------------ scheduling and running
 	def _spawn(self, target: Callable[..., None], args: Tuple[Any, ...], name: str) -> None:

@@ -221,7 +221,7 @@ Follow `2026-10-16-replay-web-processing-implementation.md`:
 - [x] Task 1: select and monitor the active scene graph. (`08c47d2`)
 - [x] Task 2: publish graph changes through SSE and apply them per tab. (`c86dcbe`)
 - [x] Task 3: make postprocess/summarize stage outputs atomic. (`13e4f4e`)
-- [ ] Task 4: supervise allowlisted processing jobs.
+- [x] Task 4: supervise allowlisted processing jobs. (`f8559b1`)
 - [ ] Task 5: expose job APIs and the per-tab task panel.
 - [ ] Task 6: verify TUM and CODa workflows and document recovery.
 

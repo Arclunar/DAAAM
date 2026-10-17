@@ -10,7 +10,9 @@ serves only:
   an open result's bundle that its validated manifest names (timeline chunks, images, the reference mesh), the active
   scene graph of an open result, and a server-sent events stream of what changes (/api/runs/{id}/events for one result,
   /api/events?run=...&run=... for several over one connection, since a browser allows only a few per origin). Processing
-  jobs (scripts/replay_web/jobs.py) run in the daaam-ws container; their progress arrives on the same streams.
+  jobs (scripts/replay_web/jobs.py) run in the daaam-ws container: POST /api/runs/{id}/jobs {"stage", "replace"} starts one
+  of three allowlisted stages, GET lists them with what each stage may do now, POST /api/jobs/{id}/cancel stops one; their
+  progress arrives on the event streams.
 
 There is no general file-read or command endpoint. The service binds 127.0.0.1 only and refuses requests whose Host
 header is not this loopback address (a DNS-rebound page cannot read it); POST and DELETE also need the page's Origin
@@ -39,7 +41,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set
 
 from scripts.replay_web.artifacts import GRAPH_PRIORITY, ArtifactMonitor
 from scripts.replay_web.events import EventBroker, SubscriptionClosed, encode_sse
-from scripts.replay_web.jobs import JobManager, JobRecord
+from scripts.replay_web.jobs import JobError, JobManager, JobRecord, JobSpec, JobStage
 from scripts.replay_web.manifest import SCHEMA_VERSION, ManifestError, resolve_bundle_member
 from scripts.replay_web.paths import PathError
 from scripts.replay_web.runs import OpenRun, RunRegistry
@@ -218,6 +220,36 @@ class ReplayService:
 			"bundle_version": assets.version,
 		}
 
+	def jobs_payload(self, run_id: str) -> Dict[str, Any]:
+		self.run(run_id)
+		return self.jobs.state_for_run(run_id)
+
+	def start_job(self, run_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+		"""Start one allowlisted stage on an open result. The browser chooses the stage and whether to replace; the dataset
+		kind comes from the result's own manifest, the path from the registry, and nothing else reaches the command."""
+		run = self.run(run_id)
+		unknown = sorted(set(body) - {"stage", "replace"})
+		if unknown or not isinstance(body.get("stage"), str):
+			raise HttpError(400, 'send {"stage": "postprocess" | "summarize" | "all", "replace": false}', "request")
+		try:
+			stage = JobStage(body["stage"])
+		except ValueError as error:
+			raise HttpError(400, "unknown stage: use postprocess, summarize or all", "stage") from error
+		replace = body.get("replace", False)
+		if not isinstance(replace, bool):
+			raise HttpError(400, "replace must be true or false", "request")
+		spec = JobSpec(run_id=run.run_id, result_path=run.canonical_path, dataset_kind=run.manifest["dataset"]["kind"], stage=stage, replace=replace)
+		try:
+			return {"job": self.jobs.start(spec).to_json()}
+		except JobError as error:
+			raise HttpError(error.status, str(error), error.code) from error
+
+	def cancel_job(self, job_id: str) -> Dict[str, Any]:
+		try:
+			return {"job": self.jobs.cancel(job_id).to_json()}
+		except JobError as error:
+			raise HttpError(error.status, str(error), error.code) from error
+
 	def close(self, run_id: str) -> None:
 		self.run(run_id)
 		self.registry.close(run_id)
@@ -392,6 +424,11 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 			if method != "GET":
 				raise HttpError(405, "method not allowed", "method")
 			return self.serve_shared_events(query.get("run", []))
+		if len(segments) == 3 and segments[0] == "jobs" and segments[2] == "cancel":
+			if method != "POST":
+				raise HttpError(405, "method not allowed", "method")
+			self.read_json()
+			return self.send_json(200, service.cancel_job(segments[1]))
 		if len(segments) >= 2 and segments[0] == "runs":
 			run_id, rest = segments[1], segments[2:]
 			if not rest:
@@ -399,6 +436,12 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 					raise HttpError(405, "method not allowed", "method")
 				service.close(run_id)
 				return self.send_json(204, None)
+			if rest == ["jobs"]:
+				if method == "POST":
+					return self.send_json(201, service.start_job(run_id, self.read_json()))
+				if method == "GET":
+					return self.send_json(200, service.jobs_payload(run_id))
+				raise HttpError(405, "method not allowed", "method")
 			if method != "GET":
 				raise HttpError(405, "method not allowed", "method")
 			if rest == ["manifest"]:

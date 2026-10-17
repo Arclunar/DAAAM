@@ -184,7 +184,7 @@ const TEMPLATE = `
   <div class="help">左键旋转 · 右键或 Shift+左键平移<br>滚轮缩放 · 双击复位<br>点击物体框内或右侧列表:选择实体<br>空格 播放/暂停 · ←/→ 单步</div>
 </div>
 <aside class="viewer-sidebar" data-role="sidebar">
-  <nav class="sidebar-tabs" data-role="sidebar-tabs"><button type="button" class="active" data-section-tab="entities">实体</button></nav>
+  <nav class="sidebar-tabs" data-role="sidebar-tabs"><button type="button" class="active" data-section-tab="entities">实体</button><button type="button" data-section-tab="tasks">任务</button></nav>
   <section class="sidebar-section entity-browser" data-section="entities" data-role="entity-browser">
     <div class="entity-head">
       <div class="entity-title"><b>场景实体</b><span data-role="entity-count"></span></div>
@@ -198,6 +198,7 @@ const TEMPLATE = `
     <div class="entity-list" data-role="entity-list"></div>
     <div class="entity-detail" data-role="entity-detail"><span class="entity-empty">选择一个物体或地点查看详情</span></div>
   </section>
+  <section class="sidebar-section task-panel" data-section="tasks" data-role="task-panel" hidden></section>
 </aside>
 <div class="camera-cards" data-role="cameras"></div>
 <div class="source-modal" data-role="description-source-modal" role="dialog" aria-modal="true" aria-label="DAM 描述来源图像">
@@ -257,7 +258,7 @@ export class ReplayViewer {
     this.N = this.data.count;
     this.cameraLayout = this.sanitizeCameraLayout(this.initialState.cameraLayout);   // camera key -> { x, y, z, big }
     this.S = { cur: -1, snap: null, reference: null, yaw: 0.8, pitch: 0.5, dist: 6, target: [0, 0, 0], dirty: true, wanted: 0, request: 0,
-               selectedKey: null, hidden: new Set(), entityTab: 'objects', objItems: [], placeItems: [] };
+               selectedKey: null, hidden: new Set(), entityTab: 'objects', section: 'entities', objItems: [], placeItems: [] };
     this.G = { meshCount: 0, meshTriangles: 0, meshIndexed: 0, meshKey: 'none', meshUploads: 0, indexType: 0, lines: 0, nodes: 0, highlightNodes: 0,
                overlay: { visible: false, segments: 0, corners: 0 } };
     const q = this.D.quant;
@@ -420,6 +421,7 @@ export class ReplayViewer {
       hidden: [...S.hidden],
       selected: S.selectedKey,
       entityTab: S.entityTab,
+      section: S.section,
       cameraLayout: this.cameraLayout ? JSON.parse(JSON.stringify(this.cameraLayout)) : undefined,
     };
   }
@@ -438,6 +440,7 @@ export class ReplayViewer {
     if (Array.isArray(state.hidden)) this.S.hidden = new Set(state.hidden.filter((key) => typeof key === 'string'));
     if (typeof state.selected === 'string') this.S.selectedKey = state.selected;
     if (state.entityTab === 'objects' || state.entityTab === 'places' || state.entityTab === 'rooms') this.S.entityTab = state.entityTab;
+    if (state.section === 'entities' || state.section === 'tasks') this.showSection(state.section);
     this.debug.S = this.S;
     this.updateCameraVisibility();
   }
@@ -450,6 +453,14 @@ export class ReplayViewer {
     S.dist = Math.max(this.radius * 0.05, Math.min(this.radius * 40, Number(camera.dist) || S.dist));
     S.target = camera.target.map(Number);
     this.requestDraw();
+  }
+
+  // The sidebar shows one section at a time: the entity browser or the task panel.
+  showSection(name) {
+    this.S.section = name;
+    for (const button of this.root.querySelectorAll('[data-section-tab]')) button.classList.toggle('active', button.dataset.sectionTab === name);
+    for (const section of this.root.querySelectorAll('[data-section]')) section.hidden = section.dataset.section !== name;
+    this.root.dispatchEvent(new CustomEvent('replay-section-shown', { detail: { section: name } }));
   }
 
   // Re-apply a state from serializeState() to the running viewer: time, camera, controls, hidden entities and selection.
@@ -1417,6 +1428,7 @@ export class ReplayViewer {
     el['entity-tab-objects'].onclick = () => { S.entityTab = 'objects'; this.renderEntityBrowser(); this.changed(); };
     el['entity-tab-places'].onclick = () => { S.entityTab = 'places'; this.renderEntityBrowser(); this.changed(); };
     el['entity-tab-rooms'].onclick = () => { S.entityTab = 'rooms'; this.renderEntityBrowser(); this.changed(); };
+    for (const button of this.root.querySelectorAll('[data-section-tab]')) button.onclick = () => { this.showSection(button.dataset.sectionTab); this.changed(); };
     el['entity-filter'].addEventListener('input', () => this.renderEntityBrowser());
     el['description-source-close'].onclick = () => this.closeDescriptionSource();
     el['description-source-modal'].onclick = (event) => { if (event.target === el['description-source-modal']) this.closeDescriptionSource(); };

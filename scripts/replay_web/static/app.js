@@ -5,12 +5,15 @@
 // viewer uses to start and stop rendering. Open paths, their order, the active tab and each tab's viewer state are kept
 // in localStorage (never the service's run IDs, which change when the service restarts).
 //
-// Every tab, active or not, follows its result's scene graph through the service's event stream. A new graph version is
-// fetched at once, but only the active tab applies it to its viewer (state, time and camera kept); a background tab
-// shows a marker and applies the newest version when it is activated.
+// Every tab, active or not, follows its result's scene graph and processing jobs through the service's event stream. A new
+// graph version is fetched at once, but only the active tab applies it to its viewer (state, time and camera kept); a
+// background tab shows a marker and applies the newest version when it is activated. Each tab's task panel keeps its jobs
+// and log lines up to date from the events whatever the tab shows; a background tab's marker tells that a job is running
+// (busy), or ended (done, failed) while it was away.
 
 import { ApiError, ReplayApi } from './api.js';
 import { ReplayDataSource } from './replay_data.js';
+import { TaskPanel } from './tasks.js';
 import { ReplayViewer } from './viewer.js';
 
 export const STORAGE_KEY = 'daaam.replay.workspace.v1';
@@ -213,6 +216,7 @@ export class WorkspaceApp {
   mount(tab) {
     if (this.mountViewer) {
       tab.viewer = this.mountViewer(tab, this);
+      this.mountTasks(tab);
       return;
     }
     const summary = element('div', 'pane-summary');
@@ -221,6 +225,16 @@ export class WorkspaceApp {
     summary.append(title, element('div', 'path', tab.canonicalPath),
       element('div', 'pane-loading', `${tab.manifest.snapshots.count} 个快照 · ${tab.manifest.timebase.first.toFixed(1)}–${tab.manifest.timebase.last.toFixed(1)} s · 回放加载中…`));
     tab.pane.appendChild(summary);
+  }
+
+  mountTasks(tab) {
+    const container = tab.viewer?.el?.['task-panel'];
+    tab.tasks?.destroy();
+    tab.tasks = null;
+    if (!container) return;
+    tab.tasks = new TaskPanel({ api: this.api, runId: () => tab.runId, onChange: () => this.refreshMarker(tab) });
+    tab.tasks.attach(container);
+    tab.tasks.setActive(tab.active);
   }
 
   // The bundle of an open tab was published again: replace the viewer, keep the tab and its saved view.
@@ -248,7 +262,9 @@ export class WorkspaceApp {
     this.markGraph(tab, false);
     tab.unwatch = this.api.events(tab.runId, {
       state: (data) => this.onRunState(tab, data),
-      graph: () => this.refreshGraph(tab),
+      graph: () => { this.refreshGraph(tab); tab.tasks?.refreshSoon(); },
+      'job-state': (data) => tab.tasks?.onJobState(data.job),
+      'job-log': (data) => tab.tasks?.onJobLog(data),
       'artifact-error': (data) => this.onArtifactError(tab, data),
       closed: (data) => this.onRunClosed(tab, data),
       connection: (info) => this.onConnection(info),
@@ -256,6 +272,7 @@ export class WorkspaceApp {
   }
 
   onRunState(tab, data) {
+    if (data && data.jobs) tab.tasks?.applyState(data.jobs);
     const graph = data && data.graph;
     if (!graph) return;
     if (!graph.scanned) { tab.viewer?.setGraphPending?.(); return; }
@@ -308,8 +325,23 @@ export class WorkspaceApp {
   }
 
   markGraph(tab, pending) {
-    tab.marker.classList.toggle('graph', pending);
-    tab.marker.title = pending ? '场景图有更新:切换到这个标签页时应用' : '';
+    tab.graphPending = pending;
+    this.refreshMarker(tab);
+  }
+
+  // The small dot of a tab: a newer scene graph waits (blue), a job runs (amber), or ended while the tab was in the background.
+  refreshMarker(tab) {
+    const tasks = tab.tasks, running = !!(tasks && tasks.running), unseen = tasks && !running ? tasks.unseen : null;
+    tab.marker.classList.toggle('graph', !!tab.graphPending);
+    tab.marker.classList.toggle('busy', running);
+    tab.marker.classList.toggle('done', unseen === 'succeeded');
+    tab.marker.classList.toggle('failed', unseen === 'failed');
+    tab.marker.title = [
+      tab.graphPending ? '场景图有更新:切换到这个标签页时应用' : '',
+      running ? '有任务在运行' : '',
+      unseen === 'succeeded' ? '任务已完成' : '',
+      unseen === 'failed' ? '任务失败或被取消' : '',
+    ].filter(Boolean).join(';');
   }
 
   onArtifactError(tab, data) {
@@ -370,6 +402,7 @@ export class WorkspaceApp {
     if (current && current !== next) {
       current.pane.dispatchEvent(new CustomEvent('replay-tab-deactivated', { detail: { tabId: current.tabId } }));
       current.viewer?.deactivate?.();
+      current.tasks?.setActive(false);
       current.active = false;
       current.pane.hidden = true;
       current.button.setAttribute('aria-selected', 'false');
@@ -382,6 +415,7 @@ export class WorkspaceApp {
       next.active = true;
       next.pane.hidden = false;
       next.viewer?.activate?.();
+      next.tasks?.setActive(true);
       this.applyGraph(next);
       this.flushNotices(next);
     }
@@ -399,6 +433,7 @@ export class WorkspaceApp {
     const index = this.order.indexOf(tabId);
     if (tab.active) tab.pane.dispatchEvent(new CustomEvent('replay-tab-deactivated', { detail: { tabId } }));
     tab.unwatch?.();
+    tab.tasks?.destroy();
     tab.viewer?.destroy?.();
     tab.pane.remove();
     tab.item.remove();
