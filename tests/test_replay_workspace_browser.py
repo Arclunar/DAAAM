@@ -1,4 +1,4 @@
-"""Real-browser tests of the replay workspace: tabs, restoration, the result list (RUN_BROWSER_TESTS=1)."""
+"""Real-browser tests of the replay workspace: tabs, restoration, the result list, scene graph hot reload (RUN_BROWSER_TESTS=1)."""
 
 import unittest
 
@@ -180,6 +180,161 @@ class WorkspaceRestoreBrowserTest(WorkspaceBrowserTestCase):
 		self.driver.find_element(By.CSS_SELECTOR, f'#result-list .result-item[data-path="{self.tum_result}"]').click()
 		self.wait_for_tabs(1)
 		self.assertEqual(self.selected_title(), "TUM / fr1_desk")
+
+
+class WorkspaceGraphBrowserTest(WorkspaceBrowserTestCase):
+	"""The scene graph files of an open result: the best valid one is shown, and new ones appear without disturbing the view."""
+
+	STATE_KEYS = ("snapshot", "time", "camera", "hidden", "controls", "speed", "cameraLayout")
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.result = self.fixtures.call("make_result", name="graph_tum", kind="tum", sequence="fr1_desk")["path"]
+
+	def pane_script(self, path: str, expression: str):
+		return self.script("const pane = document.querySelector('section.result-pane[data-path=\"' + arguments[0] + '\"]'); return " + expression, path)
+
+	def badge(self, path: str) -> str:
+		return self.pane_script(path, "pane.querySelector('[data-role=graph-badge]').dataset.graph")
+
+	def badge_state(self, path: str) -> str:
+		return self.pane_script(path, "pane.querySelector('[data-role=graph-badge]').dataset.state")
+
+	def wait_for_badge(self, path: str, name: str) -> None:
+		self.wait.until(lambda d: self.badge(path) == name)
+
+	def view_state(self):
+		return self.script("return window.replayWorkspace.activeTab().viewer.serializeState()")
+
+	def notices(self):   # the shown pane's messages
+		return self.script("return [...document.querySelectorAll('section.result-pane:not([hidden]) .viewer-notice')].map((n) => n.textContent)")
+
+	def wait_for_notice(self, text: str) -> None:
+		self.wait.until(lambda d: any(text in note for note in self.notices()))
+
+	def wait_for_viewer(self, path: str) -> None:
+		self.wait.until(lambda d: self.pane_script(path, "!!pane.querySelector('[data-role=graph-badge]')"))
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayDebug && window.replayDebug.viewer.started)"))
+
+	def settle_view(self) -> None:
+		"""Time at the first snapshot, a distinctive camera, object O8 selected: a state any reset would show."""
+		self.script("window.replayDebug.show(0)")
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur === 0"))
+		self.script("window.replayDebug.viewer.restoreCamera({yaw: 1.1, pitch: 0.4, dist: 3.3, target: [0.1, 0.2, 0.3]}); window.replayDebug.selectEntity('object', 8)")
+
+	def test_a_result_without_a_graph_says_so(self) -> None:
+		self.open_workspace()
+		self.open_result(self.result)
+		self.wait.until(lambda d: self.badge_state(self.result) == "none")
+		self.assertIn("没有可用文件", self.pane_script(self.result, "pane.querySelector('[data-role=graph-badge]').textContent"))
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_new_graph_files_replace_the_shown_graph_without_moving_time_camera_or_selection(self) -> None:
+		self.open_workspace()
+		self.open_result(self.result)
+		self.wait_for_viewer(self.result)
+		self.wait.until(lambda d: self.badge_state(self.result) == "none")
+		self.settle_view()
+		before = self.view_state()
+		self.assertEqual((before["snapshot"], before["selected"]), (0, "object:8"))
+
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])
+		self.wait_for_badge(self.result, "dsg.json")
+		self.wait_for_notice("dsg.json")
+		self.fixtures.call("write_graph", path=self.result, name="dsg_updated.json", objects=[7, 8])
+		self.wait_for_badge(self.result, "dsg_updated.json")
+		self.wait_for_notice("dsg.json → dsg_updated.json")
+		after = self.view_state()
+		for key in self.STATE_KEYS + ("selected", "entityTab"):
+			self.assertEqual(after[key], before[key], key)
+		self.assertIn("2 个物体", self.pane_script(self.result, "pane.querySelector('[data-role=graph-badge]').textContent"))
+		self.assertIn("场景图 dsg_updated.json:包含这个实体", self.pane_script(self.result, "pane.querySelector('[data-role=entity-detail]').textContent"))
+
+		# a graph without the selected entity: only the selection goes, with a visible reason
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7], rooms=[["office", "a desk area"]])
+		self.wait_for_badge(self.result, "clustered_dsg.json")
+		self.wait_for_notice("更新后的场景图中已不存在该实体")
+		cleared = self.view_state()
+		self.assertIsNone(cleared["selected"])
+		for key in self.STATE_KEYS:
+			self.assertEqual(cleared[key], before[key], key)
+		self.assertIn("1 个房间(1 个有摘要)", self.pane_script(self.result, "pane.querySelector('[data-role=graph-badge]').textContent"))
+
+		# the room and its summary are browsable; looking at them never moves the timeline
+		self.driver.find_element(By.CSS_SELECTOR, "section.result-pane:not([hidden]) [data-role=entity-tab-rooms]").click()
+		row = self.wait.until(lambda d: d.find_element(By.CSS_SELECTOR, 'section.result-pane:not([hidden]) .entity-row[data-entity-key="room:R0"]'))
+		self.assertIn("office", row.text)
+		row.click()
+		detail = self.pane_script(self.result, "pane.querySelector('[data-role=entity-detail]').textContent")
+		self.assertIn("a desk area", detail)
+		self.assertNotIn("PRIVATE CHAIN OF THOUGHT", self.script("return document.body.innerText"))
+		self.assertEqual(self.view_state()["snapshot"], 0)
+		self.assertEqual(self.view_state()["selected"], "room:R0")
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_a_bad_higher_candidate_is_reported_and_the_valid_graph_stays(self) -> None:
+		self.open_workspace()
+		self.open_result(self.result)
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])
+		self.wait_for_badge(self.result, "dsg.json")
+		self.fixtures.call("write_text", path=self.result, name="clustered_dsg_with_summaries.json", text="{")
+		self.wait_for_notice("clustered_dsg_with_summaries.json 无效,继续使用 dsg.json")
+		self.assertEqual(self.badge(self.result), "dsg.json")
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg_with_summaries.json", objects=[7, 8], rooms=True)
+		self.wait_for_badge(self.result, "clustered_dsg_with_summaries.json")
+		self.fixtures.call("remove_file", path=self.result, name="clustered_dsg_with_summaries.json")
+		self.wait_for_badge(self.result, "dsg.json")
+		self.wait_for_notice("场景图已回退")
+
+	def test_each_tab_shows_only_its_own_graph_and_a_background_tab_applies_it_when_shown(self) -> None:
+		other = self.fixtures.call("make_result", name="graph_coda", kind="coda", sequence="0", outside=True)["path"]
+		self.open_workspace()
+		self.open_result(self.result)
+		self.open_result(other)
+		self.wait.until(lambda d: self.badge_state(other) == "none" and self.badge_state(self.result) == "none")
+		# the first tab is in the background: it learns of the graph, marks itself, and leaves its view alone
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])
+		marker = lambda: self.script("return document.querySelector('.tab[data-path=\"' + arguments[0] + '\"]').parentElement.querySelector('.tab__marker').className", self.result)
+		self.wait.until(lambda d: "graph" in marker().split())
+		self.assertEqual(self.badge(self.result), "", "a background tab does not touch its view")
+		self.assertEqual(self.badge_state(other), "none", "the other result has no graph")
+		self.tab_for(self.result).click()
+		self.wait_for_badge(self.result, "dsg.json")
+		self.wait_for_notice("场景图已加载:dsg.json")
+		self.assertNotIn("graph", marker().split())
+		self.tab_for(other).click()
+		self.assertEqual(self.badge_state(other), "none")
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_a_result_the_service_forgot_is_opened_again_with_its_view(self) -> None:
+		self.open_workspace()
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])
+		self.open_result(self.result)
+		self.wait_for_viewer(self.result)
+		self.wait_for_badge(self.result, "dsg.json")
+		self.settle_view()
+		before = self.view_state()
+		old_run = self.script("return window.replayWorkspace.activeTab().runId")
+		self.script("window.replayWorkspace.api.close(arguments[0])", old_run)   # as a restart or another page's close would
+		self.wait.until(lambda d: d.execute_script("return window.replayWorkspace.activeTab().runId") != old_run)
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayDebug && window.replayDebug.viewer.started)"))
+		self.wait_for_badge(self.result, "dsg.json")
+		after = self.view_state()
+		for key in self.STATE_KEYS + ("selected",):
+			self.assertEqual(after[key], before[key], key)
+		self.assertEqual(self.tab_titles(), ["TUM / fr1_desk"])
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_a_reloaded_page_shows_the_graph_again(self) -> None:
+		self.open_workspace()
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.open_result(self.result)
+		self.wait_for_badge(self.result, "clustered_dsg.json")
+		self.driver.refresh()
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"))
+		self.wait_for_tabs(1)
+		self.wait_for_badge(self.result, "clustered_dsg.json")
+		self.assertEqual(severe_logs(self.driver), [])
 
 
 if __name__ == "__main__":

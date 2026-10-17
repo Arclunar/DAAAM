@@ -4,6 +4,10 @@
 // visible. Before a pane is shown or hidden it receives `replay-tab-activated` / `replay-tab-deactivated`, which the
 // viewer uses to start and stop rendering. Open paths, their order, the active tab and each tab's viewer state are kept
 // in localStorage (never the service's run IDs, which change when the service restarts).
+//
+// Every tab, active or not, follows its result's scene graph through the service's event stream. A new graph version is
+// fetched at once, but only the active tab applies it to its viewer (state, time and camera kept); a background tab
+// shows a marker and applies the newest version when it is activated.
 
 import { ApiError, ReplayApi } from './api.js';
 import { ReplayDataSource } from './replay_data.js';
@@ -12,6 +16,7 @@ import { ReplayViewer } from './viewer.js';
 export const STORAGE_KEY = 'daaam.replay.workspace.v1';
 const DATASET_NAMES = { tum: 'TUM', coda: 'CODa' };
 const NOTICE_MS = 9000;
+const MAX_PENDING_NOTICES = 5;
 
 const randomId = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
 const element = (tag, className, text) => {
@@ -199,6 +204,7 @@ export class WorkspaceApp {
     this.tabs.set(tabId, tab);
     this.order.push(tabId);
     this.mount(tab);
+    this.watch(tab);
     this.renderLabels();
     this.empty.hidden = true;
     return tab;
@@ -228,7 +234,121 @@ export class WorkspaceApp {
     tab.manifest = await this.api.manifest(opened.run_id);
     tab.viewerState = state;
     this.mount(tab);
-    if (tab.active) tab.viewer?.activate?.();
+    this.watch(tab);
+    if (tab.active) {
+      tab.viewer?.activate?.();
+      this.applyGraph(tab);
+    }
+  }
+
+  // ------------------------------------------------------------------ scene graph
+  watch(tab) {
+    tab.unwatch?.();
+    Object.assign(tab, { graph: null, graphToken: undefined, appliedToken: undefined, appliedName: null, appliedRank: null, graphSeq: 0, notices: [] });
+    this.markGraph(tab, false);
+    tab.unwatch = this.api.events(tab.runId, {
+      state: (data) => this.onRunState(tab, data),
+      graph: () => this.refreshGraph(tab),
+      'artifact-error': (data) => this.onArtifactError(tab, data),
+      closed: (data) => this.onRunClosed(tab, data),
+      connection: (info) => this.onConnection(info),
+    });
+  }
+
+  onRunState(tab, data) {
+    const graph = data && data.graph;
+    if (!graph) return;
+    if (!graph.scanned) { tab.viewer?.setGraphPending?.(); return; }
+    const token = graph.graph ? graph.graph.token : null;
+    if (tab.graphToken === undefined || token !== tab.graphToken) this.refreshGraph(tab);
+  }
+
+  async refreshGraph(tab) {
+    const seq = tab.graphSeq = tab.graphSeq + 1;
+    let data;
+    try {
+      data = await this.api.graph(tab.runId);
+    } catch (error) {
+      if (seq === tab.graphSeq && this.tabs.has(tab.tabId) && !(error instanceof ApiError && error.status === 404)) this.queueNotice(tab, `读取场景图失败:${error.message}`, 'warn');
+      return;
+    }
+    if (seq !== tab.graphSeq || !this.tabs.has(tab.tabId) || !data.scanned) return;   // a newer answer overtook this one, or the tab closed
+    tab.graph = data;
+    tab.graphToken = data.version ? data.version.token : null;
+    this.applyGraph(tab);
+  }
+
+  // Bring the viewer to the newest graph the tab has fetched; a background tab only gets its marker.
+  applyGraph(tab) {
+    const data = tab.graph, viewer = tab.viewer;
+    if (!data) return;
+    const token = data.version ? data.version.token : null;
+    if (tab.appliedToken === token) { this.markGraph(tab, false); return; }
+    if (!tab.active || !viewer?.applyGraph) { this.markGraph(tab, true); return; }
+    this.markGraph(tab, false);
+    const first = tab.appliedToken === undefined, previousName = tab.appliedName, previousRank = tab.appliedRank;
+    if (!data.version) {
+      viewer.clearGraph();
+      if (!first && previousName) viewer.notify('场景图文件已不存在,当前没有可用的场景图', 'warn');
+    } else {
+      const before = viewer.started ? viewer.serializeState() : null;
+      const outcome = viewer.applyGraph(data.document, data.version);
+      if (before) viewer.restoreState(before);   // the graph changes entity details only: time, camera and layout stay as they were
+      const name = data.version.name;
+      let text = `场景图:${name}`;
+      if (!first && !previousName) text = `场景图已加载:${name}`;
+      else if (!first && previousName === name) text = `场景图已更新:${name}`;
+      else if (!first) text = `场景图已${data.version.rank < previousRank ? '升级' : '回退'}:${previousName} → ${name}`;
+      viewer.notify(text, 'info');
+      if (outcome.selectedEntityMissing) viewer.clearSelection('更新后的场景图中已不存在该实体');
+    }
+    tab.appliedToken = token;
+    tab.appliedName = data.version ? data.version.name : null;
+    tab.appliedRank = data.version ? data.version.rank : null;
+  }
+
+  markGraph(tab, pending) {
+    tab.marker.classList.toggle('graph', pending);
+    tab.marker.title = pending ? '场景图有更新:切换到这个标签页时应用' : '';
+  }
+
+  onArtifactError(tab, data) {
+    const active = data.active ? `,继续使用 ${data.active.name}` : '';
+    this.queueNotice(tab, `${data.name} 无效${active}:${data.error}`, 'warn');
+  }
+
+  // A message for a tab's pane; a background tab keeps the latest few until it is shown.
+  queueNotice(tab, text, kind) {
+    if (tab.active && tab.viewer?.notify) { tab.viewer.notify(text, kind); return; }
+    tab.notices.push({ text, kind });
+    tab.notices.splice(0, Math.max(0, tab.notices.length - MAX_PENDING_NOTICES));
+  }
+
+  flushNotices(tab) {
+    for (const { text, kind } of tab.notices.splice(0)) tab.viewer?.notify?.(text, kind);
+  }
+
+  // The service no longer knows this run (it restarted, or another page closed the result): open it again by its path.
+  async onRunClosed(tab, data) {
+    if (tab.recovering || !this.tabs.has(tab.tabId)) return;
+    tab.recovering = true;
+    try {
+      const opened = await this.api.open(tab.canonicalPath);
+      if (this.tabs.has(tab.tabId)) await this.reload(tab, opened);
+    } catch (error) {
+      this.notify(`${tab.title}:回看服务不再保留这个结果,重新打开失败\n${error.message}`, 'error', 0);
+    } finally {
+      tab.recovering = false;
+    }
+  }
+
+  onConnection(info) {
+    if (info.connected === false) {
+      if (!this.connectionNotice) this.connectionNotice = this.notify('与回看服务的事件连接中断,正在重连…', 'warn', 0);
+    } else if (this.connectionNotice) {
+      this.connectionNotice.remove();
+      this.connectionNotice = null;
+    }
   }
 
   renderLabels() {
@@ -262,6 +382,8 @@ export class WorkspaceApp {
       next.active = true;
       next.pane.hidden = false;
       next.viewer?.activate?.();
+      this.applyGraph(next);
+      this.flushNotices(next);
     }
     next.button.setAttribute('aria-selected', 'true');
     next.button.tabIndex = 0;
@@ -276,6 +398,7 @@ export class WorkspaceApp {
     if (!tab) return;
     const index = this.order.indexOf(tabId);
     if (tab.active) tab.pane.dispatchEvent(new CustomEvent('replay-tab-deactivated', { detail: { tabId } }));
+    tab.unwatch?.();
     tab.viewer?.destroy?.();
     tab.pane.remove();
     tab.item.remove();

@@ -14,6 +14,7 @@ const CLIP_PLANES = [
   (p) => p[3] - p[1], (p) => p[3] + p[2], (p) => p[3] - p[2],
 ];
 const CONTROLS = ['mesh-mode', 'c-bright', 'c-points', 'c-obj', 'bbox-mode', 'label-mode', 'c-places', 'c-pedges', 'c-rooms', 'c-links', 'c-traj', 'c-cam', 'r-size', 'r-space'];
+const NOTICE_MS = 9000;
 const fmt = (n) => n.toLocaleString('en-US');
 const entityKey = (kind, id) => kind + ':' + id;
 const rgb = (color) => 'rgb(' + color.map((v) => Math.round(Math.min(1, v) * 255)).join(',') + ')';
@@ -190,6 +191,7 @@ const TEMPLATE = `
       <div class="entity-tabs">
         <button data-role="entity-tab-objects" class="active" type="button">物体</button>
         <button data-role="entity-tab-places" type="button">地点</button>
+        <button data-role="entity-tab-rooms" type="button" title="场景图里的房间 / 区域(运行 Postprocess、Summarize 之后出现)">房间</button>
       </div>
       <input data-role="entity-filter" class="entity-filter" type="search" placeholder="筛选编号或描述" autocomplete="off">
     </div>
@@ -214,6 +216,7 @@ const TEMPLATE = `
   <select data-role="speed" title="播放速度"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
   <span data-role="info" class="viewer-bar__info">加载中…</span>
 </div>
+<div class="viewer-notices" data-role="notices" role="status" aria-live="polite"></div>
 <div class="viewer__error" data-role="error" hidden></div>
 <div class="viewer__msg" data-role="msg"></div>`;
 
@@ -235,6 +238,10 @@ export class ReplayViewer {
     this.labelEls = new Map();   // label key -> its element
     this.labelItems = [];   // { key, pos, text, color, selected } of the cards of this snapshot, the selected one last
     this.cards = new Map();   // camera key -> { card, img, placeholder, caption, handle, camera, position }
+    this.graph = null;   // the active scene graph of the result: { version, document, objects, places, rooms, roomsById }; see applyGraph
+    this.graphState = 'pending';   // pending (no answer from the service yet) | none (the result has no graph file) | ready
+    this.droppedKey = null;   // the selected entity the latest graph change removed from the graph
+    this.noticeTimers = new Set();
     const m = this.manifest;
     // the replay data the former page embedded, now assembled from the manifest (tests and the console read it as debug.D)
     this.D = {
@@ -278,6 +285,7 @@ export class ReplayViewer {
     this.el['dataset-badge'].classList.add(`dataset-badge--${this.manifest.dataset.kind}`);
     this.el.title.textContent = this.D.title || '';
     this.el.title.title = this.D.title || '';
+    this.renderGraphBadge();
     if (!this.D.cameras.length) { this.el['c-cam-row'].hidden = true; this.el['reset-cameras'].hidden = true; }   // bundle without dataset images
     this.el.slider.max = this.N - 1;
     this.canvas = this.el.gl;
@@ -328,6 +336,8 @@ export class ReplayViewer {
     this.resetView();
     if (state.camera) this.restoreCamera(state.camera);
     this.started = true;
+    this.renderGraphBadge();
+    this.renderEntityBrowser();   // a graph applied while the first snapshot loaded
   }
 
   activate() {
@@ -366,6 +376,8 @@ export class ReplayViewer {
       const lose = gl.getExtension('WEBGL_lose_context');
       if (lose) lose.loseContext();
     }
+    for (const timer of this.noticeTimers) clearTimeout(timer);
+    this.noticeTimers.clear();
     this.data.clearDecoded();
     this.root?.remove();
     this.mounted = false;
@@ -425,7 +437,7 @@ export class ReplayViewer {
     this.el['v-space'].textContent = parseFloat(this.el['r-space'].value).toFixed(1) + ' m';
     if (Array.isArray(state.hidden)) this.S.hidden = new Set(state.hidden.filter((key) => typeof key === 'string'));
     if (typeof state.selected === 'string') this.S.selectedKey = state.selected;
-    if (state.entityTab === 'objects' || state.entityTab === 'places') this.S.entityTab = state.entityTab;
+    if (state.entityTab === 'objects' || state.entityTab === 'places' || state.entityTab === 'rooms') this.S.entityTab = state.entityTab;
     this.debug.S = this.S;
     this.updateCameraVisibility();
   }
@@ -438,6 +450,103 @@ export class ReplayViewer {
     S.dist = Math.max(this.radius * 0.05, Math.min(this.radius * 40, Number(camera.dist) || S.dist));
     S.target = camera.target.map(Number);
     this.requestDraw();
+  }
+
+  // Re-apply a state from serializeState() to the running viewer: time, camera, controls, hidden entities and selection.
+  // A selection that the latest graph change removed from the graph (see applyGraph) is not brought back.
+  restoreState(state) {
+    if (!state || !this.started) return;
+    const S = this.S;
+    this.restoreControls(state);
+    if (typeof state.selected === 'string' && state.selected === this.droppedKey) S.selectedKey = null;
+    this.restoreCamera(state.camera);
+    if (Number.isInteger(state.snapshot) && state.snapshot !== S.wanted) this.show(state.snapshot);
+    S.dirty = true;
+    this.renderEntityBrowser();
+    this.requestDraw();
+  }
+
+  // ------------------------------------------------------------------ scene graph
+  // The result's active scene graph (dsg.json … clustered_dsg_with_summaries.json) as the service summarizes it. It only
+  // enriches the entity browser and details; the replayed snapshots, the time, the 3D view and the layout are untouched.
+  indexGraph(document, version) {
+    const idNumber = (id) => Number(String(id).slice(1));
+    const objects = new Map((document.objects || []).map((item) => [idNumber(item.id), item]));
+    const places = new Map((document.places || []).map((item) => [idNumber(item.id), item]));
+    const rooms = document.rooms || [];
+    return { version, document, objects, places, rooms, roomsById: new Map(rooms.map((room) => [room.id, room])) };
+  }
+
+  graphHas(graph, key) {
+    if (!graph || !key) return false;
+    const [kind, raw] = key.split(':');
+    if (kind === 'object') return graph.objects.has(Number(raw));
+    if (kind === 'place') return graph.places.has(Number(raw));
+    if (kind === 'room') return graph.roomsById.has(raw);
+    return false;
+  }
+
+  // Switch to another version of the graph. selectedEntityMissing: the selected entity was in the previous graph and is
+  // not in this one (the caller reports that and calls clearSelection); everything else about the view stays as it is.
+  applyGraph(document, version) {
+    const previous = this.graph, graph = this.indexGraph(document, version);
+    const key = this.S.selectedKey;
+    const missing = !!(key && previous && this.graphHas(previous, key) && !this.graphHas(graph, key));
+    this.graph = graph;
+    this.graphState = 'ready';
+    this.droppedKey = missing ? key : null;
+    this.renderGraphBadge();
+    if (this.started) this.renderEntityBrowser();
+    return { previous: previous ? previous.version : null, version, selectedEntityMissing: missing,
+             objects: graph.objects.size, places: graph.places.size, rooms: graph.rooms.length };
+  }
+
+  clearGraph() {   // the result has no graph file (any more); the replay itself is not affected
+    this.graph = null;
+    this.graphState = 'none';
+    this.droppedKey = null;
+    this.renderGraphBadge();
+    if (this.started) this.renderEntityBrowser();
+  }
+
+  setGraphPending() {
+    if (this.graph) return;
+    this.graphState = 'pending';
+    this.renderGraphBadge();
+  }
+
+  renderGraphBadge() {
+    const badge = this.el && this.el['graph-badge'];
+    if (!badge) return;
+    const graph = this.graph;
+    if (graph) {
+      const version = graph.version, summarized = graph.rooms.filter((room) => room.label).length;
+      badge.textContent = `场景图 ${version.name} · ${version.token.split('-')[1].slice(0, 6)} · ${graph.objects.size} 个物体`
+        + (graph.rooms.length ? ` · ${graph.rooms.length} 个房间(${summarized} 个有摘要)` : '');
+      badge.title = `${version.name}\n版本 ${version.token}\n${fmt(version.size)} 字节 · 修改于 ${new Date(version.modified * 1000).toLocaleString()}`;
+      badge.dataset.graph = version.name;
+      badge.dataset.version = version.token;
+    } else {
+      badge.textContent = this.graphState === 'none' ? '场景图:没有可用文件(dsg.json、dsg_updated.json、clustered_dsg*.json)' : '场景图:检测中…';
+      badge.title = '';
+      badge.dataset.graph = '';
+      badge.dataset.version = '';
+    }
+    badge.dataset.state = this.graph ? 'ready' : this.graphState;
+  }
+
+  // A short message in this result's pane (graph changes, a bad graph file). It is dismissed after a few seconds.
+  notify(text, kind = 'info') {
+    const box = this.el && this.el.notices;
+    if (!box) return null;
+    const note = document.createElement('div');
+    note.className = `viewer-notice viewer-notice--${kind}`;
+    note.textContent = text;
+    box.appendChild(note);
+    while (box.children.length > 4) box.firstElementChild.remove();
+    const timer = setTimeout(() => { this.noticeTimers.delete(timer); note.remove(); }, NOTICE_MS);
+    this.noticeTimers.add(timer);
+    return note;
   }
 
   // ------------------------------------------------------------------ GL helpers
@@ -552,12 +661,14 @@ export class ReplayViewer {
     const S = this.S, host = this.el['entity-detail'];
     host.replaceChildren();
     if (!S.selectedKey) { const empty = document.createElement('span'); empty.className = 'entity-empty'; empty.textContent = '选择一个物体或地点查看详情'; host.appendChild(empty); return; }
+    if (S.selectedKey.startsWith('room:')) { this.showRoomDetail(host, S.selectedKey.slice(5)); return; }
     const [kind, rawId] = S.selectedKey.split(':'), id = Number(rawId), history = this.catalogItem(kind, id);
     const current = kind === 'object' ? this.objectAt(id) : this.placeAt(id);
+    const node = this.graph ? (kind === 'object' ? this.graph.objects.get(id) : this.graph.places.get(id)) : null;
     const title = document.createElement('div'); title.className = 'detail-title';
     title.textContent = (kind === 'object' ? '物体 O' : '地点 p') + id;
     const description = document.createElement('div'); description.className = 'detail-description';
-    if (kind === 'object') description.textContent = (current && current.full) || (history && this.D.labels[String(history.label)]) || '(没有 DAM 文本描述)';
+    if (kind === 'object') description.textContent = (current && current.full) || (history && this.D.labels[String(history.label)]) || (node && node.description) || '(没有 DAM 文本描述)';
     else description.textContent = current ? '当前地点节点' : '这个地点在当前时刻尚未进入场景图';
     const meta = document.createElement('div'); meta.className = 'detail-meta';
     const lines = [];
@@ -574,6 +685,34 @@ export class ReplayViewer {
     const source = kind === 'object' && history ? this.descriptionSource(history.label) : null;
     if (source) lines.push('描述来源 frame ' + source.frame_id + (source.timestamp == null ? '' : ' · ' + this.sourceTime(source.timestamp)) + (source.image ? '' : ' · 没有这一帧的图像'));
     lines.push(current ? '当前快照中可见' : '当前快照中未出现', S.hidden.has(S.selectedKey) ? '已手动隐藏' : '正在显示');
+    if (this.graph) lines.push(...this.graphLines(node));
+    meta.textContent = lines.join('\n');
+    host.append(title, description, meta);
+  }
+
+  graphLines(node) {   // what the active scene graph says about the selected object or place
+    const graph = this.graph, name = graph.version.name;
+    if (!node) return ['场景图 ' + name + ':没有这个实体'];
+    const lines = ['场景图 ' + name + ':包含这个实体'];
+    if (node.place) lines.push('所在地点 ' + node.place);
+    const room = node.room ? graph.roomsById.get(node.room) : null;
+    if (node.room) lines.push('所属房间 ' + node.room + (room && room.label ? ' · ' + room.label : ''));
+    return lines;
+  }
+
+  showRoomDetail(host, id) {
+    const room = this.graph ? this.graph.roomsById.get(id) : null;
+    const title = document.createElement('div'); title.className = 'detail-title';
+    title.textContent = '房间 ' + id + (room && room.label ? ' · ' + room.label : '');
+    const description = document.createElement('div'); description.className = 'detail-description';
+    description.textContent = room ? (room.description || '(这个房间还没有摘要:运行 Summarize 生成)') : '当前场景图里没有这个房间';
+    const meta = document.createElement('div'); meta.className = 'detail-meta';
+    const lines = [];
+    if (room) {
+      if (room.position) lines.push('位置 (' + room.position.map((v) => v.toFixed(2)).join(', ') + ')');
+      lines.push(room.places + ' 个地点节点' + (room.num_objects != null ? ' · 摘要统计 ' + room.num_objects + ' 个物体' : ''));
+      lines.push('场景图 ' + this.graph.version.name);
+    }
     meta.textContent = lines.join('\n');
     host.append(title, description, meta);
   }
@@ -598,10 +737,53 @@ export class ReplayViewer {
     this.el['description-source-image'].removeAttribute('src');
   }
 
+  markEntityTabs() {
+    for (const name of ['objects', 'places', 'rooms']) this.el['entity-tab-' + name].classList.toggle('active', this.S.entityTab === name);
+  }
+
+  renderRoomBrowser() {
+    const S = this.S, rooms = this.graph ? this.graph.rooms : [];
+    this.markEntityTabs();
+    const query = this.el['entity-filter'].value.trim().toLowerCase();
+    const filtered = rooms.filter((room) => !query || [room.id, room.label || '', room.description || ''].some((text) => text.toLowerCase().includes(query)));
+    this.el['entity-count'].textContent = filtered.length + ' / ' + rooms.length;
+    const list = this.el['entity-list'], scroll = list.scrollTop;
+    list.replaceChildren();
+    if (!filtered.length) {
+      const empty = document.createElement('div'); empty.className = 'entity-empty';
+      empty.textContent = rooms.length ? '没有匹配的房间' : this.graph ? '当前场景图没有房间:运行 Postprocess(场景聚类)后会出现' : '还没有场景图';
+      list.appendChild(empty);
+    }
+    for (const room of filtered) {
+      const key = 'room:' + room.id;
+      const rowEl = document.createElement('div'); rowEl.className = 'entity-row entity-row--room'; rowEl.dataset.entityKey = key;
+      rowEl.classList.toggle('active', S.selectedKey === key);
+      const dot = document.createElement('span'); dot.className = 'entity-dot'; dot.style.background = rgb([0.35, 0.5, 1]);
+      const copy = document.createElement('div'); copy.className = 'entity-copy';
+      const name = document.createElement('div'); name.className = 'entity-name'; name.textContent = room.id + (room.label ? ' · ' + room.label : ' · (没有摘要)');
+      const meta = document.createElement('div'); meta.className = 'entity-meta';
+      meta.textContent = room.places + ' 个地点' + (room.num_objects != null ? ' · ' + room.num_objects + ' 个物体' : '');
+      copy.append(name, meta);
+      rowEl.onclick = () => this.selectRoom(room.id);
+      rowEl.append(dot, copy);
+      list.appendChild(rowEl);
+    }
+    list.scrollTop = scroll;
+    this.showEntityDetail();
+  }
+
+  selectRoom(id) {   // rooms are not drawn in the replay: this shows their summary and never changes the timeline
+    this.S.selectedKey = 'room:' + id;
+    this.S.dirty = true;
+    this.renderEntityBrowser();
+    this.requestDraw();
+    this.changed();
+  }
+
   renderEntityBrowser() {
+    if (this.S.entityTab === 'rooms') { this.renderRoomBrowser(); return; }
     const S = this.S, D = this.D, isObject = S.entityTab === 'objects', items = isObject ? D.catalog.objects : D.catalog.places;
-    this.el['entity-tab-objects'].classList.toggle('active', isObject);
-    this.el['entity-tab-places'].classList.toggle('active', !isObject);
+    this.markEntityTabs();
     const query = this.el['entity-filter'].value.trim().toLowerCase();
     const filtered = items.filter((item) => {
       const name = isObject ? (D.labels[String(item.label)] || '') : '';
@@ -662,12 +844,14 @@ export class ReplayViewer {
     this.changed();
   }
 
-  clearSelection() {
+  clearSelection(reason) {   // with a reason (the entity left the graph) the pane says so
     this.S.selectedKey = null;
+    this.droppedKey = null;
     this.S.dirty = true;
     this.renderEntityBrowser();
     this.requestDraw();
     this.changed();
+    if (reason) this.notify(reason, 'warn');
   }
 
   assemble() {   // everything except the mesh: boxes, graph nodes and edges, trajectory
@@ -1232,6 +1416,7 @@ export class ReplayViewer {
     el['c-cam'].addEventListener('input', () => this.updateCameraVisibility());
     el['entity-tab-objects'].onclick = () => { S.entityTab = 'objects'; this.renderEntityBrowser(); this.changed(); };
     el['entity-tab-places'].onclick = () => { S.entityTab = 'places'; this.renderEntityBrowser(); this.changed(); };
+    el['entity-tab-rooms'].onclick = () => { S.entityTab = 'rooms'; this.renderEntityBrowser(); this.changed(); };
     el['entity-filter'].addEventListener('input', () => this.renderEntityBrowser());
     el['description-source-close'].onclick = () => this.closeDescriptionSource();
     el['description-source-modal'].onclick = (event) => { if (event.target === el['description-source-modal']) this.closeDescriptionSource(); };

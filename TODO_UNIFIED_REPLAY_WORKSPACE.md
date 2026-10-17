@@ -218,7 +218,7 @@ Follow `2026-10-16-unified-replay-core-implementation.md`:
 
 Follow `2026-10-16-replay-web-processing-implementation.md`:
 
-- [ ] Task 1: select and monitor the active scene graph.
+- [x] Task 1: select and monitor the active scene graph. (`08c47d2`)
 - [ ] Task 2: publish graph changes through SSE and apply them per tab.
 - [ ] Task 3: make postprocess/summarize stage outputs atomic.
 - [ ] Task 4: supervise allowlisted processing jobs.

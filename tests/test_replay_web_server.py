@@ -1,14 +1,18 @@
 import gzip
 import http.client
 import json
+import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
+from typing import Any, Callable, Dict, Optional
 
+from scripts.replay_web.artifacts import GRAPH_PRIORITY
 from scripts.replay_web.server import ServerConfig, create_server
-from tests.replay_fixtures import write_minimal_bundle
+from tests.replay_fixtures import write_graph, write_minimal_bundle
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -28,7 +32,7 @@ class ReplayServerTestCase(unittest.TestCase):
 		self.port = self.server.server_address[1]
 		self.base = f"http://127.0.0.1:{self.port}"
 		self.origin = self.base
-		thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+		thread = threading.Thread(target=self.server.serve_forever, args=(0.02,), daemon=True)
 		thread.start()
 		self.addCleanup(thread.join, 5)
 		self.addCleanup(self.server.server_close)
@@ -39,7 +43,8 @@ class ReplayServerTestCase(unittest.TestCase):
 		self.temp.cleanup()
 
 	def server_config(self) -> ServerConfig:
-		return ServerConfig(repo_root=REPO, output_root=self.output, state_root=self.root / "state", distro=DISTRO, port=0)
+		return ServerConfig(repo_root=REPO, output_root=self.output, state_root=self.root / "state", distro=DISTRO, port=0,
+			graph_interval=0.05, sse_heartbeat=0.1)
 
 	def request(self, method: str, path: str, body=None, headers=None):
 		connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -75,6 +80,73 @@ class ReplayServerTestCase(unittest.TestCase):
 		status, opened = self.mutate("POST", "/api/runs/open", {"path": str(path)})
 		self.assertEqual(status, 200, opened)
 		return opened
+
+	def wait_for(self, predicate: Callable[[], Any], timeout: float = 10.0, message: str = "condition") -> Any:
+		deadline = time.monotonic() + timeout
+		while True:
+			value = predicate()
+			if value:
+				return value
+			if time.monotonic() > deadline:
+				self.fail(f"timed out waiting for {message}")
+			time.sleep(0.02)
+
+	def stream(self, path: str, headers: Optional[Dict[str, str]] = None) -> "SseStream":
+		stream = SseStream(self.port, path, headers)
+		self.addCleanup(stream.close)
+		return stream
+
+
+class SseStream:
+	"""A minimal server-sent events client over http.client, enough to read frames and comments in order."""
+
+	def __init__(self, port: int, path: str, headers: Optional[Dict[str, str]] = None, timeout: float = 5.0):
+		self.connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+		self.connection.request("GET", path, headers={"Host": f"127.0.0.1:{port}", **(headers or {})})
+		self.response = self.connection.getresponse()
+		self.pending: Dict[str, Any] = {}
+
+	def close(self) -> None:
+		self.response.close()   # the response owns the socket of a stream that ends with the connection
+		self.connection.close()
+
+	def line(self) -> Optional[str]:
+		"""The next line without its newline; None at the end of the stream."""
+		raw = self.response.readline()
+		return raw.decode("utf-8").rstrip("\n") if raw else None
+
+	def frame(self, comments: bool = False) -> Optional[Dict[str, Any]]:
+		"""The next complete event {id, event, data (parsed), retry} or, with `comments`, a {"comment": text}."""
+		while True:
+			line = self.line()
+			if line is None:
+				return None
+			if line == "":
+				if "event" in self.pending or "data" in self.pending:
+					frame, self.pending = self.pending, {}
+					return frame
+				self.pending = {}
+				continue
+			if line.startswith(":"):
+				if comments:
+					return {"comment": line[1:].strip()}
+				continue
+			name, _, value = line.partition(":")
+			value = value[1:] if value.startswith(" ") else value
+			self.pending[name] = json.loads(value) if name == "data" else value
+
+	def event(self) -> Dict[str, Any]:
+		frame = self.frame()
+		if frame is None:
+			raise AssertionError("the stream ended")
+		return frame
+
+	def events_until(self, event_type: str, limit: int = 20) -> Dict[str, Any]:
+		for _ in range(limit):
+			frame = self.event()
+			if frame.get("event") == event_type:
+				return frame
+		raise AssertionError(f"no {event_type} event within {limit} frames")
 
 
 class ReplayServerContractTest(ReplayServerTestCase):
@@ -203,6 +275,173 @@ class ReplayServerAssetTest(ReplayServerTestCase):
 
 	def test_a_bundle_without_a_reference_has_none_to_serve(self) -> None:
 		self.assertEqual(self.request("GET", f"{self.run}/reference")[0], 404)
+
+
+class ReplayServerGraphTest(ReplayServerTestCase):
+	def setUp(self) -> None:
+		super().setUp()
+		self.opened = self.open_result(self.result)
+		self.run = f"/api/runs/{self.opened['run_id']}"
+		self.wait_for(lambda: self.get_json(self.run + "/graph")["scanned"], message="the first scan")
+
+	def test_a_result_without_graph_files_reports_that_and_the_search_order(self) -> None:
+		graph = self.get_json(self.run + "/graph")
+		self.assertEqual((graph["scanned"], graph["version"], graph["document"]), (True, None, None))
+		self.assertEqual(graph["priority"], list(GRAPH_PRIORITY))
+		self.assertEqual({name: entry["state"] for name, entry in graph["artifacts"].items()}, {name: "absent" for name in GRAPH_PRIORITY})
+
+	def test_the_active_graph_comes_with_its_provenance_and_nothing_private(self) -> None:
+		write_graph(self.result / "dsg.json", atomic=True, objects=(7, 8))
+		graph = self.wait_for(lambda: self.get_json(self.run + "/graph")["version"] and self.get_json(self.run + "/graph"), message="dsg.json")
+		self.assertEqual(graph["version"]["name"], "dsg.json")
+		self.assertEqual(graph["version"]["rank"], 3)
+		self.assertRegex(graph["version"]["digest"], r"^[0-9a-f]{64}$")
+		self.assertEqual(graph["version"]["size"], (self.result / "dsg.json").stat().st_size)
+		self.assertEqual([item["id"] for item in graph["document"]["objects"]], ["O7", "O8"])
+		write_graph(self.result / "clustered_dsg_with_summaries.json", atomic=True, objects=(7,), rooms=[("office", "a desk area")])
+		graph = self.wait_for(lambda: (lambda data: data if data["version"] and data["version"]["rank"] == 0 else None)(self.get_json(self.run + "/graph")), message="promotion")
+		self.assertEqual(graph["document"]["rooms"][0]["label"], "office")
+		self.assertEqual(graph["artifacts"]["dsg.json"]["state"], "valid", "it was read when it was the active graph")
+		self.assertEqual(graph["artifacts"]["clustered_dsg.json"]["state"], "absent")
+		status, headers, body = self.request("GET", self.run + "/graph")
+		self.assertEqual(headers["cache-control"], "no-store")
+		text = body.decode("utf-8")
+		self.assertNotIn(str(self.result), text, "no host path reaches the browser")
+		self.assertNotIn("PRIVATE CHAIN OF THOUGHT", text)
+		self.assertNotIn("sentence_embedding_feature", text)
+
+	def test_an_invalid_newer_candidate_leaves_the_valid_graph_active(self) -> None:
+		write_graph(self.result / "clustered_dsg.json", atomic=True)
+		self.wait_for(lambda: self.get_json(self.run + "/graph")["version"], message="clustered_dsg.json")
+		(self.result / "clustered_dsg_with_summaries.json").write_text("{", encoding="utf-8")
+		graph = self.wait_for(lambda: (lambda data: data if data["artifacts"]["clustered_dsg_with_summaries.json"]["state"] == "invalid" else None)(self.get_json(self.run + "/graph")), message="the invalid state")
+		self.assertEqual(graph["version"]["name"], "clustered_dsg.json")
+		self.assertNotIn(str(self.result), json.dumps(graph))
+
+	def test_the_graph_of_another_run_is_never_mixed_in(self) -> None:
+		other = self.open_result(self.coda)
+		write_graph(self.result / "dsg.json", atomic=True)
+		self.wait_for(lambda: self.get_json(self.run + "/graph")["version"], message="dsg.json")
+		self.wait_for(lambda: self.get_json(f"/api/runs/{other['run_id']}/graph")["scanned"], message="the other scan")
+		self.assertIsNone(self.get_json(f"/api/runs/{other['run_id']}/graph")["version"])
+
+	def test_unknown_runs_and_wrong_methods_are_refused(self) -> None:
+		self.assertEqual(self.request("GET", "/api/runs/nope/graph")[0], 404)
+		self.assertEqual(self.mutate("POST", self.run + "/graph")[0], 405)
+		self.assertEqual(self.mutate("DELETE", self.run + "/graph")[0], 405)
+
+
+class ReplayServerEventsTest(ReplayServerTestCase):
+	def setUp(self) -> None:
+		super().setUp()
+		self.opened = self.open_result(self.result)
+		self.run_id = self.opened["run_id"]
+		self.run = f"/api/runs/{self.run_id}"
+		self.wait_for(lambda: self.get_json(self.run + "/graph")["scanned"], message="the first scan")
+
+	def test_a_stream_starts_with_the_state_and_reports_every_change_of_the_active_graph(self) -> None:
+		stream = self.stream(self.run + "/events")
+		self.assertEqual(stream.response.status, 200)
+		self.assertTrue(stream.response.getheader("Content-Type").startswith("text/event-stream"))
+		self.assertEqual(stream.response.getheader("Cache-Control"), "no-store")
+		self.assertEqual(stream.response.getheader("X-Content-Type-Options"), "nosniff")
+		state = stream.event()
+		self.assertEqual(state["event"], "state")
+		self.assertEqual(state["data"]["run_id"], self.run_id)
+		self.assertEqual((state["data"]["graph"]["scanned"], state["data"]["graph"]["graph"]), (True, None))
+		write_graph(self.result / "dsg.json", atomic=True)
+		event = stream.event()
+		self.assertEqual((event["event"], event["data"]["reason"], event["data"]["version"]["name"]), ("graph", "activated", "dsg.json"))
+		self.assertEqual(event["data"]["run_id"], self.run_id)
+		write_graph(self.result / "clustered_dsg.json", atomic=True, marker="clustered")
+		event = stream.events_until("graph")
+		self.assertEqual((event["data"]["reason"], event["data"]["version"]["name"], event["data"]["previous"]["name"]), ("promoted", "clustered_dsg.json", "dsg.json"))
+		(self.result / "clustered_dsg_with_summaries.json").write_text("{", encoding="utf-8")
+		event = stream.events_until("artifact-error")
+		self.assertEqual(event["data"]["name"], "clustered_dsg_with_summaries.json")
+		self.assertEqual(event["data"]["active"]["name"], "clustered_dsg.json")
+		self.assertNotIn(str(self.result), json.dumps(event["data"]))
+		(self.result / "clustered_dsg.json").unlink()
+		event = stream.events_until("graph")
+		self.assertEqual((event["data"]["reason"], event["data"]["version"]["name"]), ("demoted", "dsg.json"))
+
+	def test_resuming_with_the_last_event_id_replays_only_what_was_missed(self) -> None:
+		first = self.stream(self.run + "/events")
+		self.assertEqual(first.event()["event"], "state")
+		write_graph(self.result / "dsg.json", atomic=True)
+		seen = first.event()
+		first.close()
+		write_graph(self.result / "clustered_dsg.json", atomic=True)
+		self.wait_for(lambda: (self.get_json(self.run + "/graph")["version"] or {}).get("name") == "clustered_dsg.json", message="promotion")
+		resumed = self.stream(self.run + "/events", {"Last-Event-ID": seen["id"]})
+		event = resumed.event()
+		self.assertEqual((event["event"], event["data"]["reason"]), ("graph", "promoted"), "a continuous history needs no state")
+		stranger = self.stream(self.run + "/events", {"Last-Event-ID": "another-service.1"})
+		self.assertEqual(stranger.event()["event"], "state")
+
+	def test_an_idle_stream_sends_heartbeat_comments(self) -> None:
+		stream = self.stream(self.run + "/events")
+		self.assertEqual(stream.event()["event"], "state")
+		self.assertEqual(stream.frame(comments=True), {"comment": "keep-alive"})
+		self.assertEqual(stream.frame(comments=True), {"comment": "keep-alive"})
+
+	def test_a_disconnected_client_is_released(self) -> None:
+		broker = self.server.service.broker
+		stream = self.stream(self.run + "/events")
+		stream.event()
+		self.assertEqual(broker.subscriber_count(), 1)
+		stream.close()
+		self.wait_for(lambda: broker.subscriber_count() == 0, message="the subscription to be released")
+
+	def test_stopping_the_server_ends_open_streams(self) -> None:
+		stream = self.stream(self.run + "/events")
+		stream.event()
+		started = time.monotonic()
+		self.server.shutdown()
+		self.server.server_close()
+		self.assertIsNone(stream.frame(comments=True) if False else self.drain(stream), "the stream is closed by the service")
+		self.assertLess(time.monotonic() - started, 5)
+
+	def drain(self, stream: SseStream) -> Optional[Dict[str, Any]]:
+		while True:
+			frame = stream.frame(comments=True)
+			if frame is None:
+				return None
+
+	def test_one_stream_can_carry_several_results(self) -> None:
+		other = self.open_result(self.coda)
+		stream = self.stream(f"/api/events?run={self.run_id}&run={other['run_id']}")
+		states = {stream.event()["data"]["run_id"] for _ in range(2)}
+		self.assertEqual(states, {self.run_id, other["run_id"]})
+		write_graph(self.coda / "dsg.json", atomic=True)
+		event = stream.events_until("graph")
+		self.assertEqual(event["data"]["run_id"], other["run_id"], "events carry their run, and the other result sees nothing")
+		write_graph(self.result / "dsg.json", atomic=True)
+		event = stream.events_until("graph")
+		self.assertEqual(event["data"]["run_id"], self.run_id)
+
+	def test_unknown_results_in_a_shared_stream_are_reported_as_closed(self) -> None:
+		stream = self.stream(f"/api/events?run={self.run_id}&run=nopenopenope")
+		closed = stream.events_until("closed")
+		self.assertEqual((closed["data"]["run_id"], closed["data"]["reason"]), ("nopenopenope", "unknown"))
+		self.assertEqual(stream.events_until("state")["data"]["run_id"], self.run_id)
+
+	def test_closing_a_result_tells_the_streams_that_carry_it(self) -> None:
+		stream = self.stream(f"/api/events?run={self.run_id}")
+		stream.events_until("state")
+		self.assertEqual(self.mutate("DELETE", self.run)[0], 204)
+		closed = stream.events_until("closed")
+		self.assertEqual((closed["data"]["run_id"], closed["data"]["reason"]), (self.run_id, "closed"))
+
+	def test_bad_stream_requests_are_refused(self) -> None:
+		self.assertEqual(self.request("GET", "/api/events")[0], 400)
+		self.assertEqual(self.request("GET", "/api/events?run=a%20b")[0], 400)
+		self.assertEqual(self.request("GET", "/api/events?" + "&".join("run=abcdefghij%d" % n for n in range(65)))[0], 400)
+		self.assertEqual(self.request("GET", "/api/runs/nope/events")[0], 404)
+		self.assertEqual(self.mutate("POST", self.run + "/events")[0], 405)
+		self.assertEqual(self.mutate("POST", "/api/events")[0], 405)
+		status, _, _ = self.request("GET", self.run + "/events", headers={"Host": f"evil.example:{self.port}"})
+		self.assertEqual(status, 403, "a DNS-rebound page cannot watch the results")
 
 
 class ReplayServerApplicationTest(ReplayServerTestCase):

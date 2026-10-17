@@ -7,8 +7,9 @@ replay build their bundles with scripts/replay_bundle.finalize_bundle instead.
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Sequence, Union
 
 from scripts.replay_web.manifest import GRAPH_CANDIDATES, SCHEMA_VERSION
 
@@ -74,3 +75,55 @@ def write_minimal_bundle(result: Path, dataset_kind: str = "tum", sequence: str 
 	}
 	(bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
 	return Path(result)
+
+
+def node_id(symbol: str) -> int:
+	"""A spark_dsg node id from its symbol, such as "O12": the prefix character in the top byte, the index below."""
+	return (ord(symbol[0]) << 56) | int(symbol[1:])
+
+
+def graph_node(symbol: str, layer: int, partition: int = 0, **attributes: Any) -> Dict[str, Any]:
+	return {"id": node_id(symbol), "layer": layer, "partition": partition, "attributes": attributes}
+
+
+def graph_document(marker: str = "raw", objects: Iterable[int] = (0, 1), rooms: Union[bool, Sequence[Sequence[str]]] = False) -> Dict[str, Any]:
+	"""A small spark_dsg-shaped scene graph: objects O<n> under one place, optionally summarized rooms above it.
+
+	`rooms` is True (one room "office") or a sequence of (label, description) pairs, which become R0, R1, ...
+	"""
+	objects = list(objects)
+	nodes = [
+		graph_node("O%d" % index, 2, semantic_label=40 + index, name="", position=[float(index), 0.5, 1.0],
+			metadata={"description": "object %d" % index, "sentence_embedding_feature": [0.1] * 8})
+		for index in objects
+	]
+	nodes.append(graph_node("p7", 3, position=[0.0, 0.0, 0.0], metadata={}))
+	nodes.append(graph_node("a0", 2, 97, position=[0.0, 0.0, 0.0], timestamp=0))
+	edges = [{"source": node_id("p7"), "target": node_id("O%d" % index), "info": {}} for index in objects]
+	for number, (label, description) in enumerate([("office", "a desk area")] if rooms is True else (rooms or [])):
+		nodes.append(graph_node("R%d" % number, 4, name="", position=[0.0, 0.0, 2.0 + number], metadata={
+			"region_label": label, "region_description": description, "reasoning": "PRIVATE CHAIN OF THOUGHT",
+			"num_objects": len(objects), "description": "%s: %s" % (label, description),
+		}))
+		edges.append({"source": node_id("R%d" % number), "target": node_id("p7"), "info": {}})
+	return {
+		"SPARK_DSG_header": {"project_name": "main", "version": {"major": 1, "minor": 1, "patch": 5}},
+		"directed": False, "multigraph": False,
+		"layer_names": {"OBJECTS": {"layer": 2, "partition": 0}, "PLACES": {"layer": 3, "partition": 0}, "ROOMS": {"layer": 4, "partition": 0}},
+		"nodes": nodes, "edges": edges,
+		"metadata": {"embedding_provenance": {"sentence": {"model_name": "sentence-transformers/sentence-t5-xl"}, "clip": {"model_name": "ViT-L-14"}}},
+		"marker": marker,
+	}
+
+
+def write_graph(path: Path, marker: str = "raw", *, atomic: bool = False, **options: Any) -> bytes:
+	"""Write a scene graph file; `atomic` publishes it by rename the way the processing scripts do."""
+	path = Path(path)
+	data = json.dumps(graph_document(marker, **options)).encode("utf-8")
+	if atomic:
+		temporary = path.with_name(".%s.%d.tmp" % (path.name, os.getpid()))
+		temporary.write_bytes(data)
+		os.replace(str(temporary), str(path))
+	else:
+		path.write_bytes(data)
+	return data

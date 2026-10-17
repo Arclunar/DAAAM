@@ -6,8 +6,10 @@ It runs on the WSL host (standard library only, Python 3.8), so any WSL-visible 
 serves only:
 
 * the application: /replay.html and the files in scripts/replay_web/static/;
-* the API under /api/: the result list, opening a result by path (which returns an opaque run ID), and the members of
-  an open result's bundle that its validated manifest names (timeline chunks, images, the reference mesh).
+* the API under /api/: the result list, opening a result by path (which returns an opaque run ID), the members of
+  an open result's bundle that its validated manifest names (timeline chunks, images, the reference mesh), the active
+  scene graph of an open result, and a server-sent events stream of what changes (/api/runs/{id}/events for one result,
+  /api/events?run=...&run=... for several over one connection, since a browser allows only a few per origin).
 
 There is no general file-read or command endpoint. The service binds 127.0.0.1 only and refuses requests whose Host
 header is not this loopback address (a DNS-rebound page cannot read it); POST and DELETE also need the page's Origin
@@ -20,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -33,6 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set
 
+from scripts.replay_web.artifacts import GRAPH_PRIORITY, ArtifactMonitor
+from scripts.replay_web.events import EventBroker, SubscriptionClosed, encode_sse
 from scripts.replay_web.manifest import SCHEMA_VERSION, ManifestError, resolve_bundle_member
 from scripts.replay_web.paths import PathError
 from scripts.replay_web.runs import OpenRun, RunRegistry
@@ -55,6 +60,8 @@ CONTENT_SECURITY_POLICY = (
 IMMUTABLE = "private, max-age=31536000, immutable"
 _STATIC_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+MAX_STREAM_RUNS = 64
+SSE_RETRY_MS = 2000
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,8 @@ class ServerConfig:
 	host: str = "127.0.0.1"
 	port: int = 8765
 	scan_depth: int = 4
+	graph_interval: float = 2.0   # seconds between looks at the scene graph files of the open results
+	sse_heartbeat: float = 15.0   # an idle event stream sends a comment this often, which also reveals closed connections
 
 
 class HttpError(Exception):
@@ -103,6 +112,27 @@ class ReplayService:
 		self.port = config.port
 		self._assets: Dict[str, RunAssets] = {}
 		self._lock = threading.Lock()
+		self.broker = EventBroker(state_provider=self.state_payload)
+		self.monitor = ArtifactMonitor(self.registry, self.broker.publish, interval=config.graph_interval)
+
+	def start(self) -> None:
+		"""Start the background work (the scene graph monitor); idempotent."""
+		self.monitor.start()
+
+	def stop(self) -> None:
+		"""Stop it and release every event stream; idempotent."""
+		self.monitor.stop()
+		self.broker.close()
+
+	def state_payload(self, run_id: str) -> Dict[str, Any]:
+		"""What a page needs to catch up with a result: sent first on every new event stream and after a gap."""
+		return {"graph": self.monitor.status(run_id)}
+
+	def graph_payload(self, run_id: str) -> Dict[str, Any]:
+		self.run(run_id)
+		view = self.monitor.view(run_id)
+		view["priority"] = list(GRAPH_PRIORITY)
+		return view
 
 	@property
 	def allowed_hosts(self) -> Set[str]:
@@ -170,6 +200,8 @@ class ReplayService:
 		self.registry.close(run_id)
 		with self._lock:
 			self._assets.pop(run_id, None)
+		self.broker.publish(run_id, "closed", {"reason": "closed"})   # other pages that show this result
+		self.broker.forget(run_id)
 
 
 class ReplayRequestHandler(BaseHTTPRequestHandler):
@@ -333,6 +365,10 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 			if method != "POST":
 				raise HttpError(405, "method not allowed", "method")
 			return self.send_json(200, service.open_payload(self.read_json()))
+		if segments == ["events"]:
+			if method != "GET":
+				raise HttpError(405, "method not allowed", "method")
+			return self.serve_shared_events(query.get("run", []))
 		if len(segments) >= 2 and segments[0] == "runs":
 			run_id, rest = segments[1], segments[2:]
 			if not rest:
@@ -344,6 +380,11 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 				raise HttpError(405, "method not allowed", "method")
 			if rest == ["manifest"]:
 				return self.send_json(200, service.run(run_id).manifest)
+			if rest == ["graph"]:
+				return self.send_json(200, service.graph_payload(run_id))
+			if rest == ["events"]:
+				service.run(run_id)
+				return self.serve_events([run_id], [])
 			if len(rest) == 2 and rest[0] == "timeline":
 				return self.send_chunk(run_id, rest[1], query)
 			if len(rest) == 2 and rest[0] == "images":
@@ -351,6 +392,54 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 			if rest == ["reference"]:
 				return self.send_reference(run_id, query)
 		raise HttpError(404, "not found", "missing")
+
+	def serve_shared_events(self, requested: List[str]) -> None:
+		"""One stream for several open results: the page keeps a single connection however many tabs it has."""
+		runs = list(dict.fromkeys(requested))
+		if not runs or len(runs) > MAX_STREAM_RUNS or not all(_RUN_ID.match(run_id) for run_id in runs):
+			raise HttpError(400, f"name between 1 and {MAX_STREAM_RUNS} open results as ?run=<run id>&run=<run id>", "request")
+		known = []
+		for run_id in runs:
+			try:
+				self.service.registry.get(run_id)
+				known.append(run_id)
+			except KeyError:
+				pass
+		self.serve_events(known, [run_id for run_id in runs if run_id not in known])
+
+	def serve_events(self, run_ids: List[str], unknown: List[str]) -> None:
+		"""Server-sent events for the given results, until the client leaves or the service stops.
+
+		A new stream starts with each result's state; a reconnecting page that sends the Last-Event-ID it saw gets the
+		events it missed instead when the history still has them. Results the service does not know are reported once
+		as `closed` (the service restarted, or another page closed them).
+		"""
+		service = self.service
+		after = service.broker.parse_event_id(self.headers.get("Last-Event-ID"))
+		self.close_connection = True
+		self.send_response(200)
+		self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+		self.send_header("Cache-Control", "no-store")
+		self.send_header("X-Content-Type-Options", "nosniff")
+		self.send_header("Connection", "close")
+		self.end_headers()
+		self.wfile.write(f"retry: {SSE_RETRY_MS}\n\n".encode("ascii"))
+		for run_id in unknown:
+			data = json.dumps({"run_id": run_id, "reason": "unknown"}, separators=(",", ":"))
+			self.wfile.write(f"event: closed\ndata: {data}\n\n".encode("utf-8"))
+		self.wfile.flush()
+		with service.broker.subscribe(run_ids, after_id=after) as subscription:
+			while True:
+				try:
+					event = subscription.get(timeout=service.config.sse_heartbeat)
+				except queue.Empty:
+					self.wfile.write(b": keep-alive\n\n")
+					self.wfile.flush()
+					continue
+				except SubscriptionClosed:
+					return
+				self.wfile.write(encode_sse(event, service.broker.epoch))
+				self.wfile.flush()
 
 	def bundle_member(self, assets: RunAssets, relative: str, query: Dict[str, List[str]]) -> Path:
 		version = query.get("v", [None])[0]
@@ -400,6 +489,17 @@ class ReplayHTTPServer(ThreadingHTTPServer):
 		super().__init__(address, handler)
 		self.service = service
 
+	def serve_forever(self, poll_interval: float = 0.5) -> None:
+		self.service.start()
+		try:
+			super().serve_forever(poll_interval)
+		finally:
+			self.service.stop()
+
+	def server_close(self) -> None:
+		self.service.stop()   # streams still open must end before their sockets are closed
+		super().server_close()
+
 
 def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None) -> ReplayHTTPServer:
 	"""A bound (not yet serving) server; the port is the configured one, or a free one for port 0."""
@@ -426,11 +526,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument("--output-root", default=str(REPO_ROOT / "output"), help="results listed by default (searched a few levels deep)")
 	parser.add_argument("--state-root", default=str(REPO_ROOT / ".replay-web"), help="local service state (jobs, chat history, cache)")
 	parser.add_argument("--scan-depth", type=int, default=4)
+	parser.add_argument("--graph-interval", type=float, default=2.0, help="seconds between looks at the scene graph files of the open results")
 	parser.add_argument("--open", action="store_true", help="also open the page in the Windows browser")
 	args = parser.parse_args(argv)
 	config = ServerConfig(
 		repo_root=REPO_ROOT, output_root=Path(args.output_root), state_root=Path(args.state_root),
 		distro=os.environ.get("WSL_DISTRO_NAME", ""), host=args.host, port=args.port, scan_depth=args.scan_depth,
+		graph_interval=max(0.2, args.graph_interval),
 	)
 	try:
 		server = create_server(config)

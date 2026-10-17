@@ -18,50 +18,9 @@ from scripts.replay_web.artifacts import (
 	normalize_graph, select_active_graph,
 )
 from scripts.replay_web.runs import RunRegistry
-from tests.replay_fixtures import write_minimal_bundle
+from tests.replay_fixtures import graph_document, write_graph, write_minimal_bundle
 
 DISTRO = "Ubuntu-20.04"
-
-
-def node_id(symbol: str) -> int:
-	return (ord(symbol[0]) << 56) | int(symbol[1:])
-
-
-def node(symbol: str, layer: int, partition: int = 0, **attributes: Any) -> Dict[str, Any]:
-	return {"id": node_id(symbol), "layer": layer, "partition": partition, "attributes": attributes}
-
-
-def graph_value(marker: str = "raw", objects: Iterable[int] = (0, 1), rooms: bool = False) -> Dict[str, Any]:
-	"""A small spark_dsg-shaped graph: objects under one place, optionally a summarized room above the place."""
-	objects = list(objects)
-	nodes = [
-		node("O%d" % index, 2, semantic_label=40 + index, name="", position=[float(index), 0.5, 1.0],
-			metadata={"description": "object %d" % index, "sentence_embedding_feature": [0.1] * 8})
-		for index in objects
-	]
-	nodes.append(node("p7", 3, position=[0.0, 0.0, 0.0], metadata={}))
-	nodes.append(node("a0", 2, 97, position=[0.0, 0.0, 0.0], timestamp=0))
-	edges = [{"source": node_id("p7"), "target": node_id("O%d" % index), "info": {}} for index in objects]
-	if rooms:
-		nodes.append(node("R0", 4, name="", position=[0.0, 0.0, 2.0], metadata={
-			"region_label": "office", "region_description": "a desk area", "reasoning": "PRIVATE CHAIN OF THOUGHT",
-			"num_objects": len(objects), "description": "office: a desk area",
-		}))
-		edges.append({"source": node_id("R0"), "target": node_id("p7"), "info": {}})
-	return {
-		"SPARK_DSG_header": {"project_name": "main", "version": {"major": 1, "minor": 1, "patch": 5}},
-		"directed": False, "multigraph": False,
-		"layer_names": {"OBJECTS": {"layer": 2, "partition": 0}, "PLACES": {"layer": 3, "partition": 0}, "ROOMS": {"layer": 4, "partition": 0}},
-		"nodes": nodes, "edges": edges,
-		"metadata": {"embedding_provenance": {"sentence": {"model_name": "sentence-transformers/sentence-t5-xl"}, "clip": {"model_name": "ViT-L-14"}}},
-		"marker": marker,
-	}
-
-
-def write_graph(path: Path, marker: str = "raw", **options: Any) -> bytes:
-	data = json.dumps(graph_value(marker, **options)).encode("utf-8")
-	path.write_bytes(data)
-	return data
 
 
 class GraphSelectionTest(unittest.TestCase):
@@ -149,9 +108,33 @@ class GraphSelectionTest(unittest.TestCase):
 		self.assertEqual(graph["marker"], "inside")
 
 
+class ErrorMessageTest(unittest.TestCase):
+	"""Artifact errors are sent to the browser: they name files, never host paths."""
+
+	def test_a_symbolic_link_loop_is_reported_without_its_path(self) -> None:
+		with tempfile.TemporaryDirectory() as temp:
+			result = Path(temp).resolve() / "out_1"
+			result.mkdir()
+			loop = result / "dsg.json"
+			loop.symlink_to(loop)
+			with self.assertRaises(ArtifactError) as caught:
+				load_valid_graph(loop, root=result)
+			self.assertEqual(str(caught.exception), "dsg.json cannot be resolved (symbolic link loop)")
+			self.assertIsNone(select_active_graph(result))
+			registry = RunRegistry(output_root=Path(temp), distro=DISTRO)
+			write_minimal_bundle(result)
+			registry.open(str(result))
+			heard = []
+			ArtifactMonitor(registry, lambda run_id, kind, payload: heard.append((kind, payload)), settle=0.0).scan_once()
+			errors = [payload for kind, payload in heard if kind == "artifact-error"]
+			self.assertEqual(len(errors), 1)
+			self.assertNotIn(temp, errors[0]["error"])
+			self.assertIn("dsg.json", errors[0]["error"])
+
+
 class NormalizedGraphTest(unittest.TestCase):
 	def test_objects_places_and_summarized_rooms_are_kept_without_heavy_or_private_fields(self) -> None:
-		document = normalize_graph(graph_value(objects=(0, 3), rooms=True))
+		document = normalize_graph(graph_document(objects=(0, 3), rooms=True))
 		self.assertEqual([item["id"] for item in document["objects"]], ["O0", "O3"])
 		first = document["objects"][0]
 		self.assertEqual((first["label"], first["description"], first["position"]), (40, "object 0", [0.0, 0.5, 1.0]))
@@ -172,7 +155,7 @@ class NormalizedGraphTest(unittest.TestCase):
 		self.assertNotIn("0.1, 0.1", text, "no embedding vectors")
 
 	def test_a_raw_graph_has_no_rooms_and_unusual_values_are_dropped(self) -> None:
-		value = graph_value(objects=(5,))
+		value = graph_document(objects=(5,))
 		value["nodes"][0]["attributes"]["position"] = [float("nan"), 0.0, 0.0]
 		value["nodes"][0]["attributes"]["metadata"]["description"] = "x" * 50000
 		document = normalize_graph(value)

@@ -90,6 +90,15 @@ class ActiveGraph:
 	document: Mapping[str, Any] = field(repr=False)
 
 
+def _reason(error: BaseException) -> str:
+	"""Why an operation failed, without the host paths that str(error) may carry (these messages reach the browser)."""
+	if isinstance(error, OSError):
+		return error.strerror or type(error).__name__
+	if isinstance(error, RuntimeError):
+		return "symbolic link loop"
+	return type(error).__name__
+
+
 def _fingerprint(value: Any) -> Tuple[int, int, int, int, int]:
 	return (value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_ino, value.st_dev)
 
@@ -109,7 +118,7 @@ def _read_stable(path: Path, max_bytes: int) -> Tuple[bytes, Any]:
 	except FileNotFoundError as error:
 		raise ArtifactChanging(f"{name} disappeared while it was read") from error
 	except OSError as error:
-		raise ArtifactError(f"{name} cannot be read ({error.strerror or error})") from error
+		raise ArtifactError(f"{name} cannot be read ({_reason(error)})") from error
 	if len(raw) > max_bytes:
 		raise ArtifactError(f"{name} grew over the {max_bytes} byte limit for a scene graph")
 	if _fingerprint(before) != _fingerprint(after) or len(raw) != before.st_size:
@@ -153,7 +162,7 @@ def _read_graph_file(path: Path, root: Optional[Path], max_bytes: int) -> Tuple[
 		except FileNotFoundError as error:
 			raise ArtifactChanging(f"{path.name} disappeared") from error
 		except (OSError, RuntimeError) as error:
-			raise ArtifactError(f"{path.name} cannot be resolved ({error})") from error
+			raise ArtifactError(f"{path.name} cannot be resolved ({_reason(error)})") from error
 		try:
 			resolved.relative_to(Path(root))
 		except ValueError as error:
@@ -413,16 +422,24 @@ class ArtifactMonitor:
 			state = self._states.get(run_id)
 			return state.active if state is not None else None
 
-	def status(self, run_id: str) -> Dict[str, Any]:
+	def view(self, run_id: str) -> Dict[str, Any]:
+		"""Everything known about a run's graphs at one instant: scan state, active version and document, every file's state."""
 		with self._lock:
 			state = self._states.get(run_id)
 			if state is None:
-				return {"scanned": False, "graph": None, "artifacts": {name: {"state": "unknown"} for name in GRAPH_PRIORITY}}
+				return {"scanned": False, "version": None, "document": None, "artifacts": {name: {"state": "unknown"} for name in GRAPH_PRIORITY}}
+			active = state.active
 			return {
 				"scanned": state.scanned,
-				"graph": state.active.version.to_json() if state.active is not None else None,
+				"version": active.version.to_json() if active is not None else None,
+				"document": active.document if active is not None else None,
 				"artifacts": state.artifacts(),
 			}
+
+	def status(self, run_id: str) -> Dict[str, Any]:
+		"""`view` without the document: what the `state` event carries."""
+		view = self.view(run_id)
+		return {"scanned": view["scanned"], "graph": view["version"], "artifacts": view["artifacts"]}
 
 	# ------------------------------------------------------------------ scanning
 	def scan_once(self, should_stop: Optional[Callable[[], bool]] = None) -> None:
@@ -470,7 +487,7 @@ class ArtifactMonitor:
 			except FileNotFoundError:
 				continue
 			except OSError as error:
-				message = f"{name} cannot be read ({error.strerror or error})"
+				message = f"{name} cannot be read ({_reason(error)})"
 				if known is None or known.error != message:
 					errors.append((name, message))
 				candidates[name] = _Candidate("invalid", error=message)

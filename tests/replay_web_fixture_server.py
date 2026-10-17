@@ -5,8 +5,8 @@
 It serves the repository's replay workspace on an ephemeral loopback port, with an output root and service state in a
 temporary directory, and prints one JSON line {"base": URL, "root": DIR} when it listens. After that every stdin line
 is one JSON command and gets one JSON reply line ({"error": ...} on failure); the commands build replay bundles with
-the real finalizer and change files the way a pipeline or a processing job would. End of input stops the service and
-deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
+the real finalizer and change files the way a pipeline or a processing job would (scene graph files are published by
+atomic rename, as the processing scripts do). End of input stops the service and deletes the fixtures. Diagnostics go to stderr only: stdout carries the protocol.
 """
 
 import json
@@ -24,6 +24,7 @@ import numpy as np
 
 from scripts.replay_bundle import BundleOptions, finalize_bundle
 from scripts.replay_web.server import ServerConfig, create_server
+from tests.replay_fixtures import write_graph
 
 REPO = Path(__file__).resolve().parents[1]
 CODA_ORIGIN = 1673884185.589118
@@ -163,12 +164,26 @@ class Fixtures:
 	def exists(self, path: str) -> Dict[str, Any]:
 		return {"manifest": (Path(path) / "replay" / "manifest.json").is_file(), "result": Path(path).is_dir()}
 
+	def write_graph(self, path: str, name: str, objects: Optional[List[int]] = None, rooms: Any = False, marker: str = "fixture") -> Dict[str, Any]:
+		"""Publish a scene graph file (objects O<n>, optionally summarized rooms [[label, description], ...]) by atomic rename."""
+		write_graph(Path(path) / name, marker, atomic=True, objects=objects if objects is not None else [7, 8], rooms=rooms)
+		return {}
+
+	def write_text(self, path: str, name: str, text: str) -> Dict[str, Any]:
+		"""A file written in place, which a reader can see half done (an invalid graph, for example)."""
+		(Path(path) / name).write_text(text, encoding="utf-8")
+		return {}
+
+	def remove_file(self, path: str, name: str) -> Dict[str, Any]:
+		(Path(path) / name).unlink()
+		return {}
+
 
 def main() -> int:
 	root = Path(tempfile.mkdtemp(prefix="daaam-replay-browser-"))
 	fixtures = Fixtures(root)
 	server = create_server(ServerConfig(repo_root=REPO, output_root=fixtures.output, state_root=root / "state",
-		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0))
+		distro=os.environ.get("WSL_DISTRO_NAME", ""), port=0, graph_interval=0.2))
 	thread = threading.Thread(target=server.serve_forever, daemon=True)
 	thread.start()
 	commands: Dict[str, Callable[..., Dict[str, Any]]] = {
@@ -176,6 +191,9 @@ def main() -> int:
 		"remove_bundle": fixtures.remove_bundle,
 		"exists": fixtures.exists,
 		"corrupt_chunk": fixtures.corrupt_chunk,
+		"write_graph": fixtures.write_graph,
+		"write_text": fixtures.write_text,
+		"remove_file": fixtures.remove_file,
 	}
 
 	def reply(value: Dict[str, Any]) -> None:
