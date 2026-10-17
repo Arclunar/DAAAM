@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Post-process finished DAAAM pipeline results. By default this uses CODa's
 # output/coda/out_<UTC time>/; RESULT_ROOT selects another result root, such as
-# output/tum_replay_fr1_room for a TUM sequence:
-#   1. sentence embeddings of the object descriptions       scripts/postprocess_scene_graph.py     -> dsg_updated.json
-#   2. place clustering into rooms / regions                 cluster_places.launch.yaml             -> clustered_dsg.json
-#   3. region summaries written by OpenAI (only with --summaries; needs OPENAI_API_KEY, in the repo's .env (loaded by
-#      daaam/__init__.py) or in the environment)             scripts/summarize_regions.py           -> clustered_dsg_with_summaries.json,
-#                                                                                                   region_summaries.yaml
+# output/tum_replay_fr1_room for a TUM sequence. The steps form two stages:
+#   postprocess  1. sentence embeddings of the object descriptions  scripts/postprocess_scene_graph.py -> dsg_updated.json
+#                2. place clustering into rooms / regions            cluster_places.launch.yaml          -> clustered_dsg.json
+#   summarize    3. region summaries written by OpenAI (needs OPENAI_API_KEY, in the repo's .env (loaded by
+#                daaam/__init__.py) or in the environment)           scripts/summarize_regions.py        -> clustered_dsg_with_summaries.json,
+#                                                                                                           region_summaries.yaml
 #
 # Inside the daaam-ws container (or via the coda-* / tum-* just recipes):
-#   docker compose run --rm -T -e HF_HOME=/data/hf_cache daaam-ws bash scripts/postprocess_coda.sh [--summaries] [RUN ...]
+#   docker compose run --rm -T -e HF_HOME=/data/hf_cache daaam-ws bash scripts/postprocess_coda.sh [--stage S] [--atomic] [RUN ...]
 #   docker compose run --rm -T --no-deps daaam-ws bash scripts/postprocess_coda.sh --list
 #
 #   RUN      a result directory name under RESULT_ROOT (or an absolute path); for TUM this may be the outer tum-run
 #            directory, whose inner out_* directory contains dsg.json; default: the newest actual result
+#   --stage  postprocess (steps 1-2, the default), summarize (step 3 only; needs the clustered_dsg.json of an earlier
+#            postprocess stage) or all (both, one after the other)
+#   --summaries  the older spelling of --stage all
+#   --atomic every step writes next to its final file under a .replay-job-<pid>- name, and a stage publishes its files by
+#            rename only when all of them were written: a failure, a Ctrl+C or a termination leaves the existing outputs
+#            exactly as they were and removes only this process's temporary files (the replay workspace runs jobs this way)
 #   --list   list the results (newest first) and which of the steps are done, then stop
 # Environment: RESULT_ROOT (optional result root; default: CODa output), HF_HOME (default /data/hf_cache:
 #   sentence-t5-xl, 2.5 GB, is downloaded there once and every step that loads it must look in the same place),
@@ -29,20 +35,41 @@ else
   ROOT="$(realpath -m "${CODA_ROOT_DIR}/../output/coda")"
 fi
 
+stage=""
+stage_given=0
 summaries=0
+atomic=0
 list=0
 runs=()
-for arg in "$@"; do
-  case "${arg}" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --summaries) summaries=1 ;;
+    --atomic) atomic=1 ;;
     --list) list=1 ;;
-    -*) echo "unknown option ${arg}" >&2; exit 2 ;;
-    *) runs+=("${arg}") ;;
+    --stage)
+      [ "$#" -ge 2 ] || { echo "--stage needs a value: postprocess, summarize or all" >&2; exit 2; }
+      stage="$2"; stage_given=1; shift ;;
+    --stage=*) stage="${1#--stage=}"; stage_given=1 ;;
+    -*) echo "unknown option $1" >&2; exit 2 ;;
+    *) runs+=("$1") ;;
   esac
+  shift
 done
+if [ "${stage_given}" -eq 0 ]; then
+  stage=postprocess
+  [ "${summaries}" -eq 0 ] || stage=all
+fi
+case "${stage}" in
+  postprocess|summarize|all) ;;
+  *) echo "unknown stage '${stage}': use postprocess, summarize or all" >&2; exit 2 ;;
+esac
+if [ "${summaries}" -eq 1 ] && [ "${stage}" != all ]; then
+  echo "--summaries means --stage all and cannot be combined with --stage ${stage}" >&2
+  exit 2
+fi
 
 results_newest_first() {   # actual pipeline result directories, including legacy nested TUM layouts
-	# Current CODa/TUM: ROOT/out_*/dsg.json. Legacy TUM: ROOT/out_*/out_*/dsg.json.
+  # Current CODa/TUM: ROOT/out_*/dsg.json. Legacy TUM: ROOT/out_*/out_*/dsg.json.
   # The generated names contain no spaces; the timestamp prefix sorts the actual results newest first.
   find "${ROOT}" -mindepth 2 -maxdepth 3 -type f -name dsg.json -printf '%T@ %h\n' 2>/dev/null \
     | sort -nr | cut -d' ' -f2-
@@ -70,7 +97,7 @@ if [ "${list}" -eq 1 ]; then
   exit 0
 fi
 
-if [ "${summaries}" -eq 1 ] && [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^OPENAI_API_KEY=.' .env 2>/dev/null; then
+if [ "${stage}" != postprocess ] && [ -z "${OPENAI_API_KEY:-}" ] && ! grep -q '^OPENAI_API_KEY=.' .env 2>/dev/null; then
   echo "the region summaries are written by OpenAI: put OPENAI_API_KEY=... into .env in the repository directory" >&2
   exit 2
 fi
@@ -79,6 +106,145 @@ if [ "${#runs[@]}" -eq 0 ]; then
   [ -n "${newest}" ] || { echo "no result with a dsg.json in ${ROOT}: run the dataset pipeline first" >&2; exit 2; }
   runs=("${newest}")
 fi
+
+# Files this process created next to the final outputs; whatever way the script ends, exactly these are removed.
+tracked=()
+track() { tracked+=("$1"); }
+cleanup() {
+  local file
+  for file in ${tracked[@]+"${tracked[@]}"}; do rm -f -- "${file}"; done
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
+tmp_name() { echo "${dir}/.replay-job-${$}-$1"; }
+
+# publish_outputs SRC DST [SRC DST ...]: every DST is replaced by its SRC (a rename inside one directory), all of them or
+# none. The previous files are copied aside first and put back if a rename fails; a DST that did not exist is removed again.
+publish_outputs() {
+  local -a srcs=() dsts=() baks=()
+  local i j
+  while [ "$#" -ge 2 ]; do srcs+=("$1"); dsts+=("$2"); shift 2; done
+  for i in "${!srcs[@]}"; do
+    if [ ! -s "${srcs[$i]}" ]; then
+      echo "=== ${run}: ${srcs[$i]##*/} was not written" >&2
+      return 1
+    fi
+  done
+  for i in "${!dsts[@]}"; do
+    baks[$i]=""
+    if [ -e "${dsts[$i]}" ]; then
+      baks[$i]="${dir}/.replay-job-${$}.${dsts[$i]##*/}.bak"
+      track "${baks[$i]}"
+      if ! cp -- "${dsts[$i]}" "${baks[$i]}"; then
+        echo "=== ${run}: cannot back up ${dsts[$i]##*/}" >&2
+        return 1
+      fi
+    fi
+  done
+  for i in "${!srcs[@]}"; do
+    if ! mv -f -- "${srcs[$i]}" "${dsts[$i]}"; then
+      echo "=== ${run}: cannot publish ${dsts[$i]##*/}; the previous files are put back" >&2
+      for ((j = 0; j < i; j++)); do
+        if [ -n "${baks[$j]}" ]; then mv -f -- "${baks[$j]}" "${dsts[$j]}"; else rm -f -- "${dsts[$j]}"; fi
+      done
+      return 1
+    fi
+  done
+  for i in "${!baks[@]}"; do
+    [ -z "${baks[$i]}" ] || rm -f -- "${baks[$i]}"
+  done
+  return 0
+}
+
+# Stage postprocess: sentence embeddings, then place clustering. Succeeds when dsg_updated.json and clustered_dsg.json are
+# in place (with --atomic: published together, from files that only this stage wrote).
+run_postprocess() {
+  local updated="${dir}/dsg_updated.json" clustered="${dir}/clustered_dsg.json"
+  local embed_args=(--data-dir "${dir}") cluster_args cluster_input="" cluster_output=""
+  if [ "${atomic}" -eq 1 ]; then
+    updated="$(tmp_name dsg_updated.json)"
+    clustered="$(tmp_name clustered_dsg.json)"
+    track "${updated}"
+    track "${clustered}"
+    embed_args+=(--output "${updated}")
+  fi
+  echo "=== ${run}: sentence embeddings"
+  if ! python scripts/postprocess_scene_graph.py "${embed_args[@]}" || [ ! -s "${updated}" ]; then
+    echo "=== ${run}: the embedding step failed" >&2
+    return 1
+  fi
+  echo "=== ${run}: place clustering"
+  cluster_args=(data_dir:="${dir}" interactive:=false)
+  if [ "${PLACES_LAYER:-TRAVERSABILITY}" != "TRAVERSABILITY" ]; then
+    cluster_input="${dir}/.cluster_places_input.json"
+    cluster_output="${dir}/.cluster_places_output.json"
+    track "${cluster_input}"
+    track "${cluster_output}"
+    rm -f "${cluster_input}" "${cluster_output}"
+    if ! python scripts/adapt_cluster_places.py prepare --src "${updated}" --dst "${cluster_input}" --layer "${PLACES_LAYER}"; then
+      echo "=== ${run}: could not adapt ${PLACES_LAYER} for clustering" >&2
+      return 1
+    fi
+    cluster_args+=(src_dsg:="${cluster_input}" save_dsg:="${cluster_output}")
+  elif [ "${atomic}" -eq 1 ]; then
+    cluster_args+=(src_dsg:="${updated}" save_dsg:="${clustered}")
+  fi
+  if [ -n "${CLUSTER_PLACES_CONFIG:-}" ]; then
+    cluster_args+=(cluster_places_config_path:="${CLUSTER_PLACES_CONFIG}")
+  fi
+  if ! ros2 launch daaam_ros cluster_places.launch.yaml "${cluster_args[@]}"; then
+    echo "=== ${run}: the clustering step failed" >&2
+    return 1
+  fi
+  if [ -n "${cluster_output}" ]; then
+    if ! python scripts/adapt_cluster_places.py restore --src "${cluster_output}" --original "${updated}" \
+      --dst "${clustered}" --layer "${PLACES_LAYER}"; then
+      echo "=== ${run}: could not restore ${PLACES_LAYER} after clustering" >&2
+      return 1
+    fi
+    rm -f "${cluster_input}" "${cluster_output}"
+  fi
+  if [ ! -s "${clustered}" ]; then
+    echo "=== ${run}: the clustering step produced no clustered_dsg.json" >&2
+    return 1
+  fi
+  if [ "${atomic}" -eq 1 ]; then
+    publish_outputs "${updated}" "${dir}/dsg_updated.json" "${clustered}" "${dir}/clustered_dsg.json" || return 1
+  fi
+  return 0
+}
+
+# Stage summarize: region summaries of the clustered graph. Succeeds when clustered_dsg_with_summaries.json (and, with
+# --atomic, region_summaries.yaml) are in place.
+run_summaries() {
+  local graph="${dir}/clustered_dsg_with_summaries.json" yaml="${dir}/region_summaries.yaml" extra=()
+  if [ ! -s "${dir}/clustered_dsg.json" ]; then
+    echo "=== ${run}: the summary step needs clustered_dsg.json: run the postprocess stage first" >&2
+    return 1
+  fi
+  if [ "${atomic}" -eq 1 ]; then
+    graph="$(tmp_name clustered_dsg_with_summaries.json)"
+    yaml="$(tmp_name region_summaries.yaml)"
+    track "${graph}"
+    track "${yaml}"
+    extra=(--summary-output "${yaml}" --scene-graph-output "${graph}")
+  fi
+  echo "=== ${run}: region summaries (${SUMMARY_MODEL:-gpt-5-nano})"
+  if ! python scripts/summarize_regions.py --data-dir "${dir}" --model-name "${SUMMARY_MODEL:-gpt-5-nano}" --n-samples 20 \
+    --places-layer "${PLACES_LAYER:-TRAVERSABILITY}" ${extra[@]+"${extra[@]}"} || [ ! -s "${graph}" ]; then
+    echo "=== ${run}: the summary step failed" >&2
+    return 1
+  fi
+  if [ "${atomic}" -eq 1 ]; then
+    if ! publish_outputs "${graph}" "${dir}/clustered_dsg_with_summaries.json" "${yaml}" "${dir}/region_summaries.yaml"; then
+      echo "=== ${run}: the summary step failed" >&2
+      return 1
+    fi
+  fi
+  return 0
+}
 
 failed=0
 for run in "${runs[@]}"; do
@@ -89,56 +255,12 @@ for run in "${runs[@]}"; do
     failed=$((failed + 1))
     continue
   fi
-  echo "=== ${run}: sentence embeddings"
-  if ! python scripts/postprocess_scene_graph.py --data-dir "${dir}" || [ ! -f "${dir}/dsg_updated.json" ]; then
-    echo "=== ${run}: the embedding step failed" >&2; failed=$((failed + 1)); continue
-  fi
-  echo "=== ${run}: place clustering"
-	cluster_args=(data_dir:="${dir}" interactive:=false)
-	cluster_input=""
-	cluster_output=""
-	cleanup_cluster_files() {
-		[ -z "${cluster_input}" ] || rm -f "${cluster_input}"
-		[ -z "${cluster_output}" ] || rm -f "${cluster_output}"
-	}
-	if [ "${PLACES_LAYER:-TRAVERSABILITY}" != "TRAVERSABILITY" ]; then
-		cluster_input="${dir}/.cluster_places_input.json"
-		cluster_output="${dir}/.cluster_places_output.json"
-		rm -f "${cluster_input}" "${cluster_output}"
-		if ! python scripts/adapt_cluster_places.py prepare --src "${dir}/dsg_updated.json" --dst "${cluster_input}" --layer "${PLACES_LAYER}"; then
-			echo "=== ${run}: could not adapt ${PLACES_LAYER} for clustering" >&2
-			failed=$((failed + 1))
-			continue
-		fi
-		cluster_args+=(src_dsg:="${cluster_input}" save_dsg:="${cluster_output}")
-	fi
-	if [ -n "${CLUSTER_PLACES_CONFIG:-}" ]; then
-		cluster_args+=(cluster_places_config_path:="${CLUSTER_PLACES_CONFIG}")
-	fi
-	if ! ros2 launch daaam_ros cluster_places.launch.yaml "${cluster_args[@]}"; then
-		cleanup_cluster_files
-    echo "=== ${run}: the clustering step failed" >&2; failed=$((failed + 1)); continue
-  fi
-	if [ -n "${cluster_output}" ]; then
-		if ! python scripts/adapt_cluster_places.py restore --src "${cluster_output}" --original "${dir}/dsg_updated.json" \
-			--dst "${dir}/clustered_dsg.json" --layer "${PLACES_LAYER}"; then
-			cleanup_cluster_files
-			echo "=== ${run}: could not restore ${PLACES_LAYER} after clustering" >&2
-			failed=$((failed + 1))
-			continue
-		fi
-		cleanup_cluster_files
-	fi
-	if [ ! -f "${dir}/clustered_dsg.json" ]; then
-		echo "=== ${run}: the clustering step produced no clustered_dsg.json" >&2; failed=$((failed + 1)); continue
-	fi
-  if [ "${summaries}" -eq 1 ]; then
-    echo "=== ${run}: region summaries (${SUMMARY_MODEL:-gpt-5-nano})"
-		if ! python scripts/summarize_regions.py --data-dir "${dir}" --model-name "${SUMMARY_MODEL:-gpt-5-nano}" --n-samples 20 \
-			--places-layer "${PLACES_LAYER:-TRAVERSABILITY}" \
-      || [ ! -f "${dir}/clustered_dsg_with_summaries.json" ]; then
-      echo "=== ${run}: the summary step failed" >&2; failed=$((failed + 1)); continue
-    fi
+  ok=1
+  if [ "${stage}" != summarize ]; then run_postprocess || ok=0; fi
+  if [ "${ok}" -eq 1 ] && [ "${stage}" != postprocess ]; then run_summaries || ok=0; fi
+  if [ "${ok}" -eq 0 ]; then
+    failed=$((failed + 1))
+    continue
   fi
   made=""
   for f in dsg_updated clustered_dsg clustered_dsg_with_summaries; do

@@ -3,6 +3,7 @@ import spark_dsg as sdsg
 import click
 import yaml
 from pathlib import Path
+from typing import Optional
 
 from daaam.utils.embedding import SentenceEmbeddingHandler, EncoderProvenance, stamp_embedding_provenance
 
@@ -10,7 +11,8 @@ from daaam.utils.embedding import SentenceEmbeddingHandler, EncoderProvenance, s
 @click.command()
 @click.option('--data-dir', type=click.Path(exists=True), required=True, default="", help='Path to the scene graph file (JSON format).')
 @click.option('--sentence-model-name', type=str, required=False, default="sentence-transformers/sentence-t5-xl", help='Name of the sentence transformer model to use.')
-def main(data_dir: str, sentence_model_name: str):
+@click.option('--output', type=click.Path(), default=None, help='Where to save the updated scene graph (default: dsg_updated.json next to dsg.json).')
+def main(data_dir: str, sentence_model_name: str, output: Optional[str]):
     """Update sentence embedding features in the scene graph."""
 
     sg_path = Path(data_dir) / "dsg.json"
@@ -161,7 +163,7 @@ def main(data_dir: str, sentence_model_name: str):
         ),
     )
 
-    updated_path = str(sg_path).replace('.json', '_updated.json')
+    updated_path = output if output else str(sg_path).replace('.json', '_updated.json')
     scene_graph.save(updated_path)
     print(f"Updated scene graph saved to {updated_path}")
 

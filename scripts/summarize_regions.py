@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import spark_dsg as sdsg
 import click
@@ -359,7 +360,20 @@ def summarize_region(
 	default='TRAVERSABILITY',
 	help='Place layer used to associate objects with rooms.'
 )
-def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene_graph_file: str, places_layer: str):
+@click.option(
+	'--summary-output',
+	type=click.Path(),
+	default=None,
+	help='Where to write the region summaries (default: region_summaries.yaml in the data directory).'
+)
+@click.option(
+	'--scene-graph-output',
+	type=click.Path(),
+	default=None,
+	help='Where to save the scene graph with the summaries (default: <scene graph file>_with_summaries.json next to it).'
+)
+def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene_graph_file: str, places_layer: str,
+		summary_output: Optional[str], scene_graph_output: Optional[str]):
 	"""Summarize regions in the scene graph using OpenAI structured outputs."""
 
 	# load data
@@ -367,7 +381,7 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 	corrections_path = Path(data_dir) / "corrections.yaml"
 	bg_path = Path(data_dir) / "background_objects.yaml"
 
-	output = Path(data_dir) / "region_summaries.yaml"
+	output = Path(summary_output) if summary_output else Path(data_dir) / "region_summaries.yaml"
 	
 	print(f"Loading scene graph from {sg_path}...")
 	scene_graph = sdsg.DynamicSceneGraph.load(str(sg_path))
@@ -479,7 +493,7 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 				scene_graph.get_node(room_node.id).attributes.metadata.set(metadata)
 
 		# save updated scene graph
-		updated_sg_path = sg_path.parent / f"{sg_path.stem}_with_summaries.json"
+		updated_sg_path = Path(scene_graph_output) if scene_graph_output else sg_path.parent / f"{sg_path.stem}_with_summaries.json"
 		scene_graph.save(str(updated_sg_path))
 		print(f"\nSaved scene graph with region summaries to {updated_sg_path}")
 
@@ -488,8 +502,10 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 		output_path = Path(output)
 		output_data = {'region_summaries': region_summaries}
 
-		with open(output_path, 'w') as f:
+		temporary_path = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")   # a reader never sees half a file
+		with open(temporary_path, 'w') as f:
 			yaml.dump(output_data, f, default_flow_style=False, sort_keys=False)
+		os.replace(temporary_path, output_path)
 
 		print(f"\nSaved {len(region_summaries)} region summaries to {output_path}")
 

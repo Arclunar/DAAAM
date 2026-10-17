@@ -1,10 +1,13 @@
 import json
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -287,22 +290,35 @@ class PostprocessCodaTest(CodaScriptTest):
 			(run / "dsg.json").write_text("{}", encoding="utf-8")
 			(run / "performance_statistics.csv").write_text("operation,count\nprocess_frame,42\n", encoding="utf-8")
 			os.utime(run, (mtime, mtime))
-		# python scripts/<step>.py --data-dir DIR: records the call and writes the file the step produces
+		# python scripts/<step>.py --data-dir DIR [--output F | --summary-output F --scene-graph-output F]: records the call and
+		# writes the files the step produces (to the explicit paths when given)
 		self._write_executable(
 			self.root / "fakebin" / "python",
 			"""
 			#!/usr/bin/env bash
 			echo "python $* HF_HOME=$HF_HOME" >> "$CALLS"
-			dir=""; prev=""
-			for a in "$@"; do if [ "$prev" = --data-dir ]; then dir="$a"; fi; prev="$a"; done
+			dir=""; out=""; summary_out=""; graph_out=""; prev=""
+			for a in "$@"; do
+			  case "$prev" in
+			    --data-dir) dir="$a" ;;
+			    --output) out="$a" ;;
+			    --summary-output) summary_out="$a" ;;
+			    --scene-graph-output) graph_out="$a" ;;
+			  esac
+			  prev="$a"
+			done
 			case "$1" in
-			  scripts/postprocess_scene_graph.py) [ "${FAKE_FAIL_STEP:-}" = embeddings ] && exit 1; : > "$dir/dsg_updated.json" ;;
+			  scripts/postprocess_scene_graph.py) [ "${FAKE_FAIL_STEP:-}" = embeddings ] && exit 1; echo '{"nodes": [], "fake": "embeddings"}' > "${out:-$dir/dsg_updated.json}" ;;
 			  scripts/adapt_cluster_places.py)
 			    dst=""; prev=""
 			    for a in "$@"; do if [ "$prev" = --dst ]; then dst="$a"; fi; prev="$a"; done
-			    : > "$dst"
+			    echo '{"nodes": [], "fake": "adapted"}' > "$dst"
 			    ;;
-			  scripts/summarize_regions.py) : > "$dir/clustered_dsg_with_summaries.json" ;;
+			  scripts/summarize_regions.py)
+			    [ "${FAKE_FAIL_STEP:-}" = summaries ] && exit 1
+			    echo '{"nodes": [], "fake": "summarized"}' > "${graph_out:-$dir/clustered_dsg_with_summaries.json}"
+			    echo 'region_summaries: []' > "${summary_out:-$dir/region_summaries.yaml}"
+			    ;;
 			esac
 			""",
 		)
@@ -312,7 +328,9 @@ class PostprocessCodaTest(CodaScriptTest):
 			#!/usr/bin/env bash
 			echo "ros2 $*" >> "$CALLS"
 			for a in "$@"; do case "$a" in data_dir:=*) dir="${a#data_dir:=}";; save_dsg:=*) dst="${a#save_dsg:=}";; esac; done
-			: > "${dst:-$dir/clustered_dsg.json}"
+			[ "${FAKE_FAIL_STEP:-}" = clustering ] && exit 1
+			echo '{"nodes": [], "fake": "clustered"}' > "${dst:-$dir/clustered_dsg.json}"
+			if [ -n "${FAKE_HANG_FILE:-}" ]; then : > "$FAKE_HANG_FILE"; exec sleep 30; fi
 			""",
 		)
 
@@ -389,6 +407,217 @@ class PostprocessCodaTest(CodaScriptTest):
 		self.assertIn("out_20260101_000001: the embedding step failed", result.stderr)
 		self.assertIn("3 result(s) failed", result.stderr)
 		self.assertNotIn("cluster_places", self._calls())
+
+	# ------------------------------------------------------------------ stages
+	def _clustered(self, name: str = "out_20260101_000001") -> Path:
+		run = self.results / name
+		(run / "clustered_dsg.json").write_text("CLUSTERED", encoding="utf-8")
+		return run
+
+	def test_stage_summarize_runs_only_the_summaries_of_a_clustered_result(self) -> None:
+		run = self._clustered()
+		result = self._run("postprocess_coda.sh", "--stage", "summarize", "out_20260101_000001", OPENAI_API_KEY="sk-test")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertEqual(self._steps(), ["scripts/summarize_regions.py"])
+		self.assertNotIn("postprocess_scene_graph.py", self._calls())
+		self.assertNotIn("launch", self._calls())
+		self.assertTrue((run / "clustered_dsg_with_summaries.json").exists())
+		self.assertTrue((run / "region_summaries.yaml").exists())
+		self.assertEqual((run / "clustered_dsg.json").read_text(encoding="utf-8"), "CLUSTERED")
+
+	def test_stage_postprocess_never_summarizes_even_with_a_key(self) -> None:
+		for arguments in (("--stage", "postprocess"), ("--stage=postprocess",), ()):
+			with self.subTest(arguments=arguments):
+				if self.calls.exists():
+					self.calls.unlink()
+				result = self._run("postprocess_coda.sh", *arguments, "out_20260101_000001", OPENAI_API_KEY="sk-test")
+				self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+				self.assertEqual(self._steps(), ["scripts/postprocess_scene_graph.py", "launch"])
+				self.assertNotIn("summarize_regions", self._calls())
+
+	def test_stage_all_and_the_summaries_flag_run_the_same_steps(self) -> None:
+		runs = []
+		for arguments in (("--stage", "all"), ("--summaries",), ("--stage", "all", "--summaries"), ("--summaries", "--stage=all")):
+			if self.calls.exists():
+				self.calls.unlink()
+			result = self._run("postprocess_coda.sh", *arguments, "out_20260101_000001", OPENAI_API_KEY="sk-test")
+			self.assertEqual(result.returncode, 0, "%s: %s%s" % (arguments, result.stdout, result.stderr))
+			runs.append(self._steps())
+		self.assertEqual(runs[0], ["scripts/postprocess_scene_graph.py", "launch", "scripts/summarize_regions.py"])
+		self.assertEqual(runs, [runs[0]] * 4)
+
+	def test_summarize_refuses_a_result_without_the_clustering(self) -> None:
+		result = self._run("postprocess_coda.sh", "--stage", "summarize", "out_20260101_000001", OPENAI_API_KEY="sk-test")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertIn("clustered_dsg.json", result.stderr)
+		self.assertIn("out_20260101_000001", result.stderr)
+		self.assertEqual(self._calls(), "")
+
+	def test_unknown_stages_and_conflicting_flags_exit_2_before_anything_runs(self) -> None:
+		for arguments in (("--stage", "bogus"), ("--stage",), ("--stage", ""), ("--stage=", ), ("--stage", "postprocess", "--summaries"), ("--stage", "summarize", "--summaries")):
+			with self.subTest(arguments=arguments):
+				result = self._run("postprocess_coda.sh", *arguments, OPENAI_API_KEY="sk-test")
+				self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+				self.assertEqual(self._calls(), "")
+		self.assertIn("postprocess, summarize or all", self._run("postprocess_coda.sh", "--stage", "bogus").stderr)
+
+	def test_the_summary_stages_need_the_key_but_postprocess_does_not(self) -> None:
+		self._clustered()
+		for stage in ("summarize", "all"):
+			with self.subTest(stage=stage):
+				result = self._run("postprocess_coda.sh", "--stage", stage, "out_20260101_000001", OPENAI_API_KEY="")
+				self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+				self.assertIn("OPENAI_API_KEY", result.stderr)
+				self.assertEqual(self._calls(), "")
+		result = self._run("postprocess_coda.sh", "--stage", "postprocess", "out_20260101_000001", OPENAI_API_KEY="")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+	def test_a_failing_summary_step_keeps_the_postprocess_outputs_of_a_full_run(self) -> None:
+		result = self._run("postprocess_coda.sh", "--atomic", "--stage", "all", "out_20260101_000001", OPENAI_API_KEY="sk-test", FAKE_FAIL_STEP="summaries")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertIn("the summary step failed", result.stderr)
+		run = self.results / "out_20260101_000001"
+		self.assertTrue((run / "dsg_updated.json").exists() and (run / "clustered_dsg.json").exists(), "the finished stage stays published")
+		self.assertFalse((run / "clustered_dsg_with_summaries.json").exists())
+
+	# ------------------------------------------------------------------ atomic outputs
+	OLD = {
+		"dsg_updated.json": "OLD-UPDATED",
+		"clustered_dsg.json": "OLD-CLUSTERED",
+		"clustered_dsg_with_summaries.json": "OLD-SUMMARY-GRAPH",
+		"region_summaries.yaml": "OLD-YAML",
+	}
+
+	def _old_outputs(self, name: str = "out_20260101_000001") -> Path:
+		run = self.results / name
+		for file, text in self.OLD.items():
+			(run / file).write_text(text, encoding="utf-8")
+		return run
+
+	def _contents(self, run: Path) -> dict:
+		return {file: (run / file).read_text(encoding="utf-8") for file in self.OLD if (run / file).exists()}
+
+	def _leftovers(self, run: Path) -> list:
+		return sorted(path.name for path in run.iterdir() if path.name.startswith(".replay-job-") or path.name.startswith(".cluster_places_"))
+
+	def test_atomic_postprocess_publishes_both_graphs_and_leaves_no_temporaries(self) -> None:
+		run = self.results / "out_20260101_000001"
+		result = self._run("postprocess_coda.sh", "--atomic", "--stage", "postprocess", "out_20260101_000001")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		calls = self._calls().splitlines()
+		match = re.search(r"--data-dir %s --output (%s/\.replay-job-(\d+)-dsg_updated\.json) HF_HOME" % (re.escape(str(run)), re.escape(str(run))), calls[0])
+		self.assertIsNotNone(match, calls[0])
+		updated_tmp, pid = match.group(1), match.group(2)
+		clustered_tmp = "%s/.replay-job-%s-clustered_dsg.json" % (run, pid)
+		self.assertIn("data_dir:=%s interactive:=false src_dsg:=%s save_dsg:=%s" % (run, updated_tmp, clustered_tmp), calls[1])
+		self.assertEqual(len(calls), 2)
+		self.assertIn('"fake": "embeddings"', (run / "dsg_updated.json").read_text(encoding="utf-8"))
+		self.assertIn('"fake": "clustered"', (run / "clustered_dsg.json").read_text(encoding="utf-8"))
+		self.assertEqual(self._leftovers(run), [])
+		self.assertIn("done (dsg_updated.json clustered_dsg.json)", result.stdout)
+
+	def test_atomic_clustering_of_a_places_graph_goes_through_the_same_temporaries(self) -> None:
+		run = self.results / "out_20260101_000001"
+		result = self._run("postprocess_coda.sh", "--atomic", "out_20260101_000001", PLACES_LAYER="PLACES", CLUSTER_PLACES_CONFIG="config/cluster_places_config_tum.yaml")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		calls = self._calls()
+		pid = re.search(r"\.replay-job-(\d+)-dsg_updated\.json", calls).group(1)
+		updated_tmp, clustered_tmp = "%s/.replay-job-%s-dsg_updated.json" % (run, pid), "%s/.replay-job-%s-clustered_dsg.json" % (run, pid)
+		self.assertIn("adapt_cluster_places.py prepare --src %s --dst %s/.cluster_places_input.json --layer PLACES" % (updated_tmp, run), calls)
+		self.assertIn("src_dsg:=%s/.cluster_places_input.json save_dsg:=%s/.cluster_places_output.json" % (run, run), calls)
+		self.assertIn("adapt_cluster_places.py restore --src %s/.cluster_places_output.json --original %s --dst %s --layer PLACES" % (run, updated_tmp, clustered_tmp), calls)
+		self.assertTrue((run / "clustered_dsg.json").exists())
+		self.assertEqual(self._leftovers(run), [])
+
+	def test_a_failing_atomic_step_leaves_every_existing_output_byte_identical(self) -> None:
+		for step, arguments in (("embeddings", ("--stage", "postprocess")), ("clustering", ("--stage", "postprocess")), ("summaries", ("--stage", "summarize"))):
+			with self.subTest(step=step):
+				run = self._old_outputs()
+				before = self._contents(run)
+				result = self._run("postprocess_coda.sh", "--atomic", *arguments, "out_20260101_000001", OPENAI_API_KEY="sk-test", FAKE_FAIL_STEP=step)
+				self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+				self.assertEqual(self._contents(run), before)
+				self.assertEqual(self._leftovers(run), [])
+
+	def test_a_failing_non_atomic_embedding_step_keeps_the_previous_behaviour(self) -> None:
+		result = self._run("postprocess_coda.sh", "out_20260101_000001", FAKE_FAIL_STEP="embeddings")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertNotIn("--output", self._calls(), "without --atomic the steps are called exactly as before")
+
+	def test_atomic_summaries_publish_the_graph_and_the_yaml_together(self) -> None:
+		run = self._old_outputs()
+		result = self._run("postprocess_coda.sh", "--atomic", "--stage", "summarize", "out_20260101_000001", OPENAI_API_KEY="sk-test")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertRegex(self._calls(), r"summarize_regions\.py --data-dir %s --model-name gpt-5-nano --n-samples 20 --places-layer TRAVERSABILITY --summary-output %s/\.replay-job-\d+-region_summaries\.yaml --scene-graph-output %s/\.replay-job-\d+-clustered_dsg_with_summaries\.json" % ((re.escape(str(run)),) * 3))
+		contents = self._contents(run)
+		self.assertIn("summarized", contents["clustered_dsg_with_summaries.json"])
+		self.assertEqual(contents["region_summaries.yaml"], "region_summaries: []\n")
+		self.assertEqual(contents["clustered_dsg.json"], "OLD-CLUSTERED", "the stage touches only its own outputs")
+		self.assertEqual(contents["dsg_updated.json"], "OLD-UPDATED")
+		self.assertEqual(self._leftovers(run), [])
+
+	def test_a_publish_that_fails_halfway_puts_the_previous_files_back(self) -> None:
+		self._write_executable(
+			self.root / "fakebin" / "mv",
+			"""
+			#!/usr/bin/env bash
+			case "$*" in
+			  *".replay-job-"*"-region_summaries.yaml"*) echo "mv: simulated failure" >&2; exit 1 ;;
+			esac
+			exec /bin/mv "$@"
+			""",
+		)
+		run = self._old_outputs()
+		before = self._contents(run)
+		result = self._run("postprocess_coda.sh", "--atomic", "--stage", "summarize", "out_20260101_000001", OPENAI_API_KEY="sk-test")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertEqual(self._contents(run), before, "the graph that was already replaced is restored")
+		self.assertEqual(self._leftovers(run), [])
+		self.assertIn("the summary step failed", result.stderr)
+		# a first publish that fails halfway leaves nothing behind either
+		for file in ("clustered_dsg_with_summaries.json", "region_summaries.yaml"):
+			(run / file).unlink()
+		result = self._run("postprocess_coda.sh", "--atomic", "--stage", "summarize", "out_20260101_000001", OPENAI_API_KEY="sk-test")
+		self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+		self.assertFalse((run / "clustered_dsg_with_summaries.json").exists())
+		self.assertFalse((run / "region_summaries.yaml").exists())
+		self.assertEqual(self._leftovers(run), [])
+
+	def test_a_terminated_run_removes_only_its_own_temporaries(self) -> None:
+		run = self._old_outputs()
+		before = self._contents(run)
+		foreign = run / ".replay-job-1-dsg_updated.json"
+		foreign.write_text("another process", encoding="utf-8")
+		started = self.root / "started"
+		process = subprocess.Popen(
+			["bash", "scripts/postprocess_coda.sh", "--atomic", "--stage", "postprocess", "out_20260101_000001"],
+			cwd=self.root, env=self._env(FAKE_HANG_FILE=str(started)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+			text=True, start_new_session=True,
+		)
+		try:
+			deadline = time.monotonic() + 20
+			while not started.exists():
+				self.assertLess(time.monotonic(), deadline, "the fake clustering never started")
+				time.sleep(0.02)
+			own = sorted(path.name for path in run.iterdir() if path.name.startswith(".replay-job-%d-" % process.pid))
+			self.assertEqual(own, [".replay-job-%d-clustered_dsg.json" % process.pid, ".replay-job-%d-dsg_updated.json" % process.pid])
+			os.killpg(process.pid, signal.SIGTERM)
+			process.communicate(timeout=20)
+		finally:
+			if process.poll() is None:
+				os.killpg(process.pid, signal.SIGKILL)
+				process.communicate()
+		self.assertEqual(process.returncode, 143)
+		self.assertEqual(self._leftovers(run), [foreign.name])
+		self.assertEqual(self._contents(run), before)
+
+	def test_the_python_steps_accept_explicit_output_paths(self) -> None:
+		embeddings = (REPO / "scripts" / "postprocess_scene_graph.py").read_text(encoding="utf-8")
+		summaries = (REPO / "scripts" / "summarize_regions.py").read_text(encoding="utf-8")
+		self.assertTrue("'--output'" in embeddings, "postprocess_scene_graph.py has no --output")
+		self.assertTrue("'--summary-output'" in summaries, "summarize_regions.py has no --summary-output")
+		self.assertTrue("'--scene-graph-output'" in summaries, "summarize_regions.py has no --scene-graph-output")
+		self.assertTrue("os.replace(" in summaries, "the YAML is published by rename in every mode")
 
 	def test_list_shows_the_results_newest_first_with_their_progress(self) -> None:
 		older = self.results / "out_20260101_000001"
