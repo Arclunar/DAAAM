@@ -484,18 +484,28 @@ class WorkerProcessTest(ClientTestCase):
 
 class CommandTest(unittest.TestCase):
 	def test_the_worker_command_is_fixed(self):
-		self.assertEqual(default_argv(("gpt-5-mini", "claude-sonnet-4-5")), [
+		self.assertEqual(default_argv(("gpt-5-mini", "claude-sonnet-4-5"), environ={}), [
 			"docker", "compose", "run", "--rm", "-T", "--name", "daaam-replay-agent",
 			"-e", "HF_HOME=/data/hf_cache", "-e", "PYTHONUNBUFFERED=1", "-e", "REPLAY_AGENT_MODELS=gpt-5-mini,claude-sonnet-4-5",
 			"daaam-ws", "python", "-m", "scripts.replay_web.agent_worker",
 		])
 
 	def test_an_idle_time_is_passed_to_the_worker_when_one_is_configured(self):
-		argv = default_argv(("gpt-5-mini",), idle_seconds=120)
+		argv = default_argv(("gpt-5-mini",), idle_seconds=120, environ={})
 
 		self.assertEqual(argv[argv.index("daaam-ws") - 2:argv.index("daaam-ws")], ["-e", "REPLAY_AGENT_IDLE_SECONDS=120"])
-		self.assertNotIn("REPLAY_AGENT_IDLE_SECONDS", " ".join(default_argv(("gpt-5-mini",))))
-		self.assertIn("REPLAY_AGENT_IDLE_SECONDS=0", default_argv(("gpt-5-mini",), idle_seconds=0), "0 means never")
+		self.assertNotIn("REPLAY_AGENT_IDLE_SECONDS", " ".join(default_argv(("gpt-5-mini",), environ={})))
+		self.assertIn("REPLAY_AGENT_IDLE_SECONDS=0", default_argv(("gpt-5-mini",), idle_seconds=0, environ={}), "0 means never")
+
+	def test_a_key_exported_in_the_services_shell_reaches_the_container_by_name_only(self):
+		environ = {"OPENAI_API_KEY": "sk-secret-value-123456", "ANTHROPIC_API_KEY": "", "UNRELATED": "x"}
+		argv = default_argv(("gpt-5-mini",), environ=environ)
+
+		self.assertEqual(argv[argv.index("OPENAI_API_KEY") - 1], "-e")
+		self.assertNotIn("ANTHROPIC_API_KEY", argv, "an empty variable is not passed: it would hide the key of the .env file")
+		self.assertNotIn("UNRELATED", " ".join(argv))
+		self.assertNotIn("secret-value", " ".join(argv), "docker copies the value from this command's environment: it is never on the command line")
+		self.assertEqual(argv[-4:], ["daaam-ws", "python", "-m", "scripts.replay_web.agent_worker"])
 
 	def test_the_container_name_stays_in_the_workspaces_own_namespace(self):
 		self.assertEqual(agent_client.AGENT_CONTAINER, "daaam-replay-agent")

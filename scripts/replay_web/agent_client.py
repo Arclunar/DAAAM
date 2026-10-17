@@ -66,13 +66,23 @@ class AgentRequestFailed(AgentError):
 	"""The worker reported an error for this request (its code and message come from the worker, validated)."""
 
 
-def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None) -> List[str]:
-	"""The fixed worker command. The only variable parts are the model names, which agent_protocol.allowed_models vetted, and
-	the worker's idle time in seconds (a number; 0 means never; by default the worker's own fifteen minutes)."""
+CREDENTIAL_VARIABLES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+
+
+def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None, environ: Optional[Mapping[str, str]] = None) -> List[str]:
+	"""The fixed worker command. The only variable parts are the model names, which agent_protocol.allowed_models vetted, the
+	worker's idle time in seconds (a number; 0 means never; by default the worker's own fifteen minutes) and the *names* of the API
+	key variables that are set in `environ` (default: this process's): `-e NAME` makes Docker copy the value from the environment
+	of this command, so a key exported in the shell that started the service reaches the worker without ever being on a command
+	line. A key in the repository's .env is read by the container itself; an empty variable is not passed, it would hide that key."""
+	environ = os.environ if environ is None else environ
 	argv = [
 		"docker", "compose", "run", "--rm", "-T", "--name", AGENT_CONTAINER,
 		"-e", "HF_HOME=/data/hf_cache", "-e", "PYTHONUNBUFFERED=1", "-e", "%s=%s" % (MODELS_ENV, ",".join(models)),
 	]
+	for variable in CREDENTIAL_VARIABLES:
+		if environ.get(variable):
+			argv += ["-e", variable]
 	if idle_seconds is not None:
 		argv += ["-e", "REPLAY_AGENT_IDLE_SECONDS=%g" % float(idle_seconds)]
 	return argv + ["daaam-ws", "python", "-m", "scripts.replay_web.agent_worker"]
