@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import re
@@ -95,6 +97,31 @@ class RunRegistryTest(unittest.TestCase):
 		self.assertEqual(second.run_id, first.run_id)
 		self.assertEqual(second.manifest["title"], "second")
 		self.assertEqual(self.registry.get(first.run_id).manifest["snapshots"]["count"], 2)
+
+	def test_listeners_hear_opens_and_closes_and_a_failing_listener_breaks_nothing(self) -> None:
+		result = write_minimal_bundle(self.output / "out_1")
+		heard = []
+
+		def listener(event: str, run) -> None:
+			heard.append((event, run.run_id))
+
+		def failing(event: str, run) -> None:
+			raise RuntimeError("listener failed")
+
+		self.registry.add_listener(failing)
+		self.registry.add_listener(listener)
+		with contextlib.redirect_stderr(io.StringIO()) as log:
+			opened = self.registry.open(str(result))
+			self.registry.open(str(result))
+			self.assertTrue(self.registry.close(opened.run_id))
+			self.assertFalse(self.registry.close(opened.run_id))
+		self.assertEqual(heard, [("open", opened.run_id), ("open", opened.run_id), ("close", opened.run_id)])
+		self.assertIn("listener failed", log.getvalue())
+		self.registry.remove_listener(listener)
+		self.registry.remove_listener(failing)
+		self.registry.remove_listener(failing)
+		self.registry.open(str(result))
+		self.assertEqual(len(heard), 3)
 
 	def test_concurrent_opens_of_one_result_share_one_id(self) -> None:
 		result = write_minimal_bundle(self.output / "out_1")

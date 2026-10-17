@@ -10,15 +10,21 @@ opens its saved paths again and gets new IDs.
 symlinks (output/coda points to another drive on this machine) but never loops, and skips hidden directories and the
 inside of bundles and results.
 
+Listeners (`add_listener`) hear `listener("open", run)` after every open, including reopening an open result, and
+`listener("close", run)`; the scene graph monitor uses them to look at a new result at once. They run outside the
+registry lock, and a failing listener is logged without affecting the open or close.
+
 Standard library only, Python 3.8.
 """
 
 import os
 import secrets
+import sys
 import threading
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from scripts.replay_web.manifest import BUNDLE_DIR, MANIFEST_NAME, ManifestError, bundle_root_of, validate_manifest
 from scripts.replay_web.paths import PathError, normalize_user_path
@@ -81,6 +87,25 @@ class RunRegistry:
 		self._lock = threading.RLock()
 		self._by_id: Dict[str, OpenRun] = {}
 		self._by_path: Dict[Path, str] = {}
+		self._listeners: List[Callable[[str, OpenRun], None]] = []
+
+	def add_listener(self, listener: Callable[[str, OpenRun], None]) -> None:
+		with self._lock:
+			self._listeners.append(listener)
+
+	def remove_listener(self, listener: Callable[[str, OpenRun], None]) -> None:
+		with self._lock:
+			if listener in self._listeners:
+				self._listeners.remove(listener)
+
+	def _notify(self, event: str, run: OpenRun) -> None:
+		with self._lock:
+			listeners = list(self._listeners)
+		for listener in listeners:
+			try:
+				listener(event, run)
+			except Exception:
+				sys.stderr.write(f"[replay-web] {event} listener failed:\n{traceback.format_exc()}")
 
 	def canonical(self, raw_path: str) -> Path:
 		"""The canonical result directory a user path names; PathError when it is not a readable directory."""
@@ -112,7 +137,8 @@ class RunRegistry:
 				self._by_path[canonical] = run_id
 			run = OpenRun(run_id=run_id, canonical_path=canonical, bundle_root=bundle, manifest=manifest)
 			self._by_id[run_id] = run
-			return run
+		self._notify("open", run)
+		return run
 
 	def get(self, run_id: str) -> OpenRun:
 		with self._lock:
@@ -134,7 +160,8 @@ class RunRegistry:
 			if run is None:
 				return False
 			self._by_path.pop(run.canonical_path, None)
-			return True
+		self._notify("close", run)
+		return True
 
 	def discover(self) -> List[OpenRunSummary]:
 		"""Valid bundles below the output root, newest manifest first, each canonical result once."""
