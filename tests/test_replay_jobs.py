@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 from scripts.replay_web.events import EventBroker
 from scripts.replay_web.jobs import (
 	JobConflict, JobManager, JobNotFound, JobRecord, JobRefused, JobSpec, JobStage, JobStateError, build_job_argv,
-	docker_busy_reason, has_openai_key,
+	docker_busy_reason, docker_container_alive, has_openai_key, recover_leftovers,
 )
 
 PIDS = count(1000)
@@ -90,7 +90,9 @@ class JobTestCase(unittest.TestCase):
 		self.repo.mkdir()
 		self.broker = EventBroker(history_limit=2000, queue_limit=5000)
 		self.runner = FakeRunner()
-		self.stopped: List[str] = []
+		self.stopped: List[str] = []   # `docker stop` calls: the job IDs
+		self.stop_effect = True   # whether `docker stop` ends the container and with it the docker client
+		self.alive: set = set()   # containers that still run after their client ended
 		self.finished: List[JobRecord] = []
 		self.reports = True   # the default owner callback records finished jobs; a test with its own callback clears this
 		self.subscription = self.broker.subscribe(["a", "b", "c"], after_id=0)
@@ -105,13 +107,23 @@ class JobTestCase(unittest.TestCase):
 	def manager(self, **options: Any) -> JobManager:
 		settings: Dict[str, Any] = dict(
 			state_root=self.state, broker=self.broker, runner=self.runner, repo_root=self.repo, max_concurrent=1,
-			api_key_check=lambda: True, busy_check=lambda: None, stop_container=self.stopped.append,
+			api_key_check=lambda: True, busy_check=lambda: None, stop_container=self.docker_stop,
+			container_alive=lambda job_id: job_id in self.alive, retry_interval=0.02,
 			on_finished=self.finished.append, grace=0.05, stop_wait=0.05, log_limit=4096,
 		)
 		settings.update(options)
 		manager = JobManager(**settings)
 		self.managers.append(manager)
 		return manager
+
+	def docker_stop(self, job_id: str) -> None:
+		"""The fake `docker stop`: the container ends, and so does the docker client that was attached to it."""
+		self.stopped.append(job_id)
+		self.alive.discard(job_id)
+		if self.stop_effect:
+			for call, process in zip(list(self.runner.calls), list(self.runner.processes)):
+				if "daaam-replay-job-" + job_id in call["argv"]:
+					process.finish(143)
 
 	def result(self, name: str, *files: str) -> Path:
 		path = self.root / "output" / name
@@ -363,6 +375,7 @@ class JobCommandTest(JobTestCase):
 			"docker", "compose", "run", "--rm", "-T",
 			"--name", "daaam-replay-job-0123456789abcdef",
 			"-v", "/data/output/tum_replay/out_1:/selected-result",
+			"-e", "PYTHONUNBUFFERED=1",
 			"-e", "CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml",
 			"-e", "PLACES_LAYER=PLACES",
 			"daaam-ws", "bash", "scripts/postprocess_coda.sh", "--atomic", "--stage", "postprocess", "/selected-result",
@@ -373,6 +386,7 @@ class JobCommandTest(JobTestCase):
 			"docker", "compose", "run", "--rm", "-T",
 			"--name", "daaam-replay-job-fedcba9876543210",
 			"-v", "/mnt/e/output/coda/out_2:/selected-result",
+			"-e", "PYTHONUNBUFFERED=1",
 			"daaam-ws", "bash", "scripts/postprocess_coda.sh", "--atomic", "--stage", "all", "/selected-result",
 		])
 		self.assertTrue(all(isinstance(item, str) for item in argv))
@@ -490,44 +504,38 @@ class JobCancelTest(JobTestCase):
 		self.wait_state(manager, first.job_id, "succeeded")
 		self.assertEqual(len(self.runner.calls), 1, "the cancelled job is not started afterwards")
 
-	def test_a_running_job_is_asked_to_stop_first(self) -> None:
+	def test_cancelling_stops_the_container_and_leaves_the_client_alone(self) -> None:
 		path = self.result("tum")
 		manager = self.manager()
 		job = manager.start(self.spec(path))
 		self.wait_state(manager, job.job_id, "running")
 		manager.cancel(job.job_id)
 		done = self.wait_state(manager, job.job_id, "cancelled")
-		self.assertEqual(self.runner.processes[0].signals, ["TERM"])
-		self.assertEqual(self.stopped, [])
+		self.assertEqual(set(self.stopped), {job.job_id}, "docker stop names exactly this job's container")
+		self.assertEqual(self.runner.processes[0].signals, [], "the client ends with its container: it is not signalled")
 		self.assertEqual(done.exit_code, 143)
 		self.assertEqual([record.state for record in self.finished], ["cancelled"])
 		self.assertEqual([event.payload["job"]["state"] for event in self.events("job-state")][-1], "cancelled")
 
-	def test_a_child_that_ignores_the_signal_is_stopped_through_its_own_container_then_killed(self) -> None:
+	def test_when_the_container_cannot_be_stopped_the_client_is_signalled_and_finally_killed(self) -> None:
 		path = self.result("tum")
+		self.stop_effect = False
 		self.runner.options = {"ignore_term": True}
-		manager = self.manager(stop_container=lambda job_id: self.stopped.append(job_id))
+		manager = self.manager()
 		job = manager.start(self.spec(path))
 		self.wait_state(manager, job.job_id, "running")
 		manager.cancel(job.job_id)
 		self.wait_state(manager, job.job_id, "cancelled")
-		self.assertEqual(self.stopped, [job.job_id], "docker stop names exactly this job's container")
+		self.assertEqual(set(self.stopped), {job.job_id})
+		self.assertGreaterEqual(len(self.stopped), 2, "a container that may not exist yet is asked again")
 		self.assertEqual(self.runner.processes[0].signals, ["TERM", "KILL"])
-
 		other = self.result("other")
-		self.runner.options = {"ignore_term": True}
-		self.stopped.clear()
-
-		def stop_ends_it(job_id: str) -> None:
-			self.stopped.append(job_id)
-			self.runner.processes[-1].finish(143)
-
-		manager = self.manager(stop_container=stop_ends_it)
-		job = manager.start(self.spec(other, run_id="b"))
-		self.wait_state(manager, job.job_id, "running")
-		manager.cancel(job.job_id)
-		self.wait_state(manager, job.job_id, "cancelled")
-		self.assertEqual(self.runner.processes[-1].signals, ["TERM"], "no kill once the container stopped")
+		self.runner.options = {}
+		second = manager.start(self.spec(other, run_id="b"))
+		self.wait_state(manager, second.job_id, "running")
+		manager.cancel(second.job_id)
+		self.wait_state(manager, second.job_id, "cancelled")
+		self.assertEqual(self.runner.processes[1].signals, ["TERM"], "no kill once the client gave in")
 
 	def test_cancelling_an_unknown_or_finished_job_is_an_error(self) -> None:
 		path = self.result("tum")
@@ -546,6 +554,7 @@ class JobCancelTest(JobTestCase):
 
 	def test_a_cancel_that_comes_too_late_does_not_hide_a_finished_job(self) -> None:
 		path = self.result("tum")
+		self.stop_effect = False
 		self.runner.options = {"ignore_term": True}
 		manager = self.manager(grace=5.0)
 		job = manager.start(self.spec(path))
@@ -555,7 +564,6 @@ class JobCancelTest(JobTestCase):
 		done = self.wait_state(manager, job.job_id, "succeeded")
 		self.assertTrue(done.cancel_requested)
 		other = self.result("other")
-		self.runner.options = {"ignore_term": True}
 		second = manager.start(self.spec(other, run_id="b"))
 		self.wait_state(manager, second.job_id, "running")
 		manager.cancel(second.job_id)
@@ -564,6 +572,7 @@ class JobCancelTest(JobTestCase):
 
 	def test_cancelling_twice_is_harmless(self) -> None:
 		path = self.result("tum")
+		self.stop_effect = False
 		self.runner.options = {"ignore_term": True}
 		manager = self.manager(grace=5.0)
 		job = manager.start(self.spec(path))
@@ -571,9 +580,108 @@ class JobCancelTest(JobTestCase):
 		first = manager.cancel(job.job_id)
 		second = manager.cancel(job.job_id)
 		self.assertTrue(first.cancel_requested and second.cancel_requested)
-		self.assertEqual(self.runner.processes[0].signals, ["TERM"], "one request, one signal")
+		self.wait_for(lambda: self.stopped, message="the container to be asked to stop")
+		self.assertEqual(self.runner.processes[0].signals, [], "the client is left alone while the container is being stopped")
 		self.runner.processes[0].finish(143)
 		self.wait_state(manager, job.job_id, "cancelled")
+
+class JobContainerTest(JobTestCase):
+	"""The child process is only the docker client; the job is the container, which outlives a killed client."""
+
+	def test_a_job_is_not_over_until_its_container_is_gone(self) -> None:
+		path = self.result("tum")
+		release = threading.Event()
+		manager = self.manager(grace=5.0, stop_wait=5.0)   # patience: the container is stopped, just not at once
+
+		def slow_stop(job_id: str) -> None:
+			self.stopped.append(job_id)
+			if release.is_set():
+				self.alive.discard(job_id)
+
+		manager.stop_container = slow_stop
+		job = manager.start(self.spec(path))
+		self.wait_state(manager, job.job_id, "running")
+		self.alive.add(job.job_id)   # the container keeps running
+		self.runner.processes[0].finish(130)   # ... after its client was killed from outside
+		self.wait_for(lambda: self.stopped, message="the container to be asked to stop")
+		time.sleep(0.2)
+		self.assertEqual(manager.get(job.job_id).state, "running", "a container that still runs keeps the job running")
+		release.set()
+		failed = self.wait_state(manager, job.job_id, "failed")
+		self.assertEqual(failed.exit_code, 130)
+
+	def test_a_container_that_never_stops_does_not_hold_the_job_forever(self) -> None:
+		path = self.result("tum")
+		manager = self.manager(stop_container=lambda job_id: self.stopped.append(job_id))
+		job = manager.start(self.spec(path))
+		self.wait_state(manager, job.job_id, "running")
+		self.alive.add(job.job_id)
+		self.runner.processes[0].finish(1)
+		self.wait_state(manager, job.job_id, "failed")   # given up after grace + stop_wait
+		self.assertTrue(self.stopped)
+
+	def test_files_a_killed_container_left_behind_are_cleaned_up_and_an_interrupted_publish_is_rolled_back(self) -> None:
+		path = self.result("tum", "dsg_updated.json", "clustered_dsg.json")
+		(path / "clustered_dsg.json").write_text("NEW-HALF-PUBLISHED", encoding="utf-8")
+		(path / ".replay-job-12.clustered_dsg.json.bak").write_text("PREVIOUS", encoding="utf-8")
+		(path / ".replay-job-12-dsg_updated.json").write_text("temporary", encoding="utf-8")
+		(path / ".cluster_places_input.json").write_text("temporary", encoding="utf-8")
+		(path / ".keep-me").write_text("not ours", encoding="utf-8")
+		manager = self.manager()
+		job = manager.start(self.spec(path, replace=True))
+		self.wait_state(manager, job.job_id, "running")
+		manager.cancel(job.job_id)
+		self.wait_state(manager, job.job_id, "cancelled")
+		self.assertEqual(sorted(entry.name for entry in path.iterdir() if entry.name.startswith(".")), [".keep-me"])
+		self.assertEqual((path / "clustered_dsg.json").read_text(encoding="utf-8"), "PREVIOUS")
+
+	def test_a_successful_job_leaves_the_directory_alone(self) -> None:
+		path = self.result("tum")
+		(path / ".replay-job-1-x").write_text("someone else's", encoding="utf-8")
+		manager = self.manager()
+		job = manager.start(self.spec(path))
+		self.wait_state(manager, job.job_id, "running")
+		self.finish_with_files(self.runner.processes[0], path, "dsg_updated.json", "clustered_dsg.json")
+		self.wait_state(manager, job.job_id, "succeeded")
+		self.assertTrue((path / ".replay-job-1-x").exists())
+
+	def test_recover_leftovers_touches_only_the_scripts_own_names(self) -> None:
+		directory = self.root / "result"
+		directory.mkdir()
+		(directory / "clustered_dsg.json").write_text("NEW", encoding="utf-8")
+		(directory / ".replay-job-7.clustered_dsg.json.bak").write_text("OLD", encoding="utf-8")
+		(directory / ".replay-job-7-clustered_dsg.json").write_text("tmp", encoding="utf-8")
+		(directory / ".cluster_places_output.json").write_text("tmp", encoding="utf-8")
+		(directory / ".replayjob").write_text("other", encoding="utf-8")
+		(directory / "replay-job-1").write_text("visible file", encoding="utf-8")
+		done = recover_leftovers(directory)
+		self.assertEqual(sorted(done), ["removed .cluster_places_output.json", "removed .replay-job-7-clustered_dsg.json", "restored clustered_dsg.json"])
+		self.assertEqual(sorted(entry.name for entry in directory.iterdir()), [".replayjob", "clustered_dsg.json", "replay-job-1"])
+		self.assertEqual((directory / "clustered_dsg.json").read_text(encoding="utf-8"), "OLD")
+		self.assertEqual(recover_leftovers(directory), [])
+		self.assertEqual(recover_leftovers(self.root / "missing"), [])
+
+	def test_the_container_check_asks_docker_for_exactly_this_container(self) -> None:
+		calls = []
+
+		def run(output: str, code: int = 0):
+			def fake(argv: List[str], **kwargs: Any) -> Any:
+				calls.append(argv)
+				return subprocess.CompletedProcess(argv, code, stdout=output, stderr="")
+			return fake
+
+		job_id = "0123456789abcdef"
+		self.assertTrue(docker_container_alive(job_id, run("a1b2c3\n")))
+		self.assertEqual(calls[0], ["docker", "ps", "-q", "--filter", "name=^daaam-replay-job-0123456789abcdef$"])
+		self.assertFalse(docker_container_alive(job_id, run("")))
+		self.assertFalse(docker_container_alive(job_id, run("a1b2c3\n", code=1)), "docker that cannot answer does not hold a job")
+		self.assertFalse(docker_container_alive("../../etc", run("a1b2c3\n")))
+		self.assertEqual(len(calls), 3, "an invalid id never reaches docker")
+
+		def missing(argv: List[str], **kwargs: Any) -> Any:
+			raise FileNotFoundError("docker")
+
+		self.assertFalse(docker_container_alive(job_id, missing))
 
 
 class JobRecoveryTest(JobTestCase):
@@ -591,6 +699,7 @@ class JobRecoveryTest(JobTestCase):
 
 	def test_unfinished_jobs_of_an_earlier_service_become_interrupted(self) -> None:
 		path = self.result("tum")
+		(path / ".replay-job-46-dsg_updated.json").write_text("left by a killed container", encoding="utf-8")
 		self.write_record("aaaaaaaaaaaaaaaa", "running", path)
 		self.write_record("bbbbbbbbbbbbbbbb", "queued", path)
 		self.write_record("cccccccccccccccc", "succeeded", path, exit_code=0, finished=1100.0)
@@ -603,6 +712,7 @@ class JobRecoveryTest(JobTestCase):
 		saved = json.loads((self.state / "jobs" / "aaaaaaaaaaaaaaaa" / "job.json").read_text(encoding="utf-8"))
 		self.assertEqual(saved["state"], "interrupted", "the correction is persisted")
 		self.assertEqual(self.stopped, ["aaaaaaaaaaaaaaaa"], "a container that may still run is stopped by name")
+		self.assertFalse(list(path.glob(".replay-job-*")), "what it left behind is cleaned up")
 		self.assertEqual(manager.log_tail("aaaaaaaaaaaaaaaa", 5), ["=== earlier output"])
 		self.assertEqual(self.runner.calls, [])
 		again = manager.start(self.spec(path))
@@ -654,7 +764,8 @@ class JobShutdownTest(JobTestCase):
 		self.assertEqual(manager.get(running.job_id).state, "interrupted")
 		self.assertEqual(manager.get(queued.job_id).state, "interrupted")
 		self.assertIn("stopped", manager.get(running.job_id).message)
-		self.assertEqual(self.runner.processes[0].signals, ["TERM"])
+		self.assertEqual(set(self.stopped), {running.job_id}, "the running job's container is stopped")
+		self.assertEqual(self.runner.processes[0].signals, [])
 		self.assertEqual(len(self.runner.calls), 1)
 		manager.shutdown()   # a second call is harmless
 		reloaded = self.manager()

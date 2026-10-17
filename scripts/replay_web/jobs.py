@@ -14,7 +14,11 @@ Rules the manager enforces:
 * no job starts while another heavy DAAAM container (pipeline, depth estimation, queries ...) runs: they do not fit in
   memory together (the same rule as the justfile's `_coda-guard`);
 * a job succeeded only if the child exited 0 *and* its expected outputs were written during the run;
-* cancelling asks the child's process group to stop, then stops the job's own container by name, then kills the group;
+* the child is only the `docker compose run` client: the job is its container, which keeps running when the client is
+  killed. Cancelling therefore stops the container by name (`docker stop`; the script inside stops its step and removes its
+  temporary files), falls back to signalling the client only when that does not work, and a job is not over until its
+  container is gone. Files a killed container left next to the outputs are removed, and a publish it was in the middle of
+  is rolled back, from the host side (`recover_leftovers`);
 * every job is a record under `<state>/jobs/<id>/` (job.json, and a log.txt kept to the last `log_limit` bytes); a service
   restart turns records that were still queued or running into `interrupted`.
 
@@ -49,6 +53,7 @@ MOUNT_POINT = "/selected-result"
 COMPOSE_SERVICE = "daaam-ws"
 SCRIPT = "scripts/postprocess_coda.sh"
 TUM_SETTINGS = (("CLUSTER_PLACES_CONFIG", "config/cluster_places_config_tum.yaml"), ("PLACES_LAYER", "PLACES"))
+COMMON_SETTINGS = (("PYTHONUNBUFFERED", "1"),)   # the log is live: Python would otherwise buffer its output in blocks
 CLIENT_ENV = {"COMPOSE_ANSI": "never", "COMPOSE_PROGRESS": "plain"}
 HEAVY_COMMANDS = re.compile(
 	r"run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example"
@@ -217,9 +222,9 @@ def build_job_argv(spec: JobSpec, job_id: str, repo_root: Path) -> Tuple[List[st
 		"--name", JOB_CONTAINER_PREFIX + job_id,
 		"-v", "%s:%s" % (spec.result_path, MOUNT_POINT),
 	]
-	if spec.dataset_kind == "tum":
-		for name, value in TUM_SETTINGS:
-			argv += ["-e", "%s=%s" % (name, value)]
+	settings = COMMON_SETTINGS + (TUM_SETTINGS if spec.dataset_kind == "tum" else ())
+	for name, value in settings:
+		argv += ["-e", "%s=%s" % (name, value)]
 	argv += [COMPOSE_SERVICE, "bash", SCRIPT, "--atomic", "--stage", spec.stage.value, MOUNT_POINT]
 	return argv, dict(CLIENT_ENV)
 
@@ -264,14 +269,54 @@ def popen_runner(argv: List[str], env: Dict[str, str], cwd: Path) -> GroupProces
 
 
 def docker_stop(job_id: str) -> None:
-	"""`docker stop` of exactly this job's container (a fixed command; the id is generated here and checked)."""
+	"""`docker stop` of exactly this job's container (a fixed command; the id is generated here and checked): SIGTERM to
+	its script, which stops its step and cleans up, and a kill after ten seconds. Returns when the container is gone, or
+	at once when there is none."""
 	if not JOB_ID.match(job_id):
 		return
 	try:
-		subprocess.run(["docker", "stop", "-t", "5", JOB_CONTAINER_PREFIX + job_id], stdin=subprocess.DEVNULL,
-			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+		subprocess.run(["docker", "stop", "-t", "10", JOB_CONTAINER_PREFIX + job_id], stdin=subprocess.DEVNULL,
+			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
 	except (OSError, subprocess.SubprocessError):
 		pass
+
+
+def docker_container_alive(job_id: str, run: Callable[..., Any] = subprocess.run) -> bool:
+	"""Whether this job's container is running. When docker cannot be asked, the answer is no: nothing more can be done."""
+	if not JOB_ID.match(job_id):
+		return False
+	try:
+		result = run(["docker", "ps", "-q", "--filter", "name=^%s%s$" % (JOB_CONTAINER_PREFIX, job_id)], stdin=subprocess.DEVNULL,
+			stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True, timeout=20)
+	except (OSError, subprocess.SubprocessError):
+		return False
+	return result.returncode == 0 and bool((result.stdout or "").strip())
+
+
+_BACKUP = re.compile(r"^\.replay-job-\d+\.(?P<final>.+)\.bak$")
+_CLUSTER_TEMPORARIES = (".cluster_places_input.json", ".cluster_places_output.json")
+
+
+def recover_leftovers(path: Path) -> List[str]:
+	"""After a job that did not end cleanly (its container was killed): put back the files a publish had set aside, and
+	remove the temporaries it wrote. Only call this when no job is running on the result. Returns what was done."""
+	done: List[str] = []
+	try:
+		entries = sorted(Path(path).iterdir())
+	except OSError:
+		return done
+	for entry in entries:
+		match = _BACKUP.match(entry.name)
+		try:
+			if match:   # a publish was interrupted: the backup is the previous version of that output
+				os.replace(str(entry), str(Path(path) / match.group("final")))
+				done.append("restored " + match.group("final"))
+			elif entry.name.startswith(".replay-job-") or entry.name in _CLUSTER_TEMPORARIES:
+				entry.unlink()
+				done.append("removed " + entry.name)
+		except OSError as error:
+			sys.stderr.write(f"[replay-web] cannot clean up {entry.name}: {error.strerror or error}\n")
+	return done
 
 
 def docker_busy_reason(run: Callable[..., Any] = subprocess.run) -> Optional[str]:
@@ -410,7 +455,7 @@ class JobManager:
 	def __init__(self, state_root: Path, broker: Optional[Any] = None, runner: Optional[Callable[..., Any]] = None,
 			repo_root: Optional[Path] = None, max_concurrent: int = 1, api_key_check: Optional[Callable[[], bool]] = None,
 			busy_check: Optional[Callable[[], Optional[str]]] = None, stop_container: Optional[Callable[[str], None]] = None,
-			on_finished: Optional[Callable[[JobRecord], None]] = None, grace: float = 10.0, stop_wait: float = 5.0,
+			container_alive: Optional[Callable[[str], bool]] = None, retry_interval: float = 1.0, on_finished: Optional[Callable[[JobRecord], None]] = None, grace: float = 10.0, stop_wait: float = 5.0,
 			log_limit: int = 256 * 1024, path_of_run: Optional[Callable[[str], Optional[Path]]] = None,
 			run_of_path: Optional[Callable[[Path], Optional[str]]] = None, retain: int = 50):
 		self.jobs_dir = Path(state_root) / "jobs"
@@ -421,6 +466,8 @@ class JobManager:
 		self.api_key_check = api_key_check or (lambda: has_openai_key(self.repo_root))
 		self.busy_check = busy_check or docker_busy_reason
 		self.stop_container = stop_container or docker_stop
+		self.container_alive = container_alive or docker_container_alive
+		self.retry_interval = retry_interval
 		self.on_finished = on_finished
 		self.grace = grace
 		self.stop_wait = stop_wait
@@ -472,13 +519,15 @@ class JobManager:
 				continue
 			was_running = record.state == "running"
 			if record.state not in TERMINAL:
-				record.transition("interrupted", message="the replay service restarted while this job had not finished")
-				self._persist(record)
 				if was_running:
 					try:
 						self.stop_container(record.job_id)   # its container may still be running
 					except Exception:
 						traceback.print_exc()
+					self._reap_container(record.job_id)
+					recover_leftovers(record.result_path)
+				record.transition("interrupted", message="the replay service restarted while this job had not finished")
+				self._persist(record)
 			self._jobs[record.job_id] = record
 		self._prune()
 
@@ -723,7 +772,29 @@ class JobManager:
 				missing.append(name)
 		return missing
 
+	def _reap_container(self, job_id: str) -> None:
+		"""The docker client we started has ended, but the job is its container: one that still runs is stopped first."""
+		deadline = time.monotonic() + self.grace + self.stop_wait
+		while self.container_alive(job_id):
+			if time.monotonic() >= deadline:
+				sys.stderr.write(f"[replay-web] the container of job {job_id} still runs after it was asked to stop\n")
+				return
+			try:
+				self.stop_container(job_id)
+			except Exception:
+				traceback.print_exc()
+			time.sleep(min(0.2, self.retry_interval))
+
 	def _conclude(self, job_id: str, exit_code: Optional[int]) -> None:
+		with self._lock:
+			job = self._jobs[job_id]
+			path = job.result_path
+			stopping = job.cancel_requested or (job_id in self._active and self._active[job_id].interrupt)
+		if exit_code != 0 or stopping:
+			# a failure, a cancel or a shutdown may have left the container running or half a publish behind; the next job
+			# of this result must not start before both are dealt with
+			self._reap_container(job_id)
+			recover_leftovers(path)
 		with self._lock:
 			job = self._jobs[job_id]
 			active = self._active.get(job_id)
@@ -800,15 +871,20 @@ class JobManager:
 		self._spawn(self._stop_worker, (job_id, active), "replay-stop-" + job_id)
 
 	def _stop_worker(self, job_id: str, active: _Active) -> None:
-		"""Ask the process group to stop; after `grace` stop the job's container by name; after `stop_wait` more kill the group."""
+		"""Stop the job: its container first (`docker stop`, repeated while the container may not exist yet), because the
+		docker client we started ends with it; only when that does not work within `grace`, the client itself."""
+		deadline = time.monotonic() + self.grace
+		while True:
+			try:
+				self.stop_container(job_id)
+			except Exception:
+				traceback.print_exc()
+			if active.done.wait(self.retry_interval):
+				return
+			if time.monotonic() >= deadline:
+				break
 		process = active.process
 		process.terminate_group()
-		if active.done.wait(self.grace):
-			return
-		try:
-			self.stop_container(job_id)
-		except Exception:
-			traceback.print_exc()
 		if active.done.wait(self.stop_wait):
 			return
 		process.kill_group()

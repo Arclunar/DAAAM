@@ -330,7 +330,7 @@ class PostprocessCodaTest(CodaScriptTest):
 			for a in "$@"; do case "$a" in data_dir:=*) dir="${a#data_dir:=}";; save_dsg:=*) dst="${a#save_dsg:=}";; esac; done
 			[ "${FAKE_FAIL_STEP:-}" = clustering ] && exit 1
 			echo '{"nodes": [], "fake": "clustered"}' > "${dst:-$dir/clustered_dsg.json}"
-			if [ -n "${FAKE_HANG_FILE:-}" ]; then : > "$FAKE_HANG_FILE"; exec sleep 30; fi
+			if [ -n "${FAKE_HANG_FILE:-}" ]; then : > "$FAKE_HANG_FILE"; exec sleep 31.317; fi
 			""",
 		)
 
@@ -610,6 +610,48 @@ class PostprocessCodaTest(CodaScriptTest):
 		self.assertEqual(process.returncode, 143)
 		self.assertEqual(self._leftovers(run), [foreign.name])
 		self.assertEqual(self._contents(run), before)
+
+	@staticmethod
+	def _running_fake_steps() -> list:
+		"""Processes whose command is exactly the fake clustering's endless sleep (found without matching this very search)."""
+		found = []
+		for entry in Path("/proc").iterdir():
+			if entry.name.isdigit():
+				try:
+					if (entry / "cmdline").read_bytes().split(b"\0")[:2] == [b"sleep", b"31.317"]:
+						found.append(entry.name)
+				except OSError:
+					pass
+		return found
+
+	def test_a_stop_signal_to_the_script_alone_stops_its_step_at_once_and_cleans_up(self) -> None:
+		"""`docker stop` signals the container's first process only: the script must not wait for its step to finish."""
+		run = self._old_outputs()
+		before = self._contents(run)
+		started = self.root / "started"
+		process = subprocess.Popen(
+			["bash", "scripts/postprocess_coda.sh", "--atomic", "--stage", "postprocess", "out_20260101_000001"],
+			cwd=self.root, env=self._env(FAKE_HANG_FILE=str(started)), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+			text=True, start_new_session=True,
+		)
+		try:
+			deadline = time.monotonic() + 20
+			while not started.exists():
+				self.assertLess(time.monotonic(), deadline, "the fake clustering never started")
+				time.sleep(0.02)
+			moment = time.monotonic()
+			os.kill(process.pid, signal.SIGTERM)   # the script only, not its group
+			process.communicate(timeout=10)
+			elapsed = time.monotonic() - moment
+		finally:
+			if process.poll() is None:
+				os.killpg(process.pid, signal.SIGKILL)
+				process.communicate()
+		self.assertEqual(process.returncode, 143)
+		self.assertLess(elapsed, 5, "the script waited for its step instead of stopping it")
+		self.assertEqual(self._leftovers(run), [])
+		self.assertEqual(self._contents(run), before)
+		self.assertEqual(self._running_fake_steps(), [], "the step was left running")
 
 	def test_the_python_steps_accept_explicit_output_paths(self) -> None:
 		embeddings = (REPO / "scripts" / "postprocess_scene_graph.py").read_text(encoding="utf-8")

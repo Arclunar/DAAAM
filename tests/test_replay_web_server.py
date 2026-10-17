@@ -459,7 +459,7 @@ class ReplayServerJobsWiringTest(ReplayServerTestCase):
 		write_graph(self.result / "dsg.json", atomic=True)   # a finished mapping result; the first scan finds it
 		self.runner = FakeRunner()
 		self.jobs = JobManager(state_root=self.root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: True,
-			busy_check=lambda: None, stop_container=lambda job_id: None, grace=0.05, stop_wait=0.05)
+			busy_check=lambda: None, stop_container=lambda job_id: None, container_alive=lambda job_id: False, grace=0.05, stop_wait=0.05)
 		self.addCleanup(self.jobs.shutdown)
 		return create_server(self.server_config(), jobs=self.jobs)
 
@@ -511,7 +511,7 @@ class ReplayServerJobsApiTest(ReplayServerTestCase):
 		write_graph(self.coda / "dsg.json", atomic=True)
 		self.runner = FakeRunner()
 		self.jobs = JobManager(state_root=self.root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: self.api_key,
-			busy_check=lambda: self.busy, stop_container=lambda job_id: None, grace=0.05, stop_wait=0.05)
+			busy_check=lambda: self.busy, stop_container=lambda job_id: None, container_alive=lambda job_id: False, grace=0.05, stop_wait=0.05)
 		self.addCleanup(self.jobs.shutdown)
 		return create_server(self.server_config(), jobs=self.jobs)
 

@@ -190,7 +190,13 @@ class FakeJobs:
 		self.runner = FakeRunner()
 		self.api_key = True
 		self.manager = JobManager(state_root=root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: self.api_key,
-			busy_check=lambda: None, stop_container=lambda job_id: None, grace=0.3, stop_wait=0.3)
+			busy_check=lambda: None, stop_container=self._stop_container, container_alive=lambda job_id: False, grace=0.3, stop_wait=0.3)
+
+	def _stop_container(self, job_id: str) -> None:
+		"""The fake `docker stop`: the container ends, and the docker client attached to it with it."""
+		for call, process in zip(list(self.runner.calls), list(self.runner.processes)):
+			if "daaam-replay-job-" + job_id in call["argv"]:
+				process.finish(143)
 
 	def calls(self) -> Dict[str, Any]:
 		return {"calls": [call["argv"] for call in self.runner.calls]}

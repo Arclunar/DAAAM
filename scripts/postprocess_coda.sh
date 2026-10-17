@@ -114,9 +114,22 @@ cleanup() {
   local file
   for file in ${tracked[@]+"${tracked[@]}"}; do rm -f -- "${file}"; done
 }
+# bash runs a trap between commands, so a step (python, ros2 launch) is started in the background and waited for: then a
+# SIGTERM to this script alone (that is what `docker stop` sends to a container's first process) stops the step at once
+# and still runs the cleanup, instead of waiting for the step to finish.
+step=0
+stop_step() { [ "${step}" -eq 0 ] || kill -TERM "${step}" 2>/dev/null; }
+run_step() {
+  "$@" &
+  step=$!
+  wait "${step}"
+  local status=$?
+  step=0
+  return "${status}"
+}
 trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
+trap 'stop_step; exit 143' TERM
+trap 'stop_step; exit 130' INT
 
 tmp_name() { echo "${dir}/.replay-job-${$}-$1"; }
 
@@ -171,7 +184,7 @@ run_postprocess() {
     embed_args+=(--output "${updated}")
   fi
   echo "=== ${run}: sentence embeddings"
-  if ! python scripts/postprocess_scene_graph.py "${embed_args[@]}" || [ ! -s "${updated}" ]; then
+  if ! run_step python scripts/postprocess_scene_graph.py "${embed_args[@]}" || [ ! -s "${updated}" ]; then
     echo "=== ${run}: the embedding step failed" >&2
     return 1
   fi
@@ -183,7 +196,7 @@ run_postprocess() {
     track "${cluster_input}"
     track "${cluster_output}"
     rm -f "${cluster_input}" "${cluster_output}"
-    if ! python scripts/adapt_cluster_places.py prepare --src "${updated}" --dst "${cluster_input}" --layer "${PLACES_LAYER}"; then
+    if ! run_step python scripts/adapt_cluster_places.py prepare --src "${updated}" --dst "${cluster_input}" --layer "${PLACES_LAYER}"; then
       echo "=== ${run}: could not adapt ${PLACES_LAYER} for clustering" >&2
       return 1
     fi
@@ -194,12 +207,12 @@ run_postprocess() {
   if [ -n "${CLUSTER_PLACES_CONFIG:-}" ]; then
     cluster_args+=(cluster_places_config_path:="${CLUSTER_PLACES_CONFIG}")
   fi
-  if ! ros2 launch daaam_ros cluster_places.launch.yaml "${cluster_args[@]}"; then
+  if ! run_step ros2 launch daaam_ros cluster_places.launch.yaml "${cluster_args[@]}"; then
     echo "=== ${run}: the clustering step failed" >&2
     return 1
   fi
   if [ -n "${cluster_output}" ]; then
-    if ! python scripts/adapt_cluster_places.py restore --src "${cluster_output}" --original "${updated}" \
+    if ! run_step python scripts/adapt_cluster_places.py restore --src "${cluster_output}" --original "${updated}" \
       --dst "${clustered}" --layer "${PLACES_LAYER}"; then
       echo "=== ${run}: could not restore ${PLACES_LAYER} after clustering" >&2
       return 1
@@ -232,7 +245,7 @@ run_summaries() {
     extra=(--summary-output "${yaml}" --scene-graph-output "${graph}")
   fi
   echo "=== ${run}: region summaries (${SUMMARY_MODEL:-gpt-5-nano})"
-  if ! python scripts/summarize_regions.py --data-dir "${dir}" --model-name "${SUMMARY_MODEL:-gpt-5-nano}" --n-samples 20 \
+  if ! run_step python scripts/summarize_regions.py --data-dir "${dir}" --model-name "${SUMMARY_MODEL:-gpt-5-nano}" --n-samples 20 \
     --places-layer "${PLACES_LAYER:-TRAVERSABILITY}" ${extra[@]+"${extra[@]}"} || [ ! -s "${graph}" ]; then
     echo "=== ${run}: the summary step failed" >&2
     return 1
