@@ -9,7 +9,8 @@ serves only:
 * the API under /api/: the result list, opening a result by path (which returns an opaque run ID), the members of
   an open result's bundle that its validated manifest names (timeline chunks, images, the reference mesh), the active
   scene graph of an open result, and a server-sent events stream of what changes (/api/runs/{id}/events for one result,
-  /api/events?run=...&run=... for several over one connection, since a browser allows only a few per origin).
+  /api/events?run=...&run=... for several over one connection, since a browser allows only a few per origin). Processing
+  jobs (scripts/replay_web/jobs.py) run in the daaam-ws container; their progress arrives on the same streams.
 
 There is no general file-read or command endpoint. The service binds 127.0.0.1 only and refuses requests whose Host
 header is not this loopback address (a DNS-rebound page cannot read it); POST and DELETE also need the page's Origin
@@ -38,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set
 
 from scripts.replay_web.artifacts import GRAPH_PRIORITY, ArtifactMonitor
 from scripts.replay_web.events import EventBroker, SubscriptionClosed, encode_sse
+from scripts.replay_web.jobs import JobManager, JobRecord
 from scripts.replay_web.manifest import SCHEMA_VERSION, ManifestError, resolve_bundle_member
 from scripts.replay_web.paths import PathError
 from scripts.replay_web.runs import OpenRun, RunRegistry
@@ -74,6 +76,7 @@ class ServerConfig:
 	port: int = 8765
 	scan_depth: int = 4
 	graph_interval: float = 2.0   # seconds between looks at the scene graph files of the open results
+	max_jobs: int = 1   # processing jobs that may run at the same time (the others wait their turn)
 	sse_heartbeat: float = 15.0   # an idle event stream sends a comment this often, which also reveals closed connections
 
 
@@ -105,7 +108,7 @@ class RunAssets:
 class ReplayService:
 	"""State behind the HTTP handler: one per server."""
 
-	def __init__(self, config: ServerConfig, registry: Optional[RunRegistry] = None):
+	def __init__(self, config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None):
 		self.config = config
 		self.registry = registry or RunRegistry(config.output_root, config.distro, config.scan_depth)
 		self.csrf_token = secrets.token_urlsafe(32)
@@ -114,19 +117,39 @@ class ReplayService:
 		self._lock = threading.Lock()
 		self.broker = EventBroker(state_provider=self.state_payload)
 		self.monitor = ArtifactMonitor(self.registry, self.broker.publish, interval=config.graph_interval)
+		self.jobs = jobs or JobManager(state_root=config.state_root, repo_root=config.repo_root, max_concurrent=config.max_jobs)
+		self.jobs.broker = self.broker
+		self.jobs.path_of_run = self._path_of_run
+		self.jobs.run_of_path = self._run_of_path
+		self.jobs.on_finished = self._job_finished
+
+	def _path_of_run(self, run_id: str) -> Optional[Path]:
+		try:
+			return self.registry.get(run_id).canonical_path
+		except KeyError:
+			return None
+
+	def _run_of_path(self, path: Path) -> Optional[str]:
+		run = self.registry.find(path)
+		return run.run_id if run else None
+
+	def _job_finished(self, job: JobRecord) -> None:
+		if job.state == "succeeded":   # its outputs are new scene graph files: do not wait for the next poll
+			self.monitor.request_scan()
 
 	def start(self) -> None:
 		"""Start the background work (the scene graph monitor); idempotent."""
 		self.monitor.start()
 
 	def stop(self) -> None:
-		"""Stop it and release every event stream; idempotent."""
+		"""Stop the jobs, the monitor and every event stream; idempotent."""
+		self.jobs.shutdown()
 		self.monitor.stop()
 		self.broker.close()
 
 	def state_payload(self, run_id: str) -> Dict[str, Any]:
 		"""What a page needs to catch up with a result: sent first on every new event stream and after a gap."""
-		return {"graph": self.monitor.status(run_id)}
+		return {"graph": self.monitor.status(run_id), "jobs": self.jobs.state_for_run(run_id)}
 
 	def graph_payload(self, run_id: str) -> Dict[str, Any]:
 		self.run(run_id)
@@ -501,11 +524,12 @@ class ReplayHTTPServer(ThreadingHTTPServer):
 		super().server_close()
 
 
-def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None) -> ReplayHTTPServer:
-	"""A bound (not yet serving) server; the port is the configured one, or a free one for port 0."""
+def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None) -> ReplayHTTPServer:
+	"""A bound (not yet serving) server; the port is the configured one, or a free one for port 0. Tests pass a `jobs`
+	manager that runs no docker."""
 	if config.host not in LOOPBACK_HOSTS:
 		raise ValueError(f"the replay service binds a loopback address only (127.0.0.1 or localhost), not {config.host}")
-	service = ReplayService(config, registry)
+	service = ReplayService(config, registry, jobs)
 	server = ReplayHTTPServer((LOOPBACK_HOSTS[config.host], config.port), make_handler(service), service)
 	service.port = server.server_address[1]
 	return server
@@ -527,12 +551,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser.add_argument("--state-root", default=str(REPO_ROOT / ".replay-web"), help="local service state (jobs, chat history, cache)")
 	parser.add_argument("--scan-depth", type=int, default=4)
 	parser.add_argument("--graph-interval", type=float, default=2.0, help="seconds between looks at the scene graph files of the open results")
+	parser.add_argument("--max-jobs", type=int, default=1, help="processing jobs that may run at once (default 1: the others wait)")
 	parser.add_argument("--open", action="store_true", help="also open the page in the Windows browser")
 	args = parser.parse_args(argv)
 	config = ServerConfig(
 		repo_root=REPO_ROOT, output_root=Path(args.output_root), state_root=Path(args.state_root),
 		distro=os.environ.get("WSL_DISTRO_NAME", ""), host=args.host, port=args.port, scan_depth=args.scan_depth,
-		graph_interval=max(0.2, args.graph_interval),
+		graph_interval=max(0.2, args.graph_interval), max_jobs=max(1, args.max_jobs),
 	)
 	try:
 		server = create_server(config)

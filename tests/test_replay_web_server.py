@@ -1,7 +1,6 @@
 import gzip
 import http.client
 import json
-import socket
 import tempfile
 import threading
 import time
@@ -11,8 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from scripts.replay_web.artifacts import GRAPH_PRIORITY
+from scripts.replay_web.jobs import JobManager, JobSpec, JobStage
 from scripts.replay_web.server import ServerConfig, create_server
 from tests.replay_fixtures import write_graph, write_minimal_bundle
+from tests.test_replay_jobs import FakeRunner
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ class ReplayServerTestCase(unittest.TestCase):
 		self.output = self.root / "output"
 		self.result = write_minimal_bundle(self.output / "tum_replay" / "out_20261017_000000", title="TUM fixture")
 		self.coda = write_minimal_bundle(self.root / "elsewhere" / "out_coda", dataset_kind="coda", sequence="0", title="CODa fixture")
-		self.server = create_server(self.server_config())
+		self.server = self.make_server()
 		self.port = self.server.server_address[1]
 		self.base = f"http://127.0.0.1:{self.port}"
 		self.origin = self.base
@@ -45,6 +46,9 @@ class ReplayServerTestCase(unittest.TestCase):
 	def server_config(self) -> ServerConfig:
 		return ServerConfig(repo_root=REPO, output_root=self.output, state_root=self.root / "state", distro=DISTRO, port=0,
 			graph_interval=0.05, sse_heartbeat=0.1)
+
+	def make_server(self):
+		return create_server(self.server_config())
 
 	def request(self, method: str, path: str, body=None, headers=None):
 		connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
@@ -442,6 +446,61 @@ class ReplayServerEventsTest(ReplayServerTestCase):
 		self.assertEqual(self.mutate("POST", "/api/events")[0], 405)
 		status, _, _ = self.request("GET", self.run + "/events", headers={"Host": f"evil.example:{self.port}"})
 		self.assertEqual(status, 403, "a DNS-rebound page cannot watch the results")
+
+
+class ReplayServerJobsWiringTest(ReplayServerTestCase):
+	"""The job manager inside the service: its progress reaches the event streams, and a finished job triggers a rescan."""
+
+	def server_config(self) -> ServerConfig:
+		return ServerConfig(repo_root=REPO, output_root=self.output, state_root=self.root / "state", distro=DISTRO, port=0,
+			graph_interval=60.0, sse_heartbeat=0.1)   # a poll would take a minute: only the job's own request can find the new graph
+
+	def make_server(self):
+		write_graph(self.result / "dsg.json", atomic=True)   # a finished mapping result; the first scan finds it
+		self.runner = FakeRunner()
+		self.jobs = JobManager(state_root=self.root / "state", runner=self.runner, repo_root=REPO, api_key_check=lambda: True,
+			busy_check=lambda: None, stop_container=lambda job_id: None, grace=0.05, stop_wait=0.05)
+		self.addCleanup(self.jobs.shutdown)
+		return create_server(self.server_config(), jobs=self.jobs)
+
+	def setUp(self) -> None:
+		super().setUp()
+		self.opened = self.open_result(self.result)
+		self.run_id = self.opened["run_id"]
+		self.run = f"/api/runs/{self.run_id}"
+
+	def test_job_progress_and_the_new_graph_reach_a_stream_without_waiting_for_a_poll(self) -> None:
+		self.wait_for(lambda: self.get_json(self.run + "/graph")["version"], message="the first graph")
+		job = self.jobs.start(JobSpec(run_id=self.run_id, result_path=self.result, dataset_kind="tum", stage=JobStage.POSTPROCESS))
+		self.wait_for(lambda: self.runner.processes, message="the job to start")
+		stream = self.stream(self.run + "/events")
+		state = stream.event()
+		self.assertEqual(state["event"], "state")
+		self.assertEqual([item["job_id"] for item in state["data"]["jobs"]["jobs"]], [job.job_id])
+		self.assertEqual(state["data"]["jobs"]["jobs"][0]["state"], "running")
+		self.assertNotIn(str(self.result), json.dumps(state["data"]), "no host path in the state")
+		self.runner.processes[0].emit("=== sentence embeddings")
+		log = stream.events_until("job-log")
+		self.assertEqual((log["data"]["job_id"], log["data"]["lines"]), (job.job_id, ["=== sentence embeddings"]))
+		write_graph(self.result / "clustered_dsg.json", atomic=True)
+		write_graph(self.result / "dsg_updated.json", atomic=True)
+		self.runner.processes[0].finish(0)
+		finished = stream.events_until("job-state")
+		while finished["data"]["job"]["state"] != "succeeded":
+			finished = stream.events_until("job-state")
+		graph = stream.events_until("graph")
+		self.assertEqual((graph["data"]["reason"], graph["data"]["version"]["name"]), ("promoted", "clustered_dsg.json"))
+
+	def test_the_jobs_of_a_result_follow_it_to_a_new_run_id(self) -> None:
+		job = self.jobs.start(JobSpec(run_id=self.run_id, result_path=self.result, dataset_kind="tum", stage=JobStage.POSTPROCESS))
+		self.wait_for(lambda: self.runner.processes, message="the job to start")
+		self.runner.processes[0].finish(1)
+		self.wait_for(lambda: self.jobs.get(job.job_id).state == "failed", message="the failure")
+		self.assertEqual(self.mutate("DELETE", self.run)[0], 204)
+		reopened = self.open_result(self.result)
+		self.assertNotEqual(reopened["run_id"], self.run_id)
+		state = self.jobs.state_for_run(reopened["run_id"])
+		self.assertEqual([item["job_id"] for item in state["jobs"]], [job.job_id])
 
 
 class ReplayServerApplicationTest(ReplayServerTestCase):
