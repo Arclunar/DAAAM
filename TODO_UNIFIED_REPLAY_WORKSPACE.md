@@ -235,7 +235,7 @@ Follow `2026-10-16-replay-web-agent-implementation.md`:
 - [x] Task 3: persist isolated histories and graph boundaries. (`926b074`)
 - [x] Task 4: run one long-lived Agent worker through NDJSON. (`d363e31`)
 - [x] Task 5: stream per-tab chat through the service and browser. (`f4ee270`; the real runs then led to `3b5e545`, which hands an exported API key to the worker by name, and `60ad682`, which keeps the newest rows in view)
-- [x] Task 6: verify persistent multi-turn behaviour and document operations.
+- [x] Task 6: verify persistent multi-turn behaviour and document operations. (`cab056e`)
 
 ## Required Working Method
 
