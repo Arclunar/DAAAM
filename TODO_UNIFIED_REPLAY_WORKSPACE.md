@@ -9,7 +9,7 @@ untouched):
 - Phase 1 (unified replay core) and Phase 2 (scene graph hot reload and web-triggered processing) are implemented, covered
   by host, container and real-browser tests, and verified end to end against real TUM and CODa results through the real
   service and Docker (see the commit hashes in the checklist below);
-- Phase 3 (Agent chat) has not started.
+- Phase 3 (Agent chat) is in progress; the checklist below shows which tasks are done.
 
 Do not restart requirements discovery unless the repository or user intent has materially changed. Read the approved
 design and plans in full before editing.
@@ -209,7 +209,7 @@ Follow `2026-10-16-unified-replay-core-implementation.md`:
       `build` subcommand was removed here rather than in Task 3, so that every
       intermediate commit kept its browser tests green)
 - [x] Task 8: implement draggable, tab-aware current-time camera cards. (`2cd9c8d`)
-- [x] Task 9: document and verify the core migration end to end.
+- [x] Task 9: document and verify the core migration end to end. (`0c2179f`)
 
 ### Phase 2 — Processing and hot reload
 
@@ -220,13 +220,13 @@ Follow `2026-10-16-replay-web-processing-implementation.md`:
 - [x] Task 3: make postprocess/summarize stage outputs atomic. (`13e4f4e`)
 - [x] Task 4: supervise allowlisted processing jobs. (`f8559b1`)
 - [x] Task 5: expose job APIs and the per-tab task panel. (`57c6c30`; cancelling was corrected in `1e4428b` after a real Docker run showed that ending the client left the container running)
-- [x] Task 6: verify TUM and CODa workflows and document recovery.
+- [x] Task 6: verify TUM and CODa workflows and document recovery. (`da8a12e`)
 
 ### Phase 3 — Agent chat
 
 Follow `2026-10-16-replay-web-agent-implementation.md`:
 
-- [ ] Task 1: add provider-neutral conversation context and progress hooks.
+- [x] Task 1: add provider-neutral conversation context and progress hooks.
 - [ ] Task 2: load TUM/CODa query graphs and cache Agent instances.
 - [ ] Task 3: persist isolated histories and graph boundaries.
 - [ ] Task 4: run one long-lived Agent worker through NDJSON.

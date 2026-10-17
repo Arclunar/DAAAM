@@ -6,7 +6,7 @@ Conversion to Anthropic format happens here at the provider boundary.
 
 import json
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, TypedDict
 
 from daaam.scene_understanding.tools.utils import round_floats
 
@@ -37,6 +37,70 @@ def create_client(provider: Provider, timeout: float = 120.0, max_retries: int =
 	return OpenAI(timeout=timeout, max_retries=max_retries)
 
 
+# Conversation context and progress events (provider neutral)
+
+ConversationTurn = TypedDict("ConversationTurn", {"role": Literal["user", "assistant"], "content": str})
+ProgressCallback = Callable[[Mapping[str, Any]], None]
+
+# Everything a caller supplies for earlier turns and the replay context together; a long chat is trimmed by the caller.
+MAX_CONVERSATION_BYTES = 64 * 1024
+CONTEXT_KEYS = ("replay_time", "camera", "selected_entity")
+
+
+def conversation_messages(turns: Optional[Sequence[ConversationTurn]]) -> List[Dict[str, str]]:
+	"""Validate earlier turns and copy them as plain role/content pairs."""
+	messages = []
+	for turn in turns or ():
+		role = turn.get("role") if isinstance(turn, Mapping) else None
+		content = turn.get("content") if isinstance(turn, Mapping) else None
+		if role not in ("user", "assistant") or not isinstance(content, str):
+			raise ValueError("conversation turns require a user/assistant role and string content")
+		messages.append({"role": role, "content": content})
+	return messages
+
+
+def context_text(context: Optional[Mapping[str, Any]]) -> str:
+	"""The replay view the question was asked in, one `key: value` line per allowed field.
+
+	Only the replay fields below are rendered, whatever else the caller passes. Each value is kept on one line so a value
+	cannot start a new instruction line.
+	"""
+	if not context:
+		return ""
+	if not isinstance(context, Mapping):
+		raise ValueError("the replay context must be a mapping")
+	lines = []
+	for key in CONTEXT_KEYS:
+		value = context.get(key)
+		if value is None:
+			continue
+		if not isinstance(value, (str, int, float, bool)):
+			try:
+				value = json.dumps(value, sort_keys=True, default=str)
+			except (TypeError, ValueError):
+				raise ValueError("the replay context field {} cannot be rendered".format(key))
+		lines.append("{}: {}".format(key, " ".join(str(value).split())))
+	if not lines:
+		return ""
+	return "Current replay context (may be omitted by the user):\n" + "\n".join(lines) + "\n"
+
+
+def check_conversation_size(messages: Sequence[Mapping[str, str]], context_block: str) -> None:
+	size = sum(len(message["content"].encode("utf-8")) for message in messages) + len(context_block.encode("utf-8"))
+	if size > MAX_CONVERSATION_BYTES:
+		raise ValueError("the conversation and replay context are larger than {} bytes".format(MAX_CONVERSATION_BYTES))
+
+
+def emit_progress(progress: Optional[ProgressCallback], logger, event: Mapping[str, Any]) -> None:
+	"""Offer a safe progress event; a display hook that fails must not fail the query."""
+	if progress is None:
+		return
+	try:
+		progress(dict(event))
+	except Exception as error:
+		logger.warning("progress callback failed: {}".format(error))
+
+
 # Tool signature conversion: canonical OpenAI → Anthropic
 
 def openai_tools_to_anthropic(openai_tools: list) -> list:
@@ -55,8 +119,26 @@ def openai_tools_to_anthropic(openai_tools: list) -> list:
 def build_anthropic_initial_messages(
 	query: str,
 	image_data: Optional[str] = None,
+	conversation: Optional[Sequence[ConversationTurn]] = None,
+	context_block: str = "",
 ) -> list:
-	user_content = [{"type": "text", "text": query}]
+	"""Earlier turns as text blocks, then the question (with its replay context and image) as the last user turn.
+
+	The Messages API starts with a user turn and alternates roles, so a leading assistant turn (its question was trimmed
+	away) is dropped and adjacent turns of one role are merged.
+	"""
+	messages: list = []
+	for turn in conversation_messages(conversation):
+		block = {"type": "text", "text": turn["content"]}
+		if messages and messages[-1]["role"] == turn["role"]:
+			messages[-1]["content"].append(block)
+		elif messages or turn["role"] == "user":
+			messages.append({"role": turn["role"], "content": [block]})
+
+	user_content: list = []
+	if context_block:
+		user_content.append({"type": "text", "text": context_block})
+	user_content.append({"type": "text", "text": query})
 	if image_data:
 		user_content.append({
 			"type": "image",
@@ -66,7 +148,11 @@ def build_anthropic_initial_messages(
 				"data": image_data,
 			},
 		})
-	return [{"role": "user", "content": user_content}]
+	if messages and messages[-1]["role"] == "user":
+		messages[-1]["content"].extend(user_content)
+	else:
+		messages.append({"role": "user", "content": user_content})
+	return messages
 
 
 # Serialization helpers
@@ -129,14 +215,20 @@ def run_anthropic_tool_loop(
 	format_instructions: str,
 	logger,
 	verbose: bool = False,
+	progress: Optional[ProgressCallback] = None,
+	query: Optional[str] = None,
 ):
 	"""Run the Anthropic tool-calling loop, analogous to the OpenAI loop in services.py.
+
+	`progress` receives only {"type": "iteration"|"tool"|"final", ...} with the iteration numbers and tool names, never
+	arguments, results or model text. `query` is the question for the interaction history when `messages` start with
+	earlier turns.
 
 	Returns:
 		Tuple of (parsed_response, interaction_history, messages).
 	"""
 	interaction_history: Dict[str, Any] = {
-		"query": messages[0]["content"][0]["text"] if messages else "",
+		"query": query if query is not None else (messages[0]["content"][0]["text"] if messages else ""),
 		"iterations": [],
 		"final_response": None,
 	}
@@ -145,6 +237,7 @@ def run_anthropic_tool_loop(
 		if verbose:
 			logger.info(f"Iteration {iteration + 1}/{max_iterations}")
 		print(f"Iteration {iteration + 1}/{max_iterations}")
+		emit_progress(progress, logger, {"type": "iteration", "number": iteration + 1, "maximum": max_iterations})
 
 		response = client.messages.create(
 			model=model_name,
@@ -168,6 +261,7 @@ def run_anthropic_tool_loop(
 				if block.type != "tool_use":
 					continue
 
+				emit_progress(progress, logger, {"type": "tool", "name": block.name})
 				result = tool_registry.call_tool(block.name, json.dumps(block.input))
 
 				text_result = result
@@ -225,6 +319,7 @@ def run_anthropic_tool_loop(
 		"content": "Based on all the information gathered, please provide your final answer now.",
 	})
 
+	emit_progress(progress, logger, {"type": "final"})
 	final_response = client.messages.parse(
 		model=model_name,
 		max_tokens=16384,
