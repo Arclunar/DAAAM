@@ -741,6 +741,34 @@ class WorkspaceChatBrowserTest(WorkspaceBrowserTestCase):
 		self.assertIn("没有 key", self.text("chat-model"), "the models follow the keys that exist")
 		self.assertFalse(self.control("chat-send").is_enabled())
 
+	AT_END = ("const l = document.querySelector('section.result-pane:not([hidden]) [data-role=chat-messages]');"
+		"return l.scrollHeight > l.clientHeight + 100 && l.scrollTop + l.clientHeight >= l.scrollHeight - 24")
+
+	def test_the_newest_rows_stay_in_view_unless_the_reader_scrolled_up(self) -> None:
+		self.fixtures.call("agent_answer", text="\n".join("line %d of a long answer" % number for number in range(60)))
+		self.open_chat()
+		self.wait_ready()
+		self.fixtures.call("agent_hold")
+		self.ask("a long one")
+		self.wait.until(lambda d: "查询场景: get_matching_subjects" in self.text("chat-progress"))
+		self.driver.find_element(By.CSS_SELECTOR, f"{self.PANE} [data-section-tab=entities]").click()   # look at something else meanwhile
+		self.fixtures.call("agent_release")
+		self.wait_for_roles(["user", "assistant"])   # the answer arrives while the page is not shown
+		self.show_chat()
+		self.wait.until(lambda d: self.script(self.AT_END))   # the answer's end is in view, not its first line
+		self.driver.refresh()   # a restored conversation shows its newest rows, not its first
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"))
+		self.wait_for_tabs(1)
+		self.show_chat()
+		self.wait_for_roles(["user", "assistant"])
+		self.wait.until(lambda d: self.script(self.AT_END))
+		self.driver.execute_async_script(   # a reader who scrolls up to the start stays there when a new row arrives
+			"const l = document.querySelector('section.result-pane:not([hidden]) [data-role=chat-messages]');"
+			"const done = arguments[arguments.length - 1]; l.addEventListener('scroll', () => done(true), {once: true}); l.scrollTop = 0;")
+		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])
+		self.wait.until(lambda d: "pending" in self.roles())
+		self.assertLess(self.script("return document.querySelector('section.result-pane:not([hidden]) [data-role=chat-messages]').scrollTop"), 50)
+
 	def test_a_question_can_be_asked_while_a_job_runs_and_the_new_graph_follows(self) -> None:
 		self.fixtures.call("write_graph", path=self.result, name="dsg.json", objects=[7, 8])   # a finished mapping result: jobs may run
 		self.fixtures.call("write_graph", path=self.result, name="clustered_dsg.json", objects=[7, 8])

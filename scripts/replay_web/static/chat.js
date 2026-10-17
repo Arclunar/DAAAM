@@ -78,6 +78,7 @@ export class ChatPanel {
     this.confirming = false;
     this.active = false;
     this.alive = true;
+    this.pinned = true;   // the newest rows are in view (until the person scrolls up): they stay in view as rows arrive
     this.abort = null;
     this.refreshTimer = 0;
     this.build();
@@ -181,6 +182,7 @@ export class ChatPanel {
       if (view) body.view_context = view;
     }
     const turn = this.turn = { id: null, answer: '', progress: '提问中…', stopped: false };
+    this.pinned = true;   // the person just asked: show the question and the answer as it arrives
     const controller = this.abort = new AbortController();
     this.busy = true;
     this.input.value = '';
@@ -316,6 +318,17 @@ export class ChatPanel {
     this.list.dataset.role = 'chat-messages';
     this.list.setAttribute('role', 'log');
     this.list.setAttribute('aria-live', 'polite');
+    this.list.addEventListener('scroll', () => {
+      if (this.list.clientHeight > 0) this.pinned = this.list.scrollTop + this.list.clientHeight >= this.list.scrollHeight - 24;
+    });
+    if (typeof ResizeObserver !== 'undefined') {   // the list has a size once its tab and sidebar page are shown: look at the newest rows then
+      let shown = false;
+      new ResizeObserver(() => {
+        const visible = this.list.clientHeight > 0;
+        if (visible && !shown && this.pinned) this.list.scrollTop = this.list.scrollHeight;
+        shown = visible;
+      }).observe(this.list);
+    }
     this.progressEl = element('div', 'chat-progress');
     this.progressEl.dataset.role = 'chat-progress';
     const controls = element('div', 'chat-controls');
@@ -432,7 +445,7 @@ export class ChatPanel {
   }
 
   renderMessages() {
-    const stick = this.list.scrollTop + this.list.clientHeight >= this.list.scrollHeight - 24;
+    const stick = this.pinned;
     this.list.replaceChildren();
     if (!this.messages.length && !this.turn) this.list.append(element('div', 'chat-empty', '还没有对话。问一个关于这个场景的问题,比如“桌子旁边有什么?”'));
     this.messages.forEach((message, index) => this.list.append(this.messageElement(message, index)));
@@ -449,7 +462,7 @@ export class ChatPanel {
       row.dataset.role = 'chat-boundary-pending';
       this.list.append(row);
     }
-    if (stick) this.list.scrollTop = this.list.scrollHeight;
+    if (stick && this.list.clientHeight > 0) this.list.scrollTop = this.list.scrollHeight;
   }
 
   messageElement(message, index) {
