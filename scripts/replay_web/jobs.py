@@ -573,14 +573,16 @@ class JobManager:
 				return []
 		return self._log(job_id).tail(lines)
 
-	def state_for_run(self, run_id: str, recent: int = 5, log_lines: int = 100) -> Dict[str, Any]:
-		"""What a page needs to show a result's jobs: the newest few, the output of those still running and of the newest,
-		and what each stage may do now (`availability`)."""
+	def state_for_run(self, run_id: str, recent: int = 5, log_lines: int = 500, log_chars: int = 100000) -> Dict[str, Any]:
+		"""What a page needs to show a result's jobs: the newest few, the output of those still running and of the newest
+		(at most `log_lines` lines and about `log_chars` characters each), and what each stage may do now (`availability`)."""
 		jobs = self.list_for_run(run_id)[:recent]
 		logs = {}
 		for index, job in enumerate(jobs):
 			if index == 0 or job.state not in TERMINAL:
 				tail = self.log_tail(job.job_id, log_lines)
+				while len(tail) > 1 and sum(len(line) + 1 for line in tail) > log_chars:
+					tail = tail[1:]   # the end of the output matters most
 				if tail:
 					logs[job.job_id] = tail
 		path = self.path_of_run(run_id) if self.path_of_run is not None else (jobs[0].result_path if jobs else None)

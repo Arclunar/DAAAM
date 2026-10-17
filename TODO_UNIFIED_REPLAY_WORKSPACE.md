@@ -2,20 +2,17 @@
 
 ## Handoff Status
 
-The user approved the architecture and selected **Inline Execution**. The
-design and three TDD implementation plans are complete and committed, but no
-production implementation of the unified workspace has started yet.
+The user approved the architecture and selected **Inline Execution**. The design and the three TDD implementation plans are
+committed. Implementation is in progress on the local branch `feat/unified-replay-workspace` (not pushed, `main` is
+untouched):
 
-As of 2026-10-17:
+- Phase 1 (unified replay core) and Phase 2 (scene graph hot reload and web-triggered processing) are implemented, covered
+  by host, container and real-browser tests, and verified end to end against real TUM and CODa results through the real
+  service and Docker (see the commit hashes in the checklist below);
+- Phase 3 (Agent chat) has not started.
 
-- branch: `main`;
-- worktree: clean before this handoff document was added;
-- local branch: three commits ahead of `origin/main`;
-- design commit: `fd2c7a5 docs: design unified replay workspace`;
-- plan commit: `3a2d250 docs: plan unified replay workspace implementation`.
-
-Do not restart requirements discovery unless the repository or user intent has
-materially changed. Read the approved design and plans in full before editing.
+Do not restart requirements discovery unless the repository or user intent has materially changed. Read the approved
+design and plans in full before editing.
 
 ## Authoritative Documents
 
@@ -222,8 +219,8 @@ Follow `2026-10-16-replay-web-processing-implementation.md`:
 - [x] Task 2: publish graph changes through SSE and apply them per tab. (`c86dcbe`)
 - [x] Task 3: make postprocess/summarize stage outputs atomic. (`13e4f4e`)
 - [x] Task 4: supervise allowlisted processing jobs. (`f8559b1`)
-- [ ] Task 5: expose job APIs and the per-tab task panel.
-- [ ] Task 6: verify TUM and CODa workflows and document recovery.
+- [x] Task 5: expose job APIs and the per-tab task panel. (`57c6c30`; cancelling was corrected in `1e4428b` after a real Docker run showed that ending the client left the container running)
+- [x] Task 6: verify TUM and CODa workflows and document recovery.
 
 ### Phase 3 — Agent chat
 

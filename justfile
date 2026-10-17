@@ -29,7 +29,7 @@ exec:
 
 # 运行回归测试:宿主机上的标准库测试(含回看服务)、容器里的测试(含数据包生成),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
-    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server -v
+    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs -v
     docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils -v
     @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 
@@ -72,7 +72,8 @@ reference-mesh seq="fr1_desk" mode="auto":
     docker compose run --rm -T -e REFERENCE_MESH_CACHE daaam-ws python scripts/build_reference_mesh.py /datasets/tum_{{ seq }}{{ if mode == "rebuild" { " --force" } else if mode == "auto" { "" } else { error("mode 只能是 auto 或 rebuild") } }}
 
 # 回看工作区:在 WSL 里启动只监听本机(127.0.0.1)的服务,用浏览器打开打印的地址;页面列出 output/ 里的结果,也能输入任意
-# WSL 可见的结果目录(/home/…、/mnt/e/…、E:\…、\\wsl.localhost\…),多个结果用标签页切换;Ctrl+C 停止。见 USAGE.md 9.0.1
+# WSL 可见的结果目录(/home/…、/mnt/e/…、E:\…、\\wsl.localhost\…),多个结果用标签页切换;场景图文件一出现就自动换上,页面里的
+# Postprocess / Summarize / 全部运行 在 daaam-ws 容器里跑(需要 Docker);Ctrl+C 停止。见 USAGE.md 9.0.1
 replay-web host="127.0.0.1" port="8765":
     @echo "回看工作区: http://{{ host }}:{{ port }}/replay.html"
     python3 -m scripts.replay_web.server --host {{ host }} --port {{ port }}

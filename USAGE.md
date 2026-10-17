@@ -716,6 +716,66 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize output/tum
 时只发送一次路径，之后只用服务给的随机会话编号；服务只发送清单里登记过的文件，没有通用的读文件或执行命令的接口；会改变
 状态的请求要求同源和启动时生成的 CSRF 令牌。服务的本地状态在仓库的 `.replay-web/`（已在 `.gitignore` 里）。
 
+#### 场景图热更新
+
+回看播放的是录制的快照，但后处理（9.0.2）会在结果目录里陆续产生更完整的场景图。服务每 2 秒看一次每个已打开结果的这四个
+文件（`python3 -m scripts.replay_web.server --graph-interval 秒数` 可调，最短 0.2；WSL、`/mnt` 盘和 Docker 的写入没有统一的
+文件通知，所以用轮询），**按这个固定顺序选第一个有效的**：
+
+1. `clustered_dsg_with_summaries.json`（聚类 + 区域摘要）
+2. `clustered_dsg.json`（聚类）
+3. `dsg_updated.json`（物体句向量）
+4. `dsg.json`（管线原始输出）
+
+"有效"指整个文件是完整的 UTF-8 JSON、有节点和边列表、在结果目录之内（符号链接指到目录外的不算）、不超过 512 MiB。
+文件被写到一半或损坏时，页面保留上一个有效版本，并在画面下方提示一次"`xxx.json` 无效,继续使用 `yyy.json`:原因"；
+当前文件被删除就自动退到下一个有效的，全部没有就显示"没有可用文件"。文件内容变了（哪怕大小和修改时间没变）才算新版本，
+只"碰"一下文件不会触发更新。后处理脚本先写临时文件再整体改名（`--atomic`），所以不会出现读到半个文件的情况。
+
+页面里：左上面板的"场景图 …"一行写出当前使用的文件、版本号和物体、房间数；换版本时当前标签页**不动时间、三维视角、图层开关
+和相机画面**，只换细节——侧栏多了"房间"列表（房间标签、摘要、地点数），物体和地点的详情会写出它在场景图里属于哪个地点、
+哪个房间。选中的物体如果上一个版本有、新版本没有了，选中会被清掉并提示原因；本来就不在场景图里的不受影响。每个版本在画面
+下方提示一次。背景标签页只更新标签上的小蓝点，切过去时才应用最新版本（所以不会白白占用渲染）。服务重启或别的页面关掉了
+这个结果时，标签页会按路径自动重新打开并保持原来的视图。
+
+只想回看时，原始 `dsg.json` 就够用；区域摘要和以后的场景问答要用到后处理的结果。
+
+### 9.0.2 在页面里做后处理（Postprocess / Summarize / 全部运行）
+
+每个结果标签页的右侧栏有"任务"页，三个按钮对应 `scripts/postprocess_coda.sh` 的三个阶段：
+
+| 按钮 | 做什么 | 产生 | 前提 |
+|---|---|---|---|
+| **Postprocess** | 物体描述的句向量 + 地点聚类成房间 | `dsg_updated.json`、`clustered_dsg.json` | 结果里有管线的 `dsg.json` |
+| **Summarize** | 用 OpenAI（`SUMMARY_MODEL`，默认 gpt-5-nano）给每个房间写摘要 | `clustered_dsg_with_summaries.json`、`region_summaries.yaml` | 已有 `clustered_dsg.json`；仓库 `.env`（或服务的环境）里有 `OPENAI_API_KEY` |
+| **全部运行** | 依次做上面两步，第一步失败就停 | 以上全部 | 同上 |
+
+- 命令是固定的（不拼接页面上的任何文字）：`docker compose run --rm -T --name daaam-replay-job-<编号> -v <结果目录>:/selected-result …
+  daaam-ws bash scripts/postprocess_coda.sh --atomic --stage <阶段> /selected-result`。结果目录就是打开的那个目录，数据集类型来自
+  数据包清单（TUM 会带上 `config/cluster_places_config_tum.yaml` 和 `PLACES_LAYER=PLACES`，CODa 用脚本默认值），不看目录名。
+  容器里只挂这一个结果目录。**需要 Docker 在运行**；API 密钥只在仓库的 `.env` 里，由容器读取，不会发给浏览器。
+- 按钮由服务端状态决定，页面不猜文件名：前提不满足时按钮灰着，旁边写出原因（例如"Summarize needs clustered_dsg.json: run
+  Postprocess first"、缺 `OPENAI_API_KEY`）；这个结果有任务在排队或运行时三个按钮都等着。
+- **重跑要确认**：阶段的产出已经存在时按钮写成"重新运行 …"，点了先弹出确认并列出会被替换的文件，确认后才发送 `replace`；
+  新文件整批写好、校验过才改名替换，失败或取消不会改动现有文件。
+- 同一个结果同一时间只有一个任务；不同结果的任务最多同时跑 `--max-jobs` 个（默认 1，其余按顺序排队；用
+  `python3 -m scripts.replay_web.server --max-jobs 2` 启动可以调大，一个任务要几 GB 内存和显存，先想好装得下）。另一个 DAAAM 管线、
+  深度估计、后处理或问答的容器在跑时不会启动任务（和 `just` 配方的 `_coda-guard` 一样：显存和内存装不下两个）。
+- **进度**：状态行、最近几次任务（成功 / 失败 / 已取消 / 已中断，失败的显示退出码和"重试"）和最近一次任务最多 500 行的输出，
+  输出是实时的（容器里 `PYTHONUNBUFFERED=1`）。任务成功后新文件马上被场景图热更新选中，失败或取消的任务**不会**改变当前显示的
+  场景图。背景标签页只在标签上显示小圆点（琥珀色 = 在运行，绿色 = 在背景时完成了，红色 = 失败或被取消），切回来时再显示输出。
+- **取消**：先对任务自己的容器执行 `docker stop`（脚本收到 SIGTERM 立刻停下当前步骤并删掉自己的临时文件），一般 3 秒内结束；
+  容器还没创建时会重试，10 秒内停不下来才去终止 `docker compose` 客户端，最后强杀。任务要等容器真的消失才算结束。
+  强杀留下的 `.replay-job-*` 临时文件和写到一半的发布，由服务从宿主机清理或回滚到上一版。
+- **服务重启**：`.replay-web/jobs/<任务编号>/` 里每个任务有一份记录（`job.json`）和一份最多约 256 KB 的 `log.txt`。重启后仍是"排队中 /
+  运行中"的任务一律改成"已中断"并停掉它的容器；历史按结果路径保留，结果重新打开（新的会话编号）后还能看到。想清空就停掉服务后
+  删除 `.replay-web/`。
+- 命令行等价物不变：`just coda-post` / `just coda-summarize`、`just tum-post` / `just tum-summarize`；脚本本身多了
+  `--stage postprocess|summarize|all` 和 `--atomic`（`--summaries` 仍是 `--stage all` 的旧写法）。真机上测得：TUM 的 30 帧小结果
+  Postprocess 约 20 秒、Summarize 约 3 秒；CODa 的 11 个物体的小结果 Postprocess 约 18 秒；有 208 个物体、2 个房间的 CODa 结果
+  Postprocess 约 34 秒、Summarize（2 次 OpenAI 调用）约 36 秒。第一次后处理要加载 sentence-t5-xl（2.5 GB，缓存在
+  `/data/hf_cache`）。
+
 ### 9.1 Rerun 可视化
 
 ```bash
@@ -959,7 +1019,12 @@ stdout，进度和警告写 stderr），`scripts/replay.py finalize … --refere
 - 宿主机（Python 3.8 标准库）：回看数据包清单的契约和路径穿越边界（`tests/test_replay_manifest.py`）、TUM / CODa 的数据集布局
   （`tests/test_replay_datasets.py`）、各种路径写法和已打开结果的注册表（`tests/test_replay_web_paths.py`、`test_replay_web_runs.py`）、
   在临时端口上真正起服务的 HTTP 契约（`tests/test_replay_web_server.py`：CSRF / 同源 / Host 检查、gzip 数据块和缓存头、
-  只能取清单里登记的图像、`/etc/passwd` 之类拿不到），以及原有的脚本和 justfile 测试。
+  只能取清单里登记的图像、`/etc/passwd` 之类拿不到、`/graph`、两种 SSE 事件流、任务接口的授权 / 冲突 / 确认 / 取消），场景图的选择
+  与监控（`tests/test_replay_artifacts.py`：四个文件的优先级、无效的新文件不替换旧的、同大小同时间的内容变化靠摘要发现、删除后退到
+  下一个、一个结果出错不影响另一个）、事件代理（`tests/test_replay_events.py`：有界历史、`Last-Event-ID` 续传、历史缺口或读得太慢时
+  只补一条当前状态、关闭时唤醒所有订阅者）、任务管理器（`tests/test_replay_jobs.py`：用假进程和假 Docker，不会启动容器，覆盖固定命令、
+  一个结果一个任务、全局排队、前提和确认、日志有界、先停容器再杀客户端、强杀后清理、重启后的中断恢复），以及原有的脚本测试
+  （`tests/test_coda_scripts.py` 里 `postprocess_coda.sh` 的阶段、原子发布、回滚、SIGTERM 清理）和 justfile 测试。
 - 容器：数据包生成（`tests/test_replay_bundle.py`：清单最后写入、按快照数和字节数分块、图片在包外、原子发布与失败回退、
   CODa 按数字排序和时间原点、从最终 `dsg.json` 生成单快照数据包）、`tests/test_reference_mesh.py`（指纹和缓存契约、位姿求逆、
   帧跳过、Open3D 日志不进 stdout、真 Open3D 重建一面 1 m 外的墙）、`tests/test_replay_reference_mesh.py`（参考网格单独量化、
@@ -969,7 +1034,9 @@ stdout，进度和警告写 stderr），`scripts/replay.py finalize … --refere
   Windows 的 Python 里驱动 Chrome，`wsl.exe` 在 WSL 里启动 `tests/replay_web_fixture_server.py`（用真正的 `finalize` 生成数据包并
   起服务），Chrome 通过 WSL 的 localhost 转发访问它。覆盖三种网格切换且不重复上传、标签集合在转动时不变、选中框的颜色 / 光晕 /
   像素 / 点击穿透、描述源帧不改时间、按时间戳播放、首屏只取两个数据块、损坏的数据块只影响一个结果、多标签页各自的时间和
-  渲染、后台暂停与恢复、刷新后恢复视图、相机画面的拖动 / 置顶 / 键盘 / 不出界 / 重置。浏览器测试需要 Windows 的 Python 装了
+  渲染、后台暂停与恢复、刷新后恢复视图、相机画面的拖动 / 置顶 / 键盘 / 不出界 / 重置、场景图热更新（升级 / 回退 / 无效文件 /
+  选中被清掉 / 背景标签页 / 服务忘掉结果后自动重开）、任务面板（假容器：流式输出、确认、取消、失败重试、缺密钥、背景标签页的小圆点）。
+  浏览器测试需要 Windows 的 Python 装了
   Selenium 和 Chrome，否则 `just test` 会提示它被跳过；在装了 Selenium 和 Chrome 的 Linux 上可以直接
   `RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v`。
 

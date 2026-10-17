@@ -829,6 +829,24 @@ class JobAvailabilityTest(JobTestCase):
 		self.assertTrue(manager.availability(path)["postprocess"]["available"])
 
 
+class JobStateSizeTest(JobTestCase):
+	def test_the_log_in_a_state_is_cut_to_a_line_and_character_budget_keeping_the_end(self) -> None:
+		path = self.result("tum")
+		manager = self.manager(path_of_run=lambda run_id: path if run_id == "a" else None, log_limit=10 ** 7)
+		job = manager.start(self.spec(path))
+		self.wait_state(manager, job.job_id, "running")
+		for number in range(700):
+			self.runner.processes[0].emit("line %03d" % number)
+		self.runner.processes[0].finish(1)
+		self.wait_state(manager, job.job_id, "failed")
+		lines = manager.state_for_run("a")["logs"][job.job_id]
+		self.assertEqual((len(lines), lines[0], lines[-1]), (500, "line 200", "line 699"))
+		lines = manager.state_for_run("a", log_chars=100)["logs"][job.job_id]
+		self.assertEqual(lines[-1], "line 699")
+		self.assertLessEqual(sum(len(line) + 1 for line in lines), 100)
+		self.assertGreater(len(lines), 5)
+
+
 class JobSerializationTest(JobTestCase):
 	def test_the_browser_view_of_a_job_has_no_host_path_and_is_json(self) -> None:
 		path = self.result("tum")

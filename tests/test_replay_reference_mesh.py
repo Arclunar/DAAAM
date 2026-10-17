@@ -81,7 +81,7 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 		self.assertIn("'无描述源帧'", VIEWER)
 
 	def test_selecting_an_entity_does_not_move_the_timeline(self) -> None:
-		body = VIEWER.split("  selectEntity(kind, id", 1)[1].split("\n  clearSelection()", 1)[0]
+		body = VIEWER.split("  selectEntity(kind, id", 1)[1].split("\n  clearSelection(", 1)[0]
 		self.assertNotIn("this.show(", body)
 		self.assertNotIn("this.setPlaying(", body)
 		modal = VIEWER.split("  openDescriptionSource(item, source)", 1)[1].split("\n  closeDescriptionSource()", 1)[0]

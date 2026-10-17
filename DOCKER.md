@@ -136,6 +136,17 @@ docker compose run --rm -v /宿主机/数据路径:/datasets:ro daaam
 和 `just coda-run` 会自动调用它。服务的本地状态放在仓库的 `.replay-web/`（已被 git 忽略），停掉服务后可以直接删除。
 用法见 [USAGE.md](USAGE.md) 9.0.1 节。
 
+页面里的 Postprocess / Summarize 任务是服务在宿主机上启动的 `docker compose run`：容器名 `daaam-replay-job-<编号>`，只把打开的那一个
+结果目录挂到 `/selected-result`，命令是固定的 `bash scripts/postprocess_coda.sh --atomic --stage …`。取消或服务停止时服务会
+`docker stop` 这个容器。如果服务被强行杀掉（`kill -9`、断电），下次启动会把没做完的任务记录改成"已中断"并按名字停掉可能还在跑的
+容器；也可以手动检查和清理：
+
+```bash
+docker ps --filter name=daaam-replay-job-     # 还有没有任务容器
+docker stop daaam-replay-job-<编号>            # 脚本会先清掉自己的临时文件
+ls -a output/…/out_…/ | grep replay-job         # 强杀后可能留下的 .replay-job-* 临时文件，可以直接删除
+```
+
 ## 清理
 
 普通的 `docker compose down` 不会删除工作区。只有确定不再需要容器内手动
