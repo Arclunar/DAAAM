@@ -227,8 +227,8 @@ Follow `2026-10-16-replay-web-processing-implementation.md`:
 Follow `2026-10-16-replay-web-agent-implementation.md`:
 
 - [x] Task 1: add provider-neutral conversation context and progress hooks. (`65d4d73`)
-- [x] Task 2: load TUM/CODa query graphs and cache Agent instances.
-- [ ] Task 3: persist isolated histories and graph boundaries.
+- [x] Task 2: load TUM/CODa query graphs and cache Agent instances. (`3c88963`)
+- [x] Task 3: persist isolated histories and graph boundaries.
 - [ ] Task 4: run one long-lived Agent worker through NDJSON.
 - [ ] Task 5: stream per-tab chat through the service and browser.
 - [ ] Task 6: verify persistent multi-turn behaviour and document operations.
