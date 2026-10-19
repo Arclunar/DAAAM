@@ -1351,3 +1351,218 @@ just gs-train /data/gs_world/datasets/rec --pose-opt                            
 - 测试：`tests/test_gs_world_data.py`（数据集读写、缩放后的内参、黑边识别、轨迹文件）、`tests/test_gs_world_model.py`（几何、
   深度初始化和补洞、PLY 字段顺序、检查点、测试帧划分、关键帧挑选、地图对比的配对和描述一致度）、`tests/test_gs_world_rosbag.py`（合成 ROS1 bag：索引与扫描、
   bz2、截断、各类消息解码、compressedDepth、外参约定、端到端转换）在容器里跑，`just test` 已包含；GPU 部分用 `just gs-check` 检查。
+
+### 9.8 Habitat 实时建图（键盘走动，边走边看语义地图长出来）
+
+在 Habitat 模拟器的公寓里用键盘走动，DAAAM 同时把看到的 RGB-D 画面建成 Hydra 场景图，RViz 里网格、地点、物体和房间一点点
+长出来。关掉模拟器窗口后，地图像其他运行一样保存到 `output/`，也可以在回看工作区里打开。**不用下载任何东西**：habitat-sim
+环境和 ReplicaCAD 场景用的是本机 `~/warmoon_ws/habitat_ws` 里已有的（`~/miniforge3/envs/habitat-smallroom`，habitat-sim 0.3.3；
+`data/replica_cad`，152 MB），只读使用，不往里装包也不写文件。
+
+```bash
+just habitat-live              # 弹出 Habitat 窗口和 RViz；关掉 Habitat 窗口（Esc）或 Ctrl+C 结束，地图随后保存
+just habitat-live 300          # 建满 300 帧自动结束
+DAM=1 just habitat-live        # 另外用 DAM 描述物体（约 12 GB 显存、9 GB 内存）；描述写进保存的结果，RViz 里只有伪标签编号
+just habitat-live-test 240     # 不用手动：自动驾驶在公寓里走 240 秒，录下会话并生成回看数据包——验证整套流程用
+just habitat-bridge            # 只开 Habitat 窗口和帧服务（调试；建图另开终端：docker compose run --rm -T daaam-ws bash scripts/run_habitat_live.sh）
+```
+
+结束后 RViz 保持打开，方便看最终的地图（关掉 RViz 窗口或再按一次 Ctrl+C 才算结束；`habitat-live-test` 不保留，`KEEP_VIEWER=0` 同理）。
+配方先检查别的重活容器（`_coda-guard`，和其他建图配方一样：显存和内存装不下两个）；`habitat_live.sh` 起 Habitat 桥，等它开始
+服务，再在 `daaam-ws` 容器里起建图（RViz2、DAAAM、Hydra）。窗口出来后**先点一下 Habitat 窗口**（RViz 打开时会抢走键盘焦点），
+RViz 约 10 秒后出现，模型加载约 40 秒，之后地图开始长。
+
+**按键**（窗口里也有提示；按住不放就一直走，松开就停）：
+
+| 键 | 动作 |
+|---|---|
+| `W` / `S` | 前进 / 后退（0.6 m/s） |
+| `A` / `D` | 向左 / 向右平移 |
+| `←` `→` 或 `Q` `E` | 向左 / 向右转（70°/s） |
+| `↑` `↓` | 抬头 / 低头（40°/s，最多 ±60°） |
+| `Shift` | 走得快一倍（不影响转动） |
+| `R` | 回到起点（客厅，面朝厨房） |
+| `P` | 开 / 关自动驾驶（走到还没看过的地方；按任何移动键就由你接手） |
+| `X` | 全部停下（也关自动驾驶） |
+| `H` | 隐藏 / 显示窗口里的文字 |
+| `Esc` | 结束 |
+
+走动会被导航网格挡住（家具和墙都算障碍，贴着走会沿边滑），不会穿墙。窗口左上角有当前建图进度（"mapper: 191 frames, 3.1/s"）。
+
+**怎么工作**
+
+```
+Habitat 窗口（宿主机，habitat-smallroom 环境）  --TCP 127.0.0.1:8002-->  LiveDataset（容器，run_pipeline.py）
+  键盘 → 连续移动；渲染 RGB + 深度                  拉取：每处理完一帧要一帧       FastSAM → 跟踪 → Hydra
+                                                                                     │ ZMQ 127.0.0.1:8001
+                                                                                     ▼
+                                                                          RViz2（场景图）+ 回看录制
+```
+
+- **拉取式、只取最新**（`src/daaam/datasets/live_protocol.py`，标准库 + numpy）：建图每处理完一帧才发一个请求，桥在下一轮窗口循环里
+  渲染并回读一帧发回去，所以建图拿到的永远是刚渲染的画面（实测到手时平均晚 9 ms），不会积压，也不会为建图跟不上的帧白白渲染、回读。
+  没有用 ZMQ 传帧：habitat 环境里没有 pyzmq，而往别人的环境里装包不合适；传输层只需要标准库的 TCP。
+- **`LiveDataset`**（`src/daaam/datasets/loaders/live.py`，`run_pipeline.py --dataset-type LiveDataset --live-url tcp://127.0.0.1:8002`）：
+  `__getitem__(k)` 阻塞到下一帧到达；第 k 帧的时间戳是 `k / FPS`（FPS 默认 3，和其他数据集一样用数据集的时钟，物体层的 3 秒滞后
+  `tracker.temporal_window` 就是这个时钟的秒）；跑 `[0]` 两次（先设相机，等模型加载完再作为第一帧）时第二次取新帧；关窗口（桥发出结束）
+  或 Ctrl+C 时抛 `DatasetExhausted`，`HydraPipelineRunner.run` 把它当成数据结束，**正常保存地图**。
+- **位姿换算**：Habitat 的相机是 OpenGL 轴（右、上、后）、世界 y 向上；管线要光学轴（右、下、前）、世界 z 向上，换算
+  `T = Z · T_habitat · diag(1,−1,−1,1)`，`Z` 把 `(x, y, z)` 变成 `(x, −z, y)`（与 `habitat_ws/scripts/export_daaam.py` 一致）。
+  实测验证：建出的网格里面积最大的水平面在 z≈0（地板），法向与 +z 的夹角 0.11–0.13°，墙是竖直的（竖直面占 54% 的面积），即世界确实是 z 向上、
+  地面是水平的（Habitat 的导航网格比真地板高约 0.12 m，所以相机在建图世界里高约 1.32 m）。
+- **深度**：模拟器真值，0.2 mm 量化（uint16，5000 单位/米，和 TUM 一样），没有测到的像素（超过 10 m、开着的天花板、窗外）为 0，
+  Hydra 把它们当作"没测量"跳过。语义标签**不用**：物体全靠 FastSAM + 跟踪（RViz 里是伪标签编号 `label_N`）。
+- **会话录制**：每个建图帧存进 `output/<NAME>/session_<时间>/`（`rgb/`、`depth/`、`pose/poses.txt`、`timestamps.txt`、`camera_info.json`、
+  `live_stats.json`），格式和 `scripts/prepare_tum_rgbd.py` 的一样，所以可以离线重跑、用 `lift_native_places.py`、`replay.py finalize`
+  处理。每帧约 0.36 MB（556 帧 201 MB）；`RECORD=0` 不录。
+
+**输出**：`output/habitat_live/out_<时间>/`（和其他运行一样：`dsg.json`、`hydra_output/`、`images/`、`final_stats.json`，其中 `live` 一项是
+这次会话的实测：建图速度、帧龄、帧间运动）、`output/habitat_live/session_<时间>/`（录制）、`output/habitat_live/bridge_<时间>.log`。`REPLAY=1`
+（`habitat-live-test` 默认带）另外生成 `replay/` 回看数据包和 `replay.rrd`（`just replay-web` 打开）。
+
+**参数**（环境变量，在 `just` 命令前面写；宿主机脚本 `scripts/habitat_live.sh` 的：`HABITAT_PYTHON`（默认 `~/miniforge3/envs/habitat-smallroom/bin/python`）、
+`HABITAT_DATA`（默认 `~/warmoon_ws/habitat_ws/data`）、`BRIDGE_PORT`（8002）、`SCENE`（apt_1）、`AUTOPILOT=1`、`RUN_SECONDS=N`（建图开始后 N 秒结束）、
+`BRIDGE_ARGS`（桥的其他参数，`python scripts/habitat_live/bridge.py --help`：`--speed`、`--turn-rate`、`--hfov`、`--width/--height`、`--start x y z` 等）；
+容器脚本 `scripts/run_habitat_live.sh` 的：`FPS`（3）、`NAME`（habitat_live）、`DAM`（0）、`HYDRA_CONFIG`（默认房屋尺度的
+`config/hydra_config/habitat_house_khronos.yaml`）、`DEPTH_LB/DEPTH_UB`（0.3/5.0 m）、`LABELS`（5000）、`VIEWER`/`KEEP_VIEWER`、`VISUALIZER_CONFIG`/`RVIZ_CONFIG`、
+`REPLAY`、`RECORD`、`ZMQ_URL`、`EXTRA_OVERRIDES`），容器里的变量由宿主机脚本原样传进去。
+
+**Hydra 配置**：`habitat_house_khronos.yaml` 由 DAAAM-ROS 的 `clio_dataset_khronos.yaml`（楼宇尺度，10 cm 体素）改来：去掉只有 ROS 版才有的输出、
+`extra_integration_distance` 改 0（配合 `hydra.skip_invalid_depth`）、`tracker.temporal_window` 10→3 s、地点和房间的阈值放宽（改动和原因写在文件头）。
+桌面尺度的 `tum_rgbd_khronos.yaml`（5 cm）也能用，换 `HYDRA_CONFIG` 即可。RViz 用 `habitat_visualizer.yaml` / `habitat_live.rviz`：层间距 5.5→2.0
+（默认的按楼宇设，公寓里物体层会悬在网格上方 11 m）、物体上不写伪标签文字、不画约 1000 个可通行性地点、层间连线变细变淡、初始视角从侧面看整套公寓
+（左键转、中键平移、滚轮缩放；上面那层是物体，再上面是地点和房间）。
+
+**实测**（RTX 5060 Ti，640×480，hfov 90°，自动驾驶在 apt_1 里走 240 秒，三次运行；不开 DAM，RViz 开着）：
+
+| 项目 | 实测 |
+|---|---|
+| 建图速度 | 2.3–2.6 帧/s（三次：2.63、2.53、2.31；最后一次我同时在拖 RViz）；每帧 CV 0.18–0.20 s、Hydra 0.17–0.20 s；时间戳按 3 帧/s 记 |
+| 帧到手时的年龄（渲染 → 建图拿到） | 平均 7–9 ms，p95 17–19 ms；一次取帧的往返（等下一轮 60 帧/s 的窗口循环 + 渲染 + 回读 + 传输）平均约 31 ms |
+| 从按键到地图变化 | 各段相加约 0.45 s（取帧 31 ms + 一帧的 CV 和 Hydra 约 0.4 s；RViz 上屏的时刻没有单独测）；物体层再晚约 4 秒（3 秒运行时钟 ≈ 9 帧 ≈ 4 s） |
+| Habitat 桥 | 窗口 58.6 帧/s（上限 60），每个窗口帧的工作 6.3 ms；一次取帧（渲染 RGB + 深度、回读、编码）与建图抢 GPU 时平均 12.5 ms、p95 18.7 ms，单独跑 7.2–7.6 ms（其中渲染 + 回读 3.2 ms）；内存 415–438 MB，创建场景 3.5 s |
+| 内存 / 显存 | 建图进程合计 RSS 平均 5.9 GB、峰值 7.5 GB（各进程相加，共享内存重复计）；宿主机可用内存从 12.8 GB 降到最低 4.5 GB；GPU 从 1.2 GB 升到 4.5 GB（利用率平均 21%）；RViz 约 0.3–0.4 GB |
+| 帧间运动（自动驾驶，0.6 m/s） | 平均 0.15–0.17 m / 6° ，最大 0.42 m / 43° |
+| 地图（最后一次，556 帧） | 场景图 1701 个节点：物体 156、背景物体 214、自由空间地点 275、可通行性地点 1049、房间 6、楼 1；网格 15.6 万顶点、875 m²；回看数据包 113 个快照、13 个块（71 MB）。三次的物体数 117 / 192 / 156、房间数 4 / 5 / 6：自动驾驶每次走的路不同 |
+| 地面是否水平 | 最大的水平面在 z = 0.008 m（138 m²），法向与 +z 夹角 0.11°（三次 0.11–0.13°） |
+
+**限制**
+
+- 手动按键的那条路径（按下 / 松开事件 → 连续移动）：我没有真人坐在键盘前，改用 X11 的 `XSendEvent` 往桥的窗口发合成按键，在真实的 GLFW 事件循环里测了 13 项，全部通过：
+  `W` 按 1 秒走 0.60 m、沿 −z、松开就停；`←` 按 1 秒转 70.5°，`→` 按 0.5 秒反向转 35°；`Shift+W` 0.5 秒走 0.60 m（快一倍）；`R` 回到起点；`P` 开自动驾驶
+  （1.75 秒走 0.80 m）、`X` 停下、点一下 `W` 由你接手；`Esc` 和关窗口（`WM_DELETE_WINDOW`）都以退出码 0 结束并打印汇总。没测的是真人的键盘经 Windows → WSLg
+  到窗口的那一段（焦点、按键重复）：请你按键试一次，按不动时先点一下窗口。这些检查要显示和 GPU，没有放进 `just test`。
+- 只在 ReplicaCAD apt_1 上实测；换场景（`SCENE`、`--scene-dataset`）没试。深度和位姿是模拟器真值、没有噪声，语义标签没有用。
+- 建图每秒只更新 2–3 次；走得太快（转一圈的 70°/s 在 2.3 帧/s 下是一帧 30°）FastSAM 的跟踪会断：窗口外的终端里每 20 帧打印一行"帧间运动"，最大转角超过约 40° 就慢一点。
+- 站着不动时建图仍然一帧接一帧地处理同一个画面（时钟照走，物体照样被提取），录制也照样写（0.36 MB/帧）。
+- 物体层滞后：Khronos 要等一个轨迹 3 秒没被看到才提取物体（`tracker.temporal_window`）；RViz 里只有伪标签编号，DAM 的文字描述（`DAM=1`）在保存的结果里。
+- 内存：只跑过几分钟；Hydra 的内存随帧数涨（`USAGE.md` 4.4：CODa 跑到约 3600 帧被 OOM 杀掉），长时间探索要分段或加交换区。
+- 启动时 RViz 窗口可能有几秒"未响应"（建图进程占满 CPU），不是卡死。
+
+**换机器**：Habitat 环境和场景不在本仓库里：`habitat_ws/environment.yml`（conda 环境 habitat-smallroom：habitat-sim 0.3.3 withbullet、numpy 1.26）和 ReplicaCAD v1.6
+（`python -m habitat_sim.utils.datasets_download --uids replica_cad_dataset`，约 150 MB）要先装好，再用 `HABITAT_PYTHON` / `HABITAT_DATA` 指过去；
+WSL2 下 GPU 渲染靠 Mesa 的 D3D12（脚本给桥设了 `GALLIUM_DRIVER=d3d12`，只对这个进程生效），不设会退回 CPU 渲染。
+
+**离线重跑一次录下的会话**（同样的帧、同样的时钟，不要模拟器和 RViz）：
+
+```bash
+docker compose run --rm -T -e DATASET=output/habitat_live/session_<时间> -e NAME=habitat_offline -e FPS=3 -e DEPTH_UB=5.0 \
+  -e HYDRA_CONFIG=config/hydra_config/habitat_house_khronos.yaml -e EXTRA_OVERRIDES=workers.num_grounding_workers=0 \
+  daaam-ws bash scripts/run_tum_example.sh all 3
+```
+
+实测：把上面"最后一次"那个 556 帧的会话用同样的配置离线重跑，得到的场景图和实时那次**完全一样**（1701 个节点、3910 条边，各层的数量相同，网格 155,897 个顶点），
+也就是录下的会话能精确复现实时建图的结果，实时路径和离线路径吃到的帧、位姿和时钟是同一份。没有 RViz 时每帧 CV 0.153 s + Hydra 0.073 s（实时开着 RViz 是 0.199 + 0.199 s：
+RViz 发布场景图和网格那部分约占 0.13 s），约 4.4 帧/s（这次限了 3 帧/s）。同一个会话用 5 cm 的桌面配置（`HYDRA_CONFIG=config/hydra_config/tum_rgbd_khronos.yaml`）：
+网格 56.7 万个顶点（10 cm 的 3.6 倍），每帧 Hydra 0.146 s（10 cm 的两倍），房间 9 个（10 cm 的 6 个；apt_1 是一套几个房间的公寓，5 cm 更容易把一个房间分成几块）、
+物体 159、地点 339；所以实时用 10 cm 更合适。
+
+**测试**（`just test` 已包含）：`tests/test_live_protocol.py`（线格式、拉取语义：帧一定晚于请求、无积压、多客户端、结束、连接重试）、`tests/test_habitat_live_control.py`（按键 → 运动、
+与帧率无关的动作量、航点自动驾驶）、`tests/test_habitat_live_scripts.py`（两个脚本对着假 python / docker / ros2 跑：参数、环境变量传递、退出码、Ctrl+C 关桥）在宿主机跑；
+`tests/test_live_dataset.py`（位姿换算、时间戳、第一帧读两次、结束、录制成 TUM 布局并能被 `ImageSequenceDataset` 读回、runner 遇到流结束正常收尾）在容器里跑。
+
+## 10. OC-NaVQA 评测
+
+评测需要序列 `0、3、4、6、16、21、22` 的完整后处理结果：
+
+```bash
+export OPENAI_API_KEY=sk-...
+python scripts/eval_navqa.py \
+  0=output/coda/seq0/clustered_dsg_with_summaries.json \
+  3=output/coda/seq3/clustered_dsg_with_summaries.json \
+  4=output/coda/seq4/clustered_dsg_with_summaries.json \
+  6=output/coda/seq6/clustered_dsg_with_summaries.json \
+  16=output/coda/seq16/clustered_dsg_with_summaries.json \
+  21=output/coda/seq21/clustered_dsg_with_summaries.json \
+  22=output/coda/seq22/clustered_dsg_with_summaries.json
+```
+
+结果写入 `output/oc_navqa/`。评测默认执行三个随机种子，并使用仓库中修正后的
+标注；指标解释、结果格式和论文参考值见 [EVAL.md](EVAL.md)。
+
+## 11. 常见问题
+
+### 找不到 `labels_pseudo.yaml` 或 `labels_pseudo.csv`
+
+先完整构建 DAAAM-ROS，然后重新 source 工作区。这两个文件不是仓库中的静态
+文件，而是构建期间生成的文件。
+
+### 找不到 `hydra_python`
+
+Python requirements 不包含 Hydra Python bindings。需要完成整个 ROS 2 工作区的
+colcon 构建，并 source `install/setup.bash`。
+
+### 找不到 FastSAM 权重
+
+DAAAM 不会自动回退下载 FastSAM。检查 `checkpoints/fastsam/` 中是否存在配置所
+引用的确切文件名，并确认 `.pt`/`.engine` 与配置一致。
+
+### TensorRT engine 无法加载或 GPU 异常
+
+不要复制其他 GPU 上生成的 engine。删除旧 engine，在当前机器和当前容器中
+重新导出，并确保 PyTorch CUDA、TensorRT 和驱动兼容。
+
+### rosbag 播放后没有数据或 TF
+
+确认播放命令包含 `--clock` 和 `/tf_static` QoS 覆盖文件，并等待 DAAAM/Hydra
+节点初始化后再按空格开始播放。
+
+### GPU 显存不足
+
+优先减小 SAM 输入尺寸或改用较小模型、减少 grounding worker 数量，并关闭不
+需要的逐帧/选帧 CLIP 特征。运行句子嵌入后处理前可以先结束主管道以释放显存。
+
+### 输出不完整
+
+查看 `logs/` 和 `final_stats.json`。如果进程被强制终止，重新运行该序列；不要
+把截断的 `background_objects.yaml` 或未完成的 DSG 继续用于评测。
+
+### mesh 是碎片、有重影，或缺了大片表面
+
+用 Kinect 一类有空洞的深度图（TUM RGB-D）时，要同时满足两条。`config/hydra_config/tum_rgbd_khronos.yaml`
+和 `hydra.skip_invalid_depth`（默认开）现在都已经这样设置：
+
+- `active_window.projective_integrator.extra_integration_distance` 保持 `0`。clio 配置里的 `1.0` 会在每个表面
+  后面再积分一层 1 m 深的"内部"，mesh 里就多出一层落在真实表面后 0.2–1.5 m 的"鬼面"，以及沿视线方向的长条
+  （fr1/desk 上 62% 的 mesh 顶点是这样来的，只有 23% 在实测表面 5 cm 以内）。
+- 没有测到深度（值为 0）的像素要让 Hydra 跳过：`hydra.skip_invalid_depth` 把它们设成 1 mm。Hydra 把深度 0 变成
+  NaN，而它的 TSDF 积分器（`ProjectiveIntegrator::computeSDF` 里的 `std::min(截断距离, sdf)`）遇到 NaN 会返回截断
+  距离，也就是把整条射线当成空闲空间。Kinect 深度图里黑色或反光物体、遮挡阴影处的空洞，就会把别的帧测到的表面
+  削掉；结果是 mesh 只剩近处（1 m 以内）的一小部分，暗色的显示器、笔记本几乎都没有。
+
+在 fr1/desk 上（5 cm 体素，298 帧，拿深度图按真值位姿反投影出的表面做参考）：落在实测表面 5 cm 以内的 mesh 顶点
+23% → 90%，被 mesh 覆盖的实测表面 17% → 80%，连通片数 811 → 158（最大的一片占全部面的 84%）。
+
+代价：深度空洞不再产生"空闲空间"，地点（places）和房间只能靠真正观测到的空闲空间来建；yaml 里放宽了 Voronoi 和
+房间的阈值（理由写在文件头的注释里），fr1/desk 上得到 23 个地点、1 个房间（之前是 35 个、1 个）。想回到旧行为：
+`--config-overrides hydra.skip_invalid_depth=false`，并把 yaml 里的 `extra_integration_distance` 改回 `1.0`。
+
+## 12. 相关文档
+
+- [INSTALL.md](INSTALL.md)：依赖、工作区结构和手动安装
+- [DOCKER.md](DOCKER.md)：容器构建和宿主机集成
+- [DEPLOY.md](DEPLOY.md)：把配好的环境打包并一键部署到其他 GPU 服务器
+- [RUNNING.md](RUNNING.md)：完整 CODa/ROS 2 工作流和参数
+- [EVAL.md](EVAL.md)：OC-NaVQA 评测
+- [CODEBASE.md](CODEBASE.md)：代码结构和服务架构
+- [data/DATA.md](data/DATA.md)：评测数据说明

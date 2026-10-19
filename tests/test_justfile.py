@@ -278,5 +278,35 @@ class JustfileTest(unittest.TestCase):
 		for module in ("tests.test_gs_world_data", "tests.test_gs_world_model", "tests.test_gs_world_rosbag"):
 			self.assertIn(module, container, "the gs_world suites need numpy, OpenCV and torch from the container")
 
+	def test_habitat_live_recipes_run_the_host_script_that_starts_the_bridge_and_the_mapper(self) -> None:
+		live = self._dry_run("habitat-live")
+		text = live.stdout + live.stderr
+		self.assertEqual(live.returncode, 0, text)
+		self.assertIn("bash scripts/habitat_live.sh all", text)
+		self.assertIn("run_habitat_live", text, "the container guard sees the mapper of a live session")
+		limited = self._dry_run("habitat-live", "300")
+		self.assertIn("bash scripts/habitat_live.sh 300", limited.stdout + limited.stderr)
+
+		check = self._dry_run("habitat-live-test", "90")
+		text = check.stdout + check.stderr
+		self.assertEqual(check.returncode, 0, text)
+		self.assertIn("AUTOPILOT=1 RUN_SECONDS=90 KEEP_VIEWER=0 REPLAY=1 NAME=habitat_live_test bash scripts/habitat_live.sh", text)
+		self.assertIn("run_habitat_live", text, "the test run is guarded as well")
+
+		bridge = self._dry_run("habitat-bridge", "--speed", "0.9")
+		text = bridge.stdout + bridge.stderr
+		self.assertEqual(bridge.returncode, 0, text)
+		self.assertIn("bash scripts/habitat_live.sh --bridge-only --speed 0.9", text)
+
+	def test_test_recipe_runs_the_habitat_live_suites(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, output)
+		host, rest = output.split("docker compose run", 1)
+		container = rest.split("powershell", 1)[0]
+		for module in ("tests.test_live_protocol", "tests.test_habitat_live_control", "tests.test_habitat_live_scripts"):
+			self.assertIn(module, host, "standard library and numpy only, tested on the WSL host: " + module)
+		self.assertIn("tests.test_live_dataset", container, "the live dataset needs OpenCV and SciPy from the container")
+
 if __name__ == "__main__":
 	unittest.main()

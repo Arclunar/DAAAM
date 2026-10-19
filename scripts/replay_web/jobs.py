@@ -57,7 +57,7 @@ COMMON_SETTINGS = (("PYTHONUNBUFFERED", "1"),)   # the log is live: Python would
 CLIENT_ENV = {"COMPOSE_ANSI": "never", "COMPOSE_PROGRESS": "plain"}
 HEAVY_COMMANDS = re.compile(
 	r"run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example"
-	r"|run_live_preview|demo_query|daaam_node"
+	r"|run_live_preview|run_habitat_live|demo_query|daaam_node"
 )
 SCHEMA = 1
 MAX_LINE = 2000
