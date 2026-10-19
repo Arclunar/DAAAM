@@ -169,6 +169,13 @@ export class ReplayDataSource {
     return entry ? entry.index : null;
   }
 
+  exactFrameImage(index) {   // source frame is a dataset index; never substitute a nearby snapshot
+    const entry = this.manifest.images.timeline.find((item) => item.index === index && item.rgb);
+    if (entry) return { camera: 'rgb', index, url: this.api.imageUrl(this.runId, entry.rgb, this.version) };
+    const description = Object.values(this.manifest.images.descriptions).find((item) => item.index === index);
+    return description ? { ...description, url: this.api.imageUrl(this.runId, description.path, this.version) } : null;
+  }
+
   descriptionImage(frameId) {
     const entry = this.manifest.images.descriptions[String(frameId)];
     return entry ? { ...entry, url: this.api.imageUrl(this.runId, entry.path, this.version) } : null;

@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence, Union
+from typing import Any, Dict, Iterable, Mapping, Sequence, Union
 
 from scripts.replay_web.manifest import GRAPH_CANDIDATES, SCHEMA_VERSION
 
@@ -86,10 +86,15 @@ def graph_node(symbol: str, layer: int, partition: int = 0, **attributes: Any) -
 	return {"id": node_id(symbol), "layer": layer, "partition": partition, "attributes": attributes}
 
 
-def graph_document(marker: str = "raw", objects: Iterable[int] = (0, 1), rooms: Union[bool, Sequence[Sequence[str]]] = False) -> Dict[str, Any]:
+def graph_document(marker: str = "raw", objects: Iterable[int] = (0, 1), rooms: Union[bool, Sequence[Sequence[str]]] = False,
+		native_places: bool = False, native_description: str = 'wooden floor',
+		background_objects: Sequence[Mapping[str, Any]] = ()) -> Dict[str, Any]:
 	"""A small spark_dsg-shaped scene graph: objects O<n> under one place, optionally summarized rooms above it.
 
 	`rooms` is True (one room "office") or a sequence of (label, description) pairs, which become R0, R1, ...
+	`background_objects` lists {"id", "description", "position", "label", "reason", "first", "last", "observations"} (only the id is
+	required) and becomes the BACKGROUND_OBJECTS layer, nodes o<id> without a box or any edge; "first" and "last" give them a
+	temporal history.
 	"""
 	objects = list(objects)
 	nodes = [
@@ -106,10 +111,27 @@ def graph_document(marker: str = "raw", objects: Iterable[int] = (0, 1), rooms: 
 			"num_objects": len(objects), "description": "%s: %s" % (label, description),
 		}))
 		edges.append({"source": node_id("R%d" % number), "target": node_id("p7"), "info": {}})
+	if native_places:
+		nodes.extend([
+			graph_node('t3', 3, 2, position=[1.5, -.6, .1], semantic_label=42, label_weights=[[42, 2.5]],
+				metadata={'description': native_description, 'semantic_lifting': {'method': 'rgbd_vertical_surface_projection',
+					'sources': [{'frame_id': 0, 'label': 42}, {'frame_id': 999, 'label': 42}]}}),
+			graph_node('t4', 3, 2, position=[1.2, -.6, .1], semantic_label=0, metadata={}),
+		])
+		edges.append({'source': node_id('t3'), 'target': node_id('t4')})
+	layer_names = {"OBJECTS": {"layer": 2, "partition": 0}, "PLACES": {"layer": 3, "partition": 0}, "ROOMS": {"layer": 4, "partition": 0}}
+	for item in background_objects:
+		metadata = {"description": item.get("description", "unknown"), "filtered_reason": item.get("reason", "Filtered by Hydra")}
+		if "first" in item:
+			metadata["temporal_history"] = {"first_observed": item["first"], "last_observed": item["last"],
+				"observation_count": item.get("observations", 1), "timestamps": [item["first"], item["last"]]}
+		nodes.append(graph_node("o%d" % item["id"], 2, 2, position=item.get("position", [0.0, 0.0, 1.0]),
+			semantic_label=item.get("label", item["id"]), name="", metadata=metadata))
+		layer_names["BACKGROUND_OBJECTS"] = {"layer": 2, "partition": 2}
 	return {
 		"SPARK_DSG_header": {"project_name": "main", "version": {"major": 1, "minor": 1, "patch": 5}},
 		"directed": False, "multigraph": False,
-		"layer_names": {"OBJECTS": {"layer": 2, "partition": 0}, "PLACES": {"layer": 3, "partition": 0}, "ROOMS": {"layer": 4, "partition": 0}},
+		"layer_names": layer_names,
 		"nodes": nodes, "edges": edges,
 		"metadata": {"embedding_provenance": {"sentence": {"model_name": "sentence-transformers/sentence-t5-xl"}, "clip": {"model_name": "ViT-L-14"}}},
 		"marker": marker,

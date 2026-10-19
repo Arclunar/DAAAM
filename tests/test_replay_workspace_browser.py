@@ -188,6 +188,146 @@ class WorkspaceGraphBrowserTest(WorkspaceBrowserTestCase):
 
 	STATE_KEYS = ("snapshot", "time", "camera", "hidden", "controls", "speed", "cameraLayout")
 
+	def test_native_place_map_list_semantics_and_hot_reload_do_not_move_time(self):
+		self.fixtures.call('write_graph', path=self.result, name='dsg.json', native_places=True)
+		self.open_workspace()
+		self.open_result(self.result)
+		self.wait_for_viewer(self.result)
+		self.wait_for_badge(self.result, 'dsg.json')
+		before = self.view_state()
+		self.script("window.replayDebug.viewer.el['entity-tab-places'].click()")
+		self.wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, '[data-entity-key="native-place:t3"]'))
+		self.driver.find_element(By.CSS_SELECTOR, '[data-entity-key="native-place:t3"]').click()
+		detail = lambda: self.pane_script(self.result, "pane.querySelector('[data-role=entity-detail]').textContent")
+		self.assertIn('wooden floor', detail())
+		self.assertIn('语义标签 42', detail())
+		self.assertIn('数据集帧 0', detail())
+		self.assertIn('当前场景图', detail())
+		missing_image = self.driver.find_element(By.CSS_SELECTOR, '[data-role=entity-detail] .entity-source[disabled]')
+		self.assertEqual(missing_image.text, '数据集帧 999', 'missing exact images must not use the nearest timeline image')
+		self.assertEqual(self.view_state()['snapshot'], before['snapshot'])
+		self.assertEqual(self.view_state()['camera'], before['camera'])
+		self.assertTrue(self.driver.find_elements(By.CSS_SELECTOR, '[data-entity-key="place:3"]'), 'p3 and t3 must remain distinct')
+		self.driver.find_element(By.CSS_SELECTOR, '[data-role=entity-detail] .entity-source:not([disabled])').click()
+		self.wait.until(lambda d: self.script("return document.querySelector('[data-role=description-source-image]').naturalWidth > 0"))
+		self.assertEqual(self.view_state()['snapshot'], before['snapshot'])
+		self.script("window.replayDebug.viewer.closeDescriptionSource()")
+		self.driver.find_element(By.CSS_SELECTOR, '[data-entity-key="native-place:t3"] .entity-eye').click()
+		self.assertIn('native-place:t3', self.view_state()['hidden'])
+		self.assertNotIn('place:3', self.view_state()['hidden'])
+		self.driver.find_element(By.CSS_SELECTOR, '[data-entity-key="native-place:t3"] .entity-eye').click()
+		self.script("window.replayDebug.viewer.el['entity-filter'].value='wooden floor'; window.replayDebug.viewer.renderEntityBrowser()")
+		self.assertEqual(len(self.driver.find_elements(By.CSS_SELECTOR, '.entity-row[data-entity-key="native-place:t3"]')), 1)
+		self.script("window.replayDebug.viewer.el['entity-filter'].value=''; window.replayDebug.viewer.renderEntityBrowser(); window.replayDebug.draw()")
+		self.assertIn('native-place', self.script("return window.replayDebug.S.placeItems.map(item => item.kind)"))
+		# Map picking uses the native node's drawn screen position.
+		self.script("const v=window.replayDebug.viewer; v.clearSelection(); const n=v.nativeAt('t3'), sp=Number(v.el['r-space'].value); const p=v.project([n.center[0],n.center[1],n.center[2]+sp]), r=v.canvas.getBoundingClientRect(); v.pick(r.left+p[0],r.top+p[1])")
+		self.assertEqual(self.view_state()['selected'], 'native-place:t3')
+		self.assertEqual(self.view_state()['snapshot'], before['snapshot'])
+		self.fixtures.call('write_graph', path=self.result, name='dsg_updated.json', native_places=True, native_description='updated floor')
+		self.wait_for_badge(self.result, 'dsg_updated.json')
+		self.wait.until(lambda d: 'updated floor' in detail())
+		self.assertEqual(self.view_state()['selected'], 'native-place:t3')
+		self.assertEqual(self.view_state()['snapshot'], before['snapshot'])
+		self.driver.find_element(By.CSS_SELECTOR, '[data-entity-key="native-place:t4"]').click()
+		self.assertIn('暂无有效语义', detail())
+		self.driver.find_element(By.CSS_SELECTOR, '[data-entity-key="native-place:t3"]').click()
+		self.fixtures.call('write_graph', path=self.result, name='clustered_dsg.json', native_places=False)
+		self.wait_for_badge(self.result, 'clustered_dsg.json')
+		self.wait.until(lambda d: self.view_state()['selected'] is None)
+		self.assertEqual(self.view_state()['snapshot'], before['snapshot'])
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_background_objects_are_listed_drawn_picked_and_described_without_moving_time(self) -> None:
+		# o9 sits inside the box of O8 (the object of the last snapshot, [1.0, 1.4] x [0, 0.4] x [0, 0.6]); o10 has no description
+		mouse = {"id": 9, "description": "a black computer mouse", "position": [1.2, 0.2, 0.3], "label": 42, "first": 0.2, "last": 0.9, "observations": 12}
+		unknown = {"id": 10, "description": "unknown", "position": [-0.6, 0.5, 0.3]}
+		self.fixtures.call("write_graph", path=self.result, name="dsg.json", background_objects=[mouse, unknown])
+		self.open_workspace()
+		self.open_result(self.result)
+		self.wait_for_viewer(self.result)
+		self.wait_for_badge(self.result, "dsg.json")
+		before = self.view_state()
+		self.assertIn("2 个背景物体", self.pane_script(self.result, "pane.querySelector('[data-role=graph-badge]').textContent"))
+		viewer = "window.replayDebug.viewer"
+		row = lambda key: '[data-entity-key="background-object:%s"]' % key
+		rows = lambda: self.script("return [...document.querySelectorAll('[data-role=entity-list] .entity-row')].map((row) => row.dataset.entityKey)")
+		detail = lambda: self.pane_script(self.result, "pane.querySelector('[data-role=entity-detail]').textContent")
+
+		# the list: its own tab, numbered the way the questions write them, the described ones first
+		self.script(viewer + ".el['entity-tab-background'].click()")
+		self.wait.until(lambda d: d.find_elements(By.CSS_SELECTOR, row("o9")))
+		names = self.script("return [...document.querySelectorAll('[data-role=entity-list] .entity-name')].map((name) => name.textContent)")
+		self.assertEqual(names, ["o(9) · a black computer mouse", "o(10) · (无描述)"])
+		for query, expected in (("o(10)", ["background-object:o10"]), ("mouse", ["background-object:o9"]), ("9", ["background-object:o9"]), ("zzz", [])):
+			self.script(viewer + ".el['entity-filter'].value = arguments[0]; " + viewer + ".renderEntityBrowser()", query)
+			self.assertEqual(rows(), expected, query)
+		self.script(viewer + ".el['entity-filter'].value = ''; " + viewer + ".renderEntityBrowser()")
+
+		# its details come from the current graph; selecting it never moves the timeline or the camera, and the question's context names it
+		self.driver.find_element(By.CSS_SELECTOR, row("o9")).click()
+		self.assertEqual(self.view_state()["selected"], "background-object:o9")
+		for text in ("背景物体 o(9)", "a black computer mouse", "语义标签 42", "位置 (1.20, 0.20, 0.30)", "没有包围盒", "Filtered by Hydra",
+				"首次 0.2 s · 末次 0.9 s · 观测 12 次", "来自当前场景图", "场景图 dsg.json:包含这个实体"):
+			self.assertIn(text, detail())
+		self.assertEqual(self.script("return " + viewer + ".viewContext().selected_entity"), "o9")
+		self.assertEqual(self.view_state()["snapshot"], before["snapshot"])
+		self.assertEqual(self.view_state()["camera"], before["camera"])
+
+		# the DAM source frame of its description opens like an object's; one without a description has none
+		self.driver.find_element(By.CSS_SELECTOR, row("o9") + " .entity-source").click()
+		self.wait.until(lambda d: self.script("return document.querySelector('[data-role=description-source-image]').naturalWidth > 0"))
+		self.assertIn("背景物体 o(9) · 描述来源 frame 1", self.script("return document.querySelector('[data-role=description-source-caption]').textContent"))
+		self.script(viewer + ".closeDescriptionSource()")
+		self.assertTrue(self.script("return document.querySelector(arguments[0] + ' .entity-source').disabled", row("o10")))
+		self.assertEqual(self.view_state()["snapshot"], before["snapshot"])
+
+		# the map: a core and its ring each, the layer switch removes them, and the selected one carries a card
+		pick = ("const v = window.replayDebug.viewer; v.clearSelection(); window.replayDebug.draw(); const p = v.project(arguments[0]), "
+			"r = v.canvas.getBoundingClientRect(); v.pick(r.left + p[0], r.top + p[1]); return v.S.selectedKey")
+		nodes = lambda shown: self.script("const v = window.replayDebug.viewer; v.el['c-background'].checked = arguments[0]; v.S.dirty = true; "
+			"window.replayDebug.draw(); return window.replayDebug.G.nodes", shown)
+		self.script(viewer + ".clearSelection()")
+		self.assertEqual(nodes(True) - nodes(False), 4)
+		nodes(True)
+		self.script(viewer + ".selectEntity('background-object', 'o9'); window.replayDebug.draw()")
+		self.assertEqual(self.script("return window.replayDebug.labels().map((item) => [item.key, item.text])"),
+			[["background-object:o9", "背景物体 o(9) · black computer mouse"]])
+
+		# a click on the marker selects it although it lies inside the box of O8; elsewhere in the box that object is picked
+		self.script(viewer + ".restoreCamera({yaw: 0.8, pitch: 0.5, dist: 2, target: [1.2, 0.2, 0.3]}); window.replayDebug.draw()")
+		self.assertEqual(self.script(pick, [1.2, 0.2, 0.3]), "background-object:o9")
+		self.assertEqual(self.script(pick, [1.05, 0.05, 0.55]), "object:8")
+		self.script(viewer + ".el['c-background'].checked = false")
+		self.assertEqual(self.script(pick, [1.2, 0.2, 0.3]), "object:8", "a switched-off layer is not picked")
+		self.script(viewer + ".el['c-background'].checked = true; " + viewer + ".el['entity-tab-background'].click()")
+		self.driver.find_element(By.CSS_SELECTOR, row("o9") + " .entity-eye").click()
+		self.assertIn("background-object:o9", self.view_state()["hidden"])
+		self.assertEqual(self.script(pick, [1.2, 0.2, 0.3]), "object:8", "a hidden marker is not picked")
+		self.script(viewer + ".el['entity-tab-background'].click()")
+		self.driver.find_element(By.CSS_SELECTOR, row("o9") + " .entity-eye").click()
+		self.assertNotIn("background-object:o9", self.view_state()["hidden"])
+		self.assertEqual(self.script(pick, [1.2, 0.2, 0.3]), "background-object:o9")
+		self.assertEqual(self.view_state()["snapshot"], before["snapshot"])
+
+		# the tab and the selection are part of the view the workspace restores
+		self.script(viewer + ".el['entity-tab-background'].click()")
+		saved = self.view_state()
+		self.assertEqual((saved["entityTab"], saved["selected"]), ("background", "background-object:o9"))
+		self.script("const v = window.replayDebug.viewer, state = v.serializeState(); v.S.entityTab = 'objects'; v.S.selectedKey = null; v.restoreState(state)")
+		restored = self.view_state()
+		self.assertEqual((restored["entityTab"], restored["selected"]), ("background", "background-object:o9"))
+
+		# a graph without them: the selection goes with a reason, the badge and the list say there are none, time stays
+		self.fixtures.call("write_graph", path=self.result, name="dsg_updated.json")
+		self.wait_for_badge(self.result, "dsg_updated.json")
+		self.wait.until(lambda d: self.view_state()["selected"] is None)
+		self.wait_for_notice("更新后的场景图中已不存在该实体")
+		self.assertNotIn("背景物体", self.pane_script(self.result, "pane.querySelector('[data-role=graph-badge]').textContent"))
+		self.assertEqual(self.script("return document.querySelector('[data-role=entity-list]').textContent"), "当前场景图没有背景物体")
+		self.assertEqual(self.view_state()["snapshot"], before["snapshot"])
+		self.assertEqual(severe_logs(self.driver), [])
+
 	def setUp(self) -> None:
 		super().setUp()
 		self.result = self.fixtures.call("make_result", name="graph_tum", kind="tum", sequence="fr1_desk")["path"]
@@ -396,7 +536,7 @@ class WorkspaceTasksBrowserTest(WorkspaceBrowserTestCase):
 		self.wait_for_text("task-log", "sentence embeddings")
 		command = self.calls()[0]
 		self.assertEqual(command[-4:], ["--atomic", "--stage", "postprocess", "/selected-result"])
-		self.assertIn("PLACES_LAYER=PLACES", command, "TUM settings come from the manifest")
+		self.assertIn("PLACES_LAYER=TRAVERSABILITY", command, "TUM settings come from the manifest")
 		self.fixtures.call("job_finish", code=0, files=["dsg_updated.json", "clustered_dsg.json"], path=self.result)
 		self.wait_for_badge("clustered_dsg.json")
 		self.wait_for_text("task-status", "空闲")

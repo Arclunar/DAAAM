@@ -18,7 +18,7 @@ from scripts.replay_web.artifacts import (
 	normalize_graph, select_active_graph,
 )
 from scripts.replay_web.runs import RunRegistry
-from tests.replay_fixtures import graph_document, write_graph, write_minimal_bundle
+from tests.replay_fixtures import graph_document, graph_node, node_id, write_graph, write_minimal_bundle
 
 DISTRO = "Ubuntu-20.04"
 
@@ -133,6 +133,68 @@ class ErrorMessageTest(unittest.TestCase):
 
 
 class NormalizedGraphTest(unittest.TestCase):
+	def test_native_places_keep_semantics_and_sources_without_colliding_with_geometric_ids(self):
+		graph = graph_document(rooms=True)
+		graph['nodes'].extend([
+			graph_node('t7', 3, 2, position=[1., 2., 0.], semantic_label=42,
+				label_weights=[[42, 2.5]], metadata={'description': 'wooden floor',
+				'semantic_lifting': {'method': 'rgbd_vertical_surface_projection',
+					'sources': [{'frame_id': 30, 'label': 42, 'reasoning': 'PRIVATE'}]},
+				'clip_feature': [123.] * 8, 'reasoning': 'PRIVATE'}),
+			graph_node('t8', 3, 2, position=[2., 2., 0.], semantic_label=999, metadata={}),
+		])
+		graph['edges'].extend([{'source': node_id('R0'), 'target': node_id('t7')},
+			{'source': node_id('t7'), 'target': node_id('t8')}])
+		document = normalize_graph(graph)
+		self.assertEqual([n['id'] for n in document['places']], ['p7'])
+		self.assertEqual([n['id'] for n in document['native_places']], ['t7', 't8'])
+		place = document['native_places'][0]
+		self.assertEqual((place['description'], place['label'], place['room']), ('wooden floor', 42, 'R0'))
+		self.assertEqual(place['sources'], [{'frame_id': 30, 'label': 42}])
+		self.assertEqual(place['label_weights'], [[42, 2.5]])
+		self.assertEqual(document['native_place_edges'], [['t7', 't8']])
+		self.assertEqual(document['native_places'][1]['description'], '')
+		self.assertNotIn('PRIVATE', json.dumps(document))
+		self.assertNotIn('123.0', json.dumps(document))
+
+	def test_background_objects_keep_their_point_description_and_history_next_to_objects_with_the_same_number(self):
+		graph = graph_document(objects=(3,), background_objects=[
+			{"id": 3, "description": "a widescreen monitor", "position": [0.03, 1.03, 0.93], "label": 186, "first": 7.2, "last": 20.9333,
+				"observations": 138},
+			{"id": 9, "description": "unknown", "position": [1.0, 2.0, 0.5], "reason": ""},
+			{"id": 11, "description": "a mug", "position": [1.0, 2.0, 3.0]},
+		])
+		graph["nodes"][-3]["attributes"]["metadata"].update({"selectframe_clip_feature": [123.0] * 8, "reasoning": "PRIVATE"})
+		graph["nodes"][-3]["attributes"]["metadata"]["temporal_history"].update({"timestamps": [7.2] * 500, "frame_ids": list(range(500))})
+		graph["nodes"][-1]["attributes"]["position"] = [float("nan"), 0.0, 0.0]
+		graph["nodes"][-1]["attributes"]["metadata"].update({"observations": 4, "filter_reason": "too small"})
+		graph["nodes"][-1]["attributes"]["metadata"].pop("filtered_reason")
+		document = normalize_graph(graph)
+		self.assertEqual([item["id"] for item in document["objects"]], ["O3"])
+		self.assertEqual([item["id"] for item in document["background_objects"]], ["o3", "o9", "o11"], "o3 and O3 are two different nodes")
+		monitor, unknown, mug = document["background_objects"]
+		self.assertEqual(monitor, {"id": "o3", "label": 186, "description": "a widescreen monitor", "position": [0.03, 1.03, 0.93],
+			"first_observed": 7.2, "last_observed": 20.933, "observations": 138, "reason": "Filtered by Hydra"})
+		self.assertEqual((unknown["description"], unknown["reason"], unknown["first_observed"], unknown["observations"]), ("", None, None, None),
+			"'unknown' is no description and a graph without a history has no times")
+		self.assertEqual((mug["position"], mug["observations"], mug["reason"]), (None, 4, "too small"),
+			"an unusable position is dropped, an older graph's count and reason keys are read")
+		self.assertEqual(document["counts"]["BACKGROUND_OBJECTS"], 3)
+		text = json.dumps(document, allow_nan=False)
+		self.assertNotIn("PRIVATE", text)
+		self.assertNotIn("123.0", text, "no embedding or CLIP vectors")
+		self.assertLess(len(json.dumps(document["background_objects"])), 2000, "the observation stamps and frame ids stay out of the document")
+
+	def test_a_graph_without_a_background_layer_has_no_background_objects(self):
+		self.assertEqual(normalize_graph(graph_document())["background_objects"], [])
+
+	def test_native_description_can_be_resolved_from_its_labelspace(self):
+		graph = graph_document()
+		graph['metadata']['labelspaces'] = {'_l3p2': [[42, 'a sidewalk'], [0, 'label_0']]}
+		graph['nodes'].extend([graph_node('t1', 3, 2, semantic_label=42, metadata={}),
+			graph_node('t2', 3, 2, semantic_label=0, metadata={})])
+		self.assertEqual([n['description'] for n in normalize_graph(graph)['native_places']], ['a sidewalk', ''])
+
 	def test_objects_places_and_summarized_rooms_are_kept_without_heavy_or_private_fields(self) -> None:
 		document = normalize_graph(graph_document(objects=(0, 3), rooms=True))
 		self.assertEqual([item["id"] for item in document["objects"]], ["O0", "O3"])

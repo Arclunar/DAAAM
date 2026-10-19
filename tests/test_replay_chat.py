@@ -71,8 +71,8 @@ class ChatTestCase(unittest.TestCase):
 	def open_run(self, result: Path):
 		return self.registry.open(str(result))
 
-	def publish_graph(self, run, name="dsg_updated.json", ready=True, marker="raw", objects=(7, 8), rooms=False):
-		document = graph_document(marker, objects=objects, rooms=rooms)
+	def publish_graph(self, run, name="dsg_updated.json", ready=True, marker="raw", objects=(7, 8), rooms=False, background_objects=()):
+		document = graph_document(marker, objects=objects, rooms=rooms, background_objects=background_objects)
 		if not ready:
 			document["metadata"] = {}
 			for node in document["nodes"]:
@@ -338,6 +338,31 @@ class ContextTest(ChatTestCase):
 		self.assertEqual(chat_module.describe_entity(document, "t4"), "semantic place t4: no description")
 		self.assertIsNone(chat_module.describe_entity(document, "t5"), "a place the graph does not have is not described")
 		self.assertIsNone(chat_module.describe_entity({}, "t3"), "a graph without semantic places has none to describe")
+
+	def test_background_objects_are_described_the_way_the_scene_tools_write_them(self):
+		document = {
+			"objects": [{"id": "O186", "description": "a keyboard", "position": [1.0, 2.0, 3.0]}],
+			"background_objects": [
+				{"id": "o186", "description": "a widescreen monitor", "position": [0.03, 1.03, 0.93]},
+				{"id": "o10", "description": "", "position": None},
+			],
+		}
+
+		self.assertEqual(chat_module.describe_entity(document, "o186"), "background object o(186): a widescreen monitor (position 0.03, 1.03, 0.93)")
+		self.assertEqual(chat_module.describe_entity(document, "o10"), "background object o(10): no description")
+		self.assertEqual(chat_module.describe_entity(document, "O186"), "object 186: a keyboard (position 1.00, 2.00, 3.00)", "O186 and o186 are two things")
+		self.assertIsNone(chat_module.describe_entity(document, "o11"), "a background object the graph does not have is not described")
+		self.assertIsNone(chat_module.describe_entity({"objects": document["objects"]}, "o186"), "a graph without background objects has none to describe")
+
+	def test_a_selected_background_object_reaches_the_agent_as_what_the_graph_says_about_it(self):
+		self.publish_graph(self.tum, background_objects=[{"id": 9, "description": "a black computer mouse", "position": [1.0, 2.0, 0.8]}])
+
+		self.ask(self.tum, "q", view_context={"selected_entity": "o9"})
+		self.ask(self.tum, "q", view_context={"selected_entity": "o10"})
+
+		self.assertEqual(self.agent.requests[0].context["selected_entity"], "background object o(9): a black computer mouse (position 1.00, 2.00, 0.80)")
+		self.assertNotIn("selected_entity", self.agent.requests[1].context, "a background object the graph does not have is dropped")
+		self.assertEqual(self.store(self.tum).messages()[0].context["selected_entity"], "o9", "history keeps what the page sent, not the graph's text")
 
 	def test_a_view_that_is_not_an_object_is_refused(self):
 		self.refusal(self.tum, {"question": "q", "view_context": ["replay_time"]}, 400, "request")

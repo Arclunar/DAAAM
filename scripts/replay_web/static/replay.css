@@ -137,7 +137,7 @@ code { font-family: Consolas, "Cascadia Mono", monospace; background: var(--rais
 .entity-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
 .entity-title b { font-size: 14px; }
 .entity-title span { color: var(--muted); font-size: 11px; }
-.entity-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.entity-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
 .entity-tabs button { background: var(--raised); color: #9da6b4; border: 1px solid #353c48; border-radius: 5px; padding: 5px 7px; }
 .entity-tabs button.active { background: var(--accent-fill); border-color: var(--accent); color: #fff; }
 .entity-filter { width: 100%; margin-top: 7px; padding: 5px 7px; background: #171a20; color: var(--text); border: 1px solid #353c48; border-radius: 5px; }

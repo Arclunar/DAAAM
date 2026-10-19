@@ -13,10 +13,15 @@ const CLIP_PLANES = [
   (p) => p[3] + p[0], (p) => p[3] - p[0], (p) => p[3] + p[1],
   (p) => p[3] - p[1], (p) => p[3] + p[2], (p) => p[3] - p[2],
 ];
-const CONTROLS = ['mesh-mode', 'c-bright', 'c-points', 'c-obj', 'bbox-mode', 'label-mode', 'c-places', 'c-pedges', 'c-rooms', 'c-links', 'c-traj', 'c-cam', 'r-size', 'r-space'];
+const CONTROLS = ['mesh-mode', 'c-bright', 'c-points', 'c-obj', 'bbox-mode', 'label-mode', 'c-places', 'c-native-places', 'c-background', 'c-pedges', 'c-rooms', 'c-links', 'c-traj', 'c-cam', 'r-size', 'r-space'];
 const NOTICE_MS = 9000;
+// Background objects o: a pale point inside a dark ring, darker when the graph has no description for one. The objects take every
+// saturated colour and no ring, so no object's node can be taken for a background object's.
+const BACKGROUND_COLOR = [0.93, 0.9, 1.0], BACKGROUND_DIM = [0.48, 0.46, 0.56], BACKGROUND_HALO = [0.06, 0.06, 0.09];
+const BACKGROUND_PICK_PX = 10;   // a click this close to a background marker selects it, boxes behind it or not
 const fmt = (n) => n.toLocaleString('en-US');
 const entityKey = (kind, id) => kind + ':' + id;
+const idNumber = (id) => Number(String(id).slice(1));   // O12 -> 12, o186 -> 186
 const rgb = (color) => 'rgb(' + color.map((v) => Math.round(Math.min(1, v) * 255)).join(',') + ')';
 const row = (a, i) => [a[3 * i], a[3 * i + 1], a[3 * i + 2]];
 
@@ -172,7 +177,9 @@ const TEMPLATE = `
   <label><input type="checkbox" data-role="c-obj" checked> 物体节点</label>
   <div class="row"><span>物体框</span><select data-role="bbox-mode"><option value="selected" selected>仅选中</option><option value="all">全部</option><option value="none">隐藏</option></select></div>
   <div class="row"><span>标签</span><select data-role="label-mode" title="漂浮的描述卡片:全部模式下卡片可以互相重叠,但不会因为相机移动而时隐时现"><option value="selected" selected>仅选中</option><option value="all">全部</option><option value="none">隐藏</option></select></div>
-  <label><input type="checkbox" data-role="c-places" checked> 地点</label>
+  <label><input type="checkbox" data-role="c-places" checked> 几何地点 p(绿色)</label>
+  <label title="来自当前有效场景图,不代表时间轴所选时刻的历史语义"><input type="checkbox" data-role="c-native-places" checked> 语义地点 t(蓝色 · 当前场景图)</label>
+  <label title="问答里写作 o(编号)。DAAAM 跟踪到、但没有作为普通物体放进 Hydra 物体层的目标:只有一个位置点,没有包围盒,来自当前有效场景图,不随时间轴变化"><input type="checkbox" data-role="c-background" checked> 背景物体 o(白点带圈 · 当前场景图)</label>
   <label><input type="checkbox" data-role="c-pedges" checked> 地点连线</label>
   <label><input type="checkbox" data-role="c-rooms" checked> 房间 / 楼宇</label>
   <label><input type="checkbox" data-role="c-links"> 层间连线</label>
@@ -191,6 +198,7 @@ const TEMPLATE = `
       <div class="entity-tabs">
         <button data-role="entity-tab-objects" class="active" type="button">物体</button>
         <button data-role="entity-tab-places" type="button">地点</button>
+        <button data-role="entity-tab-background" type="button" title="背景物体 o(编号):问答里写作 o(编号),只有位置点和描述,来自当前场景图">背景</button>
         <button data-role="entity-tab-rooms" type="button" title="场景图里的房间 / 区域(运行 Postprocess、Summarize 之后出现)">房间</button>
       </div>
       <input data-role="entity-filter" class="entity-filter" type="search" placeholder="筛选编号或描述" autocomplete="off">
@@ -259,7 +267,7 @@ export class ReplayViewer {
     this.N = this.data.count;
     this.cameraLayout = this.sanitizeCameraLayout(this.initialState.cameraLayout);   // camera key -> { x, y, z, big }
     this.S = { cur: -1, snap: null, reference: null, yaw: 0.8, pitch: 0.5, dist: 6, target: [0, 0, 0], dirty: true, wanted: 0, request: 0,
-               selectedKey: null, hidden: new Set(), entityTab: 'objects', section: 'entities', objItems: [], placeItems: [] };
+               selectedKey: null, hidden: new Set(), entityTab: 'objects', section: 'entities', objItems: [], placeItems: [], bgItems: [] };
     this.G = { meshCount: 0, meshTriangles: 0, meshIndexed: 0, meshKey: 'none', meshUploads: 0, indexType: 0, lines: 0, nodes: 0, highlightNodes: 0,
                overlay: { visible: false, segments: 0, corners: 0 } };
     const q = this.D.quant;
@@ -440,7 +448,7 @@ export class ReplayViewer {
     this.el['v-space'].textContent = parseFloat(this.el['r-space'].value).toFixed(1) + ' m';
     if (Array.isArray(state.hidden)) this.S.hidden = new Set(state.hidden.filter((key) => typeof key === 'string'));
     if (typeof state.selected === 'string') this.S.selectedKey = state.selected;
-    if (state.entityTab === 'objects' || state.entityTab === 'places' || state.entityTab === 'rooms') this.S.entityTab = state.entityTab;
+    if (['objects', 'places', 'background', 'rooms'].includes(state.entityTab)) this.S.entityTab = state.entityTab;
     if (state.section === 'entities' || state.section === 'tasks' || state.section === 'chat') this.showSection(state.section);
     this.debug.S = this.S;
     this.updateCameraVisibility();
@@ -469,13 +477,13 @@ export class ReplayViewer {
     return context;
   }
 
-  selectedEntityId() {   // the id the scene graph document uses: O12, p7, t3 or R0
+  selectedEntityId() {   // the id the scene graph document uses: O12, p7, t3, o186 or R0
     const key = this.S.selectedKey;
     if (!key) return null;
     const [kind, raw] = key.split(':');
     if (kind === 'object') return `O${raw}`;
     if (kind === 'place') return `p${raw}`;
-    return kind === 'native-place' || kind === 'room' ? raw : null;
+    return kind === 'native-place' || kind === 'background-object' || kind === 'room' ? raw : null;
   }
 
   // The sidebar shows one section at a time: the entity browser, the task panel or the question panel.
@@ -502,13 +510,15 @@ export class ReplayViewer {
 
   // ------------------------------------------------------------------ scene graph
   // The result's active scene graph (dsg.json … clustered_dsg_with_summaries.json) as the service summarizes it. It only
-  // enriches the entity browser and details; the replayed snapshots, the time, the 3D view and the layout are untouched.
+  // enriches details and adds clearly labelled native-place and background-object overlays from the current graph. Replay time
+  // is untouched.
   indexGraph(document, version) {
-    const idNumber = (id) => Number(String(id).slice(1));
     const objects = new Map((document.objects || []).map((item) => [idNumber(item.id), item]));
     const places = new Map((document.places || []).map((item) => [idNumber(item.id), item]));
+    const nativePlaces = new Map((document.native_places || []).map((item) => [item.id, item]));
+    const backgroundObjects = new Map((document.background_objects || []).map((item) => [item.id, item]));
     const rooms = document.rooms || [];
-    return { version, document, objects, places, rooms, roomsById: new Map(rooms.map((room) => [room.id, room])) };
+    return { version, document, objects, places, nativePlaces, backgroundObjects, rooms, roomsById: new Map(rooms.map((room) => [room.id, room])) };
   }
 
   graphHas(graph, key) {
@@ -516,6 +526,8 @@ export class ReplayViewer {
     const [kind, raw] = key.split(':');
     if (kind === 'object') return graph.objects.has(Number(raw));
     if (kind === 'place') return graph.places.has(Number(raw));
+    if (kind === 'native-place') return graph.nativePlaces.has(raw);
+    if (kind === 'background-object') return graph.backgroundObjects.has(raw);
     if (kind === 'room') return graph.roomsById.has(raw);
     return false;
   }
@@ -530,9 +542,9 @@ export class ReplayViewer {
     this.graphState = 'ready';
     this.droppedKey = missing ? key : null;
     this.renderGraphBadge();
-    if (this.started) this.renderEntityBrowser();
+    if (this.started) { this.refreshEntityItems(); this.S.dirty = true; this.renderEntityBrowser(); this.requestDraw(); }
     return { previous: previous ? previous.version : null, version, selectedEntityMissing: missing,
-             objects: graph.objects.size, places: graph.places.size, rooms: graph.rooms.length };
+             objects: graph.objects.size, backgroundObjects: graph.backgroundObjects.size, places: graph.places.size, rooms: graph.rooms.length };
   }
 
   clearGraph() {   // the result has no graph file (any more); the replay itself is not affected
@@ -540,7 +552,7 @@ export class ReplayViewer {
     this.graphState = 'none';
     this.droppedKey = null;
     this.renderGraphBadge();
-    if (this.started) this.renderEntityBrowser();
+    if (this.started) { this.refreshEntityItems(); this.S.dirty = true; this.renderEntityBrowser(); this.requestDraw(); }
   }
 
   setGraphPending() {
@@ -556,6 +568,8 @@ export class ReplayViewer {
     if (graph) {
       const version = graph.version, summarized = graph.rooms.filter((room) => room.label).length;
       badge.textContent = `场景图 ${version.name} · ${version.token.split('-')[1].slice(0, 6)} · ${graph.objects.size} 个物体`
+        + (graph.nativePlaces.size ? ` · ${graph.nativePlaces.size} 个语义地点` : '')
+        + (graph.backgroundObjects.size ? ` · ${graph.backgroundObjects.size} 个背景物体` : '')
         + (graph.rooms.length ? ` · ${graph.rooms.length} 个房间(${summarized} 个有摘要)` : '');
       badge.title = `${version.name}\n版本 ${version.token}\n${fmt(version.size)} 字节 · 修改于 ${new Date(version.modified * 1000).toLocaleString()}`;
       badge.dataset.graph = version.name;
@@ -646,10 +660,13 @@ export class ReplayViewer {
     this.labelItems = items;
   }
 
-  shorten(item) {   // label text of an object: its description without the article, cut short
-    if (!item.full) return '物体 O' + item.cid;
-    const s = item.full.replace(/^(a|an|the)\s+/i, '');
+  shortText(text) {   // a description without its article, cut short
+    const s = text.replace(/^(a|an|the)\s+/i, '');
     return s.length > 30 ? s.slice(0, 29) + '…' : s;
+  }
+
+  shorten(item) {   // label text of an object: its description without the article, cut short
+    return item.full ? this.shortText(item.full) : '物体 O' + item.cid;
   }
 
   objectAt(id) {
@@ -672,11 +689,41 @@ export class ReplayViewer {
 
   refreshEntityItems() {
     const S = this.S;
-    if (!S.snap) { S.objItems = []; S.placeItems = []; return; }
+    if (!S.snap) { S.objItems = []; S.placeItems = []; S.bgItems = []; return; }
     S.objItems = Array.from(S.snap.obj_cid, (id) => this.objectAt(id));
     const placeIds = S.snap.place_cid || new Int32Array(S.snap.place_rad.length).map((_, i) => i);
     S.placeItems = Array.from(placeIds, (id) => this.placeAt(id));
-    for (const item of [...S.objItems, ...S.placeItems]) item.hidden = S.hidden.has(entityKey(item.kind, item.id));
+    if (this.graph) for (const id of this.graph.nativePlaces.keys()) {
+      const item = this.nativeAt(id); if (item) S.placeItems.push(item);
+    }
+    S.bgItems = this.graph ? [...this.graph.backgroundObjects.keys()].map((id) => this.backgroundAt(id)).filter(Boolean) : [];
+    for (const item of [...S.objItems, ...S.placeItems, ...S.bgItems]) item.hidden = S.hidden.has(entityKey(item.kind, item.id));
+  }
+
+  nativeAt(id) {
+    const node = this.graph && this.graph.nativePlaces.get(id);
+    return node && node.position ? { kind: 'native-place', id, cid: id, center: node.position, color: [0.25, 0.7, 1] } : null;
+  }
+
+  // A background object (o186): a point of the current graph, drawn at its own position. Unlike the objects it belongs to no
+  // snapshot, so it is there whatever time the slider shows; one without a description is drawn darker.
+  backgroundAt(id) {
+    const node = this.graph && this.graph.backgroundObjects.get(id);
+    return node && node.position ? { kind: 'background-object', id, cid: id, label: node.label, center: node.position, full: node.description || '',
+                                     color: node.description ? BACKGROUND_COLOR : BACKGROUND_DIM } : null;
+  }
+
+  backgroundCatalog() {   // described ones first, each group by number
+    const items = this.graph ? [...this.graph.backgroundObjects.values()] : [];
+    return items.sort((a, b) => Number(!a.description) - Number(!b.description) || idNumber(a.id) - idNumber(b.id));
+  }
+
+  backgroundName(id) { return 'o(' + idNumber(id) + ')'; }   // as the questions write it
+
+  placeCatalog() {
+    const geometric = this.D.catalog.places.map((item) => ({ ...item, kind: 'place' }));
+    const native = this.graph ? [...this.graph.nativePlaces.values()].map((item) => ({ ...item, kind: 'native-place' })) : [];
+    return [...native, ...geometric];
   }
 
   catalogItem(kind, id) {
@@ -696,6 +743,8 @@ export class ReplayViewer {
     host.replaceChildren();
     if (!S.selectedKey) { const empty = document.createElement('span'); empty.className = 'entity-empty'; empty.textContent = '选择一个物体或地点查看详情'; host.appendChild(empty); return; }
     if (S.selectedKey.startsWith('room:')) { this.showRoomDetail(host, S.selectedKey.slice(5)); return; }
+    if (S.selectedKey.startsWith('native-place:')) { this.showNativeDetail(host, S.selectedKey.slice(13)); return; }
+    if (S.selectedKey.startsWith('background-object:')) { this.showBackgroundDetail(host, S.selectedKey.slice(18)); return; }
     const [kind, rawId] = S.selectedKey.split(':'), id = Number(rawId), history = this.catalogItem(kind, id);
     const current = kind === 'object' ? this.objectAt(id) : this.placeAt(id);
     const node = this.graph ? (kind === 'object' ? this.graph.objects.get(id) : this.graph.places.get(id)) : null;
@@ -720,6 +769,64 @@ export class ReplayViewer {
     if (source) lines.push('描述来源 frame ' + source.frame_id + (source.timestamp == null ? '' : ' · ' + this.sourceTime(source.timestamp)) + (source.image ? '' : ' · 没有这一帧的图像'));
     lines.push(current ? '当前快照中可见' : '当前快照中未出现', S.hidden.has(S.selectedKey) ? '已手动隐藏' : '正在显示');
     if (this.graph) lines.push(...this.graphLines(node));
+    meta.textContent = lines.join('\n');
+    host.append(title, description, meta);
+  }
+
+  showNativeDetail(host, id) {
+    const place = this.graph && this.graph.nativePlaces.get(id);
+    const title = document.createElement('div'); title.className = 'detail-title'; title.textContent = '语义地点 ' + id;
+    const description = document.createElement('div'); description.className = 'detail-description';
+    description.textContent = place ? (place.description || '暂无有效语义') : '当前场景图中没有这个地点';
+    const meta = document.createElement('div'); meta.className = 'detail-meta';
+    const lines = ['来自当前场景图 · 不表示时间轴所选时刻的历史语义'];
+    if (place) {
+      if (place.label != null) lines.push('语义标签 ' + place.label);
+      if (place.position) lines.push('位置 (' + place.position.map((v) => v.toFixed(2)).join(', ') + ')');
+      if (place.label_weights.length) lines.push('标签投票权重 ' + place.label_weights.map(([label, weight]) => label + ': ' + weight.toFixed(3)).join(' · '));
+      lines.push(...this.graphLines(place));
+      if (!place.sources.length) lines.push('没有记录语义投票来源帧');
+      else lines.push('语义投票来源(数据集帧编号):' + place.sources.map((s) => s.frame_id).join(', '));
+      if (place.source_count > place.sources.length) lines.push('显示前 ' + place.sources.length + ' / ' + place.source_count + ' 条来源');
+    }
+    meta.textContent = lines.join('\n'); host.append(title, description, meta);
+    for (const source of place ? place.sources : []) {
+      const image = this.data.exactFrameImage(source.frame_id);
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'entity-source';
+      button.textContent = '数据集帧 ' + source.frame_id; button.disabled = !image;
+      button.title = image ? '打开语义投票所用图像(不移动时间轴)' : '数据包未包含这一帧图像';
+      button.onclick = () => {
+        this.el['description-source-caption'].textContent = '语义地点 ' + id + ' · 语义投票来源 · 数据集帧 ' + source.frame_id + ' · fragment 标签 ' + source.label;
+        this.el['description-source-image'].src = image.url;
+        this.el['description-source-modal'].classList.add('open');
+      };
+      host.appendChild(button);
+    }
+  }
+
+  replayTime(stamp) { return stamp - (this.manifest.dataset.time_origin || 0); }   // a stamp of the graph on this replay's clock
+
+  showBackgroundDetail(host, id) {
+    const S = this.S, node = this.graph && this.graph.backgroundObjects.get(id);
+    const title = document.createElement('div'); title.className = 'detail-title'; title.textContent = '背景物体 ' + this.backgroundName(id);
+    const description = document.createElement('div'); description.className = 'detail-description';
+    description.textContent = node ? (node.description || '(没有 DAM 文本描述)') : '当前场景图中没有这个背景物体';
+    const meta = document.createElement('div'); meta.className = 'detail-meta';
+    const lines = ['来自当前场景图 · 不随时间轴变化'];
+    if (node) {
+      if (node.label != null) lines.push('语义标签 ' + node.label);
+      if (node.position) lines.push('位置 (' + node.position.map((v) => v.toFixed(2)).join(', ') + ')');
+      else lines.push('场景图没有记录它的位置,地图里不画');
+      lines.push('只有位置点,没有包围盒' + (node.reason ? ' · 场景图记录的原因:' + node.reason : ''));
+      if (node.first_observed != null && node.last_observed != null) {
+        lines.push('首次 ' + this.replayTime(node.first_observed).toFixed(1) + ' s · 末次 ' + this.replayTime(node.last_observed).toFixed(1) + ' s'
+          + (node.observations != null ? ' · 观测 ' + node.observations + ' 次' : ''));
+      } else if (node.observations != null) lines.push('观测 ' + node.observations + ' 次');
+      const source = node.description ? this.descriptionSource(node.label) : null;
+      if (source) lines.push('描述来源 frame ' + source.frame_id + (source.timestamp == null ? '' : ' · ' + this.sourceTime(source.timestamp)) + (source.image ? '' : ' · 没有这一帧的图像'));
+      lines.push(S.hidden.has(S.selectedKey) ? '已手动隐藏' : this.backgroundAt(id) ? '正在显示' : '没有位置,不显示');
+    }
+    lines.push(...this.graphLines(node));
     meta.textContent = lines.join('\n');
     host.append(title, description, meta);
   }
@@ -758,8 +865,8 @@ export class ReplayViewer {
 
   openDescriptionSource(item, source) {   // opens the modal only: never calls show()
     if (!source || !source.image) return;
-    const image = source.image;
-    this.el['description-source-caption'].textContent = '物体 O' + item.id + ' · 描述来源 frame ' + source.frame_id + ' · 相机 ' + image.camera
+    const image = source.image, name = item.kind === 'background-object' ? '背景物体 ' + this.backgroundName(item.id) : '物体 O' + item.id;
+    this.el['description-source-caption'].textContent = name + ' · 描述来源 frame ' + source.frame_id + ' · 相机 ' + image.camera
       + (source.timestamp == null ? '' : ' · ' + this.sourceTime(source.timestamp)) + ' · 数据集帧 ' + image.index;
     this.el['description-source-image'].src = image.url;
     this.el['description-source-modal'].classList.add('open');
@@ -772,7 +879,52 @@ export class ReplayViewer {
   }
 
   markEntityTabs() {
-    for (const name of ['objects', 'places', 'rooms']) this.el['entity-tab-' + name].classList.toggle('active', this.S.entityTab === name);
+    for (const name of ['objects', 'places', 'background', 'rooms']) this.el['entity-tab-' + name].classList.toggle('active', this.S.entityTab === name);
+  }
+
+  renderBackgroundBrowser() {   // the background objects (o) of the current graph: a point and a description each, no box, no timeline
+    const S = this.S, items = this.backgroundCatalog();
+    this.markEntityTabs();
+    const query = this.el['entity-filter'].value.trim().toLowerCase();
+    const filtered = items.filter((node) => {
+      const number = idNumber(node.id);
+      return !query || [String(number), node.id, 'o(' + number + ')', (node.description || '').toLowerCase()].some((text) => text.includes(query));
+    });
+    this.el['entity-count'].textContent = filtered.length + ' / ' + items.length;
+    const list = this.el['entity-list'], scroll = list.scrollTop;
+    list.replaceChildren();
+    if (!filtered.length) {
+      const empty = document.createElement('div'); empty.className = 'entity-empty';
+      empty.textContent = items.length ? '没有匹配的背景物体' : this.graph ? '当前场景图没有背景物体' : '还没有场景图';
+      list.appendChild(empty);
+    }
+    for (const node of filtered) {
+      const key = entityKey('background-object', node.id), current = this.backgroundAt(node.id);
+      const rowEl = document.createElement('div'); rowEl.className = 'entity-row'; rowEl.dataset.entityKey = key;
+      rowEl.classList.toggle('active', S.selectedKey === key); rowEl.classList.toggle('absent', !current); rowEl.classList.toggle('hidden', S.hidden.has(key));
+      const dot = document.createElement('span'); dot.className = 'entity-dot'; dot.style.background = rgb(node.description ? BACKGROUND_COLOR : BACKGROUND_DIM);
+      const copy = document.createElement('div'); copy.className = 'entity-copy';
+      const name = document.createElement('div'); name.className = 'entity-name'; name.textContent = this.backgroundName(node.id) + ' · ' + (node.description || '(无描述)');
+      const meta = document.createElement('div'); meta.className = 'entity-meta';
+      const seen = node.first_observed != null && node.last_observed != null
+        ? this.replayTime(node.first_observed).toFixed(1) + '–' + this.replayTime(node.last_observed).toFixed(1) + ' s' : '';
+      meta.textContent = ['背景物体', current ? '' : '没有位置', node.observations != null ? '观测 ' + node.observations + ' 次' : '', seen].filter(Boolean).join(' · ');
+      copy.append(name, meta);
+      const source = node.description ? this.descriptionSource(node.label) : null;
+      const sourceButton = document.createElement('button'); sourceButton.type = 'button'; sourceButton.className = 'entity-source';
+      sourceButton.disabled = !(source && source.image);
+      sourceButton.textContent = sourceButton.disabled ? '无描述源帧' : '描述源帧';
+      sourceButton.title = !source ? '没有记录 DAM 描述来源(不从观测推测)' : source.image ? '打开 DAM 描述所用的 frame ' + source.frame_id : '数据包里没有 frame ' + source.frame_id + ' 的图像';
+      sourceButton.onclick = (event) => { event.stopPropagation(); this.openDescriptionSource({ kind: 'background-object', id: node.id }, source); };
+      const eye = document.createElement('button'); eye.type = 'button'; eye.className = 'entity-eye';
+      eye.textContent = S.hidden.has(key) ? '◌' : '◉'; eye.title = S.hidden.has(key) ? '显示这个实体' : '隐藏这个实体';
+      eye.onclick = (event) => { event.stopPropagation(); if (S.hidden.has(key)) S.hidden.delete(key); else S.hidden.add(key); S.dirty = true; this.renderEntityBrowser(); this.requestDraw(); this.changed(); };
+      rowEl.onclick = () => this.selectEntity('background-object', node.id);
+      rowEl.append(dot, copy, sourceButton, eye);
+      list.appendChild(rowEl);
+    }
+    list.scrollTop = scroll;
+    this.showEntityDetail();
   }
 
   renderRoomBrowser() {
@@ -816,11 +968,12 @@ export class ReplayViewer {
 
   renderEntityBrowser() {
     if (this.S.entityTab === 'rooms') { this.renderRoomBrowser(); return; }
-    const S = this.S, D = this.D, isObject = S.entityTab === 'objects', items = isObject ? D.catalog.objects : D.catalog.places;
+    if (this.S.entityTab === 'background') { this.renderBackgroundBrowser(); return; }
+    const S = this.S, D = this.D, isObject = S.entityTab === 'objects', items = isObject ? D.catalog.objects : this.placeCatalog();
     this.markEntityTabs();
     const query = this.el['entity-filter'].value.trim().toLowerCase();
     const filtered = items.filter((item) => {
-      const name = isObject ? (D.labels[String(item.label)] || '') : '';
+      const name = isObject ? (D.labels[String(item.label)] || '') : (item.description || '');
       return !query || String(item.id).includes(query) || name.toLowerCase().includes(query);
     });
     this.el['entity-count'].textContent = filtered.length + ' / ' + items.length;
@@ -828,15 +981,17 @@ export class ReplayViewer {
     list.replaceChildren();
     if (!filtered.length) { const empty = document.createElement('div'); empty.className = 'entity-empty'; empty.textContent = '没有匹配的实体'; list.appendChild(empty); }
     for (const item of filtered) {
-      const kind = isObject ? 'object' : 'place', key = entityKey(kind, item.id), current = isObject ? this.objectAt(item.id) : this.placeAt(item.id);
+      const kind = isObject ? 'object' : item.kind, native = kind === 'native-place';
+      const key = entityKey(kind, item.id), current = isObject ? this.objectAt(item.id) : native ? this.nativeAt(item.id) : this.placeAt(item.id);
       const rowEl = document.createElement('div'); rowEl.className = 'entity-row'; rowEl.dataset.entityKey = key;
       rowEl.classList.toggle('active', S.selectedKey === key); rowEl.classList.toggle('absent', !current); rowEl.classList.toggle('hidden', S.hidden.has(key));
-      const dot = document.createElement('span'); dot.className = 'entity-dot'; dot.style.background = rgb(isObject ? hue(item.label) : [0.3, 0.9, 0.5]);
+      const dot = document.createElement('span'); dot.className = 'entity-dot'; dot.style.background = rgb(isObject ? hue(item.label) : native ? [0.25, 0.7, 1] : [0.3, 0.9, 0.5]);
       const copy = document.createElement('div'); copy.className = 'entity-copy';
       const name = document.createElement('div'); name.className = 'entity-name';
-      name.textContent = (isObject ? 'O' : 'p') + item.id + (isObject && D.labels[String(item.label)] ? ' · ' + D.labels[String(item.label)] : '');
+      name.textContent = native ? '语义 ' + item.id + ' · ' + (item.description || '暂无有效语义')
+        : (isObject ? 'O' : '几何 p') + item.id + (isObject && D.labels[String(item.label)] ? ' · ' + D.labels[String(item.label)] : '');
       const meta = document.createElement('div'); meta.className = 'entity-meta';
-      meta.textContent = (current ? '当前可见' : '当前未出现') + ' · ' + item.count + ' 个快照';
+      meta.textContent = native ? '当前场景图 · 原生 traversability place' : (current ? '当前可见' : '当前未出现') + ' · ' + item.count + ' 个快照';
       copy.append(name, meta);
       const eye = document.createElement('button'); eye.type = 'button'; eye.className = 'entity-eye';
       eye.textContent = S.hidden.has(key) ? '◌' : '◉'; eye.title = S.hidden.has(key) ? '显示这个实体' : '隐藏这个实体';
@@ -872,7 +1027,7 @@ export class ReplayViewer {
   selectEntity(kind, id, { revealInList = false } = {}) {   // highlights only: never calls show() or changes the snapshot
     const S = this.S, key = entityKey(kind, id);
     S.selectedKey = key;
-    if (revealInList) S.entityTab = kind === 'object' ? 'objects' : 'places';
+    if (revealInList) S.entityTab = kind === 'object' ? 'objects' : kind === 'background-object' ? 'background' : 'places';
     S.dirty = true; this.renderEntityBrowser(); this.requestDraw();
     if (revealInList) this.revealEntityRow(key);
     this.changed();
@@ -931,6 +1086,36 @@ export class ReplayViewer {
       if (item.hidden || !el['c-places'].checked) continue;
       if (picked) highlightNode(lift(item.center, 1), 0.075); else node(lift(item.center, 1), item.color, 0.035);
       if (wantLabel(picked)) labels.push({ key: entityKey('place', cid), pos: lift(item.center, 1), text: '地点 p' + cid, color: item.color, selected: picked });
+    }
+    if (this.graph) for (const place of this.graph.nativePlaces.values()) {
+      const item = this.nativeAt(place.id); if (!item) continue;
+      const key = entityKey(item.kind, item.id), picked = key === S.selectedKey;
+      item.hidden = S.hidden.has(key); S.placeItems.push(item);
+      if (item.hidden || !el['c-native-places'].checked) continue;
+      if (picked) highlightNode(lift(item.center, 1), 0.085); else node(lift(item.center, 1), item.color, 0.045);
+      if (wantLabel(picked)) labels.push({ key, pos: lift(item.center, 1),
+        text: '语义地点 ' + place.id + ' · ' + (place.description || '暂无有效语义'), color: item.color, selected: picked });
+    }
+    if (this.graph && el['c-native-places'].checked && el['c-pedges'].checked) {
+      for (const [from, to] of this.graph.document.native_place_edges || []) {
+        const a = this.nativeAt(from), b = this.nativeAt(to);
+        if (a && b && !S.hidden.has(entityKey(a.kind, a.id)) && !S.hidden.has(entityKey(b.kind, b.id)))
+          line(lift(a.center, 1), lift(b.center, 1), [0.15, 0.45, 0.75]);
+      }
+    }
+    S.bgItems = [];   // every background object of the current graph, for labels and picking: points in the objects' own layer, no lift
+    if (this.graph) for (const entry of this.graph.backgroundObjects.values()) {
+      const item = this.backgroundAt(entry.id); if (!item) continue;
+      const key = entityKey(item.kind, item.id), picked = key === S.selectedKey;
+      item.hidden = S.hidden.has(key); S.bgItems.push(item);
+      if (item.hidden || !el['c-background'].checked) continue;
+      if (picked) highlightNode(item.center, 0.085);
+      else {   // the ring is a larger node at the same place, drawn after the core: its depth equals the core's, so it only shows around it
+        const size = item.full ? 0.03 : 0.022;
+        node(item.center, item.color, size); node(item.center, BACKGROUND_HALO, size * 1.6);
+      }
+      if (wantLabel(picked)) labels.push({ key, pos: [item.center[0], item.center[1], item.center[2] + 0.04],
+        text: '背景物体 ' + this.backgroundName(item.id) + (item.full ? ' · ' + this.shortText(item.full) : ''), color: item.color, selected: picked });
     }
     if (el['c-pedges'].checked) for (let e = 0; e < a.place_edges.length; e += 2) {
       const u = a.place_edges[e], v = a.place_edges[e + 1];
@@ -1167,8 +1352,15 @@ export class ReplayViewer {
     G.overlay.segments = segments.length; G.overlay.corners = corners.length; G.overlay.visible = segments.length > 0;
   }
 
-  pick(clientX, clientY) {   // select inside the clipped visible bbox polygon; smaller and then nearer overlaps win
+  pick(clientX, clientY) {   // a background marker under the cursor, else inside the clipped visible bbox polygon (smaller and then nearer overlaps win), else the nearest place
     const S = this.S, r = this.canvas.getBoundingClientRect(), x = clientX - r.left, y = clientY - r.top;
+    let bestBackground = null, backgroundDistance = BACKGROUND_PICK_PX;   // markers sit inside the boxes of the objects around them, so they come first
+    if (this.el['c-background'].checked) for (const it of S.bgItems || []) {
+      if (it.hidden) continue;
+      const s = this.project(it.center), distance = s ? Math.hypot(s[0] - x, s[1] - y) : Infinity;
+      if (distance < backgroundDistance) { backgroundDistance = distance; bestBackground = it; }
+    }
+    if (bestBackground) { this.selectEntity('background-object', bestBackground.id, { revealInList: true }); return; }
     const hits = [];
     for (const it of S.objItems || []) {
       if (it.hidden) continue;
@@ -1181,11 +1373,12 @@ export class ReplayViewer {
     const sp = parseFloat(this.el['r-space'].value);
     for (const it of S.placeItems || []) {
       if (it.hidden) continue;
+      if (!this.el[it.kind === 'native-place' ? 'c-native-places' : 'c-places'].checked) continue;
       const s = this.project([it.center[0], it.center[1], it.center[2] + sp]);
       const distance = s ? Math.hypot(s[0] - x, s[1] - y) : Infinity;
       if (distance < bestDistance) { bestDistance = distance; bestPlace = it; }
     }
-    if (bestPlace) this.selectEntity('place', bestPlace.cid, { revealInList: true });
+    if (bestPlace) this.selectEntity(bestPlace.kind, bestPlace.cid, { revealInList: true });
     else this.clearSelection();
   }
 
@@ -1450,6 +1643,7 @@ export class ReplayViewer {
     el['c-cam'].addEventListener('input', () => this.updateCameraVisibility());
     el['entity-tab-objects'].onclick = () => { S.entityTab = 'objects'; this.renderEntityBrowser(); this.changed(); };
     el['entity-tab-places'].onclick = () => { S.entityTab = 'places'; this.renderEntityBrowser(); this.changed(); };
+    el['entity-tab-background'].onclick = () => { S.entityTab = 'background'; this.renderEntityBrowser(); this.changed(); };
     el['entity-tab-rooms'].onclick = () => { S.entityTab = 'rooms'; this.renderEntityBrowser(); this.changed(); };
     for (const button of this.root.querySelectorAll('[data-section-tab]')) button.onclick = () => { this.showSection(button.dataset.sectionTab); this.changed(); };
     el['entity-filter'].addEventListener('input', () => this.renderEntityBrowser());

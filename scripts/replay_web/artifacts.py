@@ -226,6 +226,10 @@ def _count(value: Any) -> Optional[int]:
 	return value if _is_int(value) and value >= 0 else None
 
 
+def _seconds(value: Any) -> Optional[float]:
+	return round(float(value), 3) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
 def _model_name(provenance: Any, key: str) -> Optional[str]:
 	entry = provenance.get(key) if isinstance(provenance, dict) else None
 	name = entry.get("model_name") if isinstance(entry, dict) else None
@@ -233,7 +237,7 @@ def _model_name(provenance: Any, key: str) -> Optional[str]:
 
 
 def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
-	"""The part of a validated scene graph that the workspace keeps: objects, places and rooms with their links."""
+	"""The part of a validated scene graph that the workspace keeps: objects, background objects, places and rooms with their links."""
 	layer_of: Dict[int, Tuple[int, int]] = {}
 	counts: Dict[str, int] = {}
 	for item in value["nodes"]:
@@ -254,7 +258,14 @@ def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
 		room = parent.get(node)
 		return room if room is not None and layer_of[room][0] == 4 else None
 
-	objects, places, rooms = [], [], []
+	objects, background_objects, places, native_places, rooms = [], [], [], [], []
+	graph_metadata = value.get('metadata') if isinstance(value.get('metadata'), dict) else {}
+	labelspaces = graph_metadata.get('labelspaces', {})
+	native_names = {}
+	if isinstance(labelspaces, dict) and isinstance(labelspaces.get('_l3p2', []), list):
+		for pair in labelspaces.get('_l3p2', []):
+			if isinstance(pair, (list, tuple)) and len(pair) == 2 and _count(pair[0]) is not None:
+				native_names[pair[0]] = _text(pair[1])
 	room_places: Dict[int, int] = {}
 	room_objects: Dict[int, int] = {}
 	embedded = 0
@@ -279,6 +290,20 @@ def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
 				"room": _symbol(room) if room is not None else None,
 				"_order": _index(node),
 			})
+		elif key == (2, 2):   # a tracked target Hydra did not keep as an object: a point with a description, no box
+			history = metadata.get("temporal_history") if isinstance(metadata.get("temporal_history"), dict) else {}
+			description = _text(metadata.get("description"))
+			background_objects.append({
+				"id": _symbol(node),
+				"label": _count(attributes.get("semantic_label")),
+				"description": "" if description.lower() == "unknown" else description,
+				"position": _vector(attributes.get("position")),
+				"first_observed": _seconds(history.get("first_observed")),
+				"last_observed": _seconds(history.get("last_observed")),
+				"observations": _count(history.get("observation_count", metadata.get("observations"))),
+				"reason": _text(metadata.get("filtered_reason") or metadata.get("filter_reason")) or None,
+				"_order": _index(node),
+			})
 		elif key[0] == 3:
 			room = parent.get(node)
 			if room is not None and layer_of[room][0] == 4:
@@ -287,6 +312,34 @@ def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
 				room = None
 			if key == (3, 0):
 				places.append({"id": _symbol(node), "room": _symbol(room) if room is not None else None, "_order": _index(node)})
+			elif key == (3, 2):
+				label = _count(attributes.get('semantic_label'))
+				description = _text(metadata.get('description')) or native_names.get(label, '')
+				if description.lower() == 'unknown' or description.startswith('label_'):
+					description = ''
+				weights = attributes.get('label_weights', [])
+				if isinstance(weights, dict):
+					weights = list(weights.items())
+				votes = []
+				for pair in weights if isinstance(weights, (list, tuple)) else []:
+					if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+						continue
+					sem, weight = pair
+					if _count(sem) is not None and isinstance(weight, (float, int)) and not isinstance(weight, bool) and math.isfinite(weight) and weight > 0:
+						votes.append([sem, round(float(weight), 6)])
+				votes.sort(key=lambda pair: (-pair[1], pair[0]))
+				lifting = metadata.get('semantic_lifting')
+				lifting = lifting if isinstance(lifting, dict) else {}
+				sources, source_count = [], 0
+				for source in lifting.get('sources', []) if isinstance(lifting.get('sources'), list) else []:
+					if isinstance(source, dict) and _count(source.get('frame_id')) is not None and _count(source.get('label')) is not None:
+						source_count += 1
+						if len(sources) < 32:
+							sources.append({'frame_id': source['frame_id'], 'label': source['label']})
+				native_places.append({'id': _symbol(node), 'position': _vector(attributes.get('position')),
+					'label': label, 'description': description, 'label_weights': votes[:16],
+					'sources': sources, 'source_count': source_count, 'method': _text(lifting.get('method')),
+					'room': _symbol(room) if room is not None else None, '_order': _index(node)})
 		elif key[0] == 4:
 			rooms.append((node, attributes, metadata))
 	room_items = []
@@ -303,7 +356,7 @@ def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
 			"linked_objects": room_objects.get(node, 0),   # through edges only: a graph may assign objects by position instead
 			"_order": _index(node),
 		})
-	for items in (objects, places, room_items):
+	for items in (objects, background_objects, places, native_places, room_items):
 		items.sort(key=lambda entry: entry["_order"])
 		for entry in items:
 			del entry["_order"]
@@ -316,7 +369,11 @@ def normalize_graph(value: Mapping[str, Any]) -> Dict[str, Any]:
 		"spark_dsg": ".".join(str(release[key]) for key in ("major", "minor", "patch") if _is_int(release.get(key))) or None,
 		"counts": counts,
 		"objects": objects,
+		"background_objects": background_objects,
 		"places": places,
+		"native_places": native_places,
+		"native_place_edges": [[_symbol(edge['source']), _symbol(edge['target'])] for edge in value.get('edges', [])
+			if layer_of.get(edge['source']) == (3, 2) and layer_of.get(edge['target']) == (3, 2)],
 		"rooms": room_items,
 		"summaries": sum(1 for room in room_items if room["label"]),
 		"embeddings": {"sentence": _model_name(provenance, "sentence"), "clip": _model_name(provenance, "clip"), "objects": embedded},

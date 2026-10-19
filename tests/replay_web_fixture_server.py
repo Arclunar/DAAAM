@@ -171,9 +171,13 @@ class Fixtures:
 	def exists(self, path: str) -> Dict[str, Any]:
 		return {"manifest": (Path(path) / "replay" / "manifest.json").is_file(), "result": Path(path).is_dir()}
 
-	def write_graph(self, path: str, name: str, objects: Optional[List[int]] = None, rooms: Any = False, marker: str = "fixture") -> Dict[str, Any]:
-		"""Publish a scene graph file (objects O<n>, optionally summarized rooms [[label, description], ...]) by atomic rename."""
-		write_graph(Path(path) / name, marker, atomic=True, objects=objects if objects is not None else [7, 8], rooms=rooms)
+	def write_graph(self, path: str, name: str, objects: Optional[List[int]] = None, rooms: Any = False, marker: str = "fixture",
+			native_places: bool = False, native_description: str = 'wooden floor',
+			background_objects: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+		"""Publish a scene graph file (objects O<n>, optionally summarized rooms [[label, description], ...] and background
+		objects [{"id", "description", "position", ...}], see tests/replay_fixtures.py) by atomic rename."""
+		write_graph(Path(path) / name, marker, atomic=True, objects=objects if objects is not None else [7, 8], rooms=rooms,
+			native_places=native_places, native_description=native_description, background_objects=background_objects or ())
 		return {}
 
 	def write_text(self, path: str, name: str, text: str) -> Dict[str, Any]:

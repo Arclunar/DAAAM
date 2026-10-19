@@ -114,13 +114,15 @@ def describe_entity(document: Mapping[str, Any], entity: str) -> Optional[str]:
 	if not isinstance(entity, str) or not _ENTITY.fullmatch(entity):
 		return None
 	kind, number = entity[0], int(entity[1:])
-	lists = {"O": "objects", "p": "places", "t": "native_places", "R": "rooms"}
+	lists = {"O": "objects", "o": "background_objects", "p": "places", "t": "native_places", "R": "rooms"}
 	items = document.get(lists.get(kind, "")) if hasattr(document, "get") else None
 	item = next((candidate for candidate in items or () if isinstance(candidate, Mapping) and candidate.get("id") == entity), None)
 	if item is None:
 		return None
 	if kind == "O":
 		return "object %d: %s%s" % (number, _line(item.get("description")) or "no description", _position(item))
+	if kind == "o":   # written the way the scene tools write it, so the Agent can match it with their results
+		return "background object o(%d): %s%s" % (number, _line(item.get("description")) or "no description", _position(item))
 	if kind == "p":
 		return "place %d%s%s" % (number, " in room %s" % item["room"] if item.get("room") else "", _position(item))
 	if kind == "t":
