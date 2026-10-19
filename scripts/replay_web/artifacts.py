@@ -450,7 +450,10 @@ class ArtifactMonitor:
 			self.registry.remove_listener(self._registry_changed)
 		self._stop.set()
 		self._wake.set()
-		thread.join(timeout)
+		# Ctrl+C may arrive between creating the thread and Thread.start().
+		# If startup was interrupted, the stop event also covers a late start.
+		if thread.ident is not None and thread is not threading.current_thread():
+			thread.join(timeout)
 
 	def request_scan(self) -> None:
 		"""Scan soon (a result was opened or a job finished) instead of at the next interval."""

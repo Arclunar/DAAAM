@@ -30,6 +30,7 @@ import os
 import queue
 import re
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -631,15 +632,18 @@ class ReplayHTTPServer(ThreadingHTTPServer):
 		self.service = service
 
 	def serve_forever(self, poll_interval: float = 0.5) -> None:
-		self.service.start()
 		try:
+			self.service.start()
 			super().serve_forever(poll_interval)
 		finally:
-			self.service.stop()
+			self.server_close()
 
 	def server_close(self) -> None:
-		self.service.stop()   # streams still open must end before their sockets are closed
-		super().server_close()
+		# Stop accepting requests before waiting for jobs/monitor cleanup.
+		try:
+			super().server_close()
+		finally:
+			self.service.stop()
 
 
 def create_server(config: ServerConfig, registry: Optional[RunRegistry] = None, jobs: Optional[JobManager] = None, agent: Any = None) -> ReplayHTTPServer:
@@ -692,16 +696,31 @@ def main(argv: Optional[List[str]] = None) -> int:
 		print(f"[replay-web] cannot listen on {args.host}:{args.port} ({error}); is another `just replay-web` running? Try: just replay-web port={args.port + 1}", file=sys.stderr)
 		return 1
 	url = f"http://{args.host}:{server.server_address[1]}/replay.html"
-	print(f"[replay-web] replay workspace: {url}", flush=True)
-	print(f"[replay-web] results listed from {config.output_root}; any other result directory can be opened by its path. Ctrl+C stops.", flush=True)
-	if args.open:
-		open_browser(url)
+	previous_signals = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+	def stop_signal(signum, frame):
+		# Explicit handlers also recover from SIG_IGN inherited from a shell
+		# background launch. Repeated interrupts must not break durable cleanup.
+		for sig in previous_signals:
+			signal.signal(sig, signal.SIG_IGN)
+		raise KeyboardInterrupt
+
+	for sig in previous_signals:
+		signal.signal(sig, stop_signal)
 	try:
+		print(f"[replay-web] replay workspace: {url}", flush=True)
+		print(f"[replay-web] results listed from {config.output_root}; any other result directory can be opened by its path. Ctrl+C stops.", flush=True)
+		if args.open:
+			open_browser(url)
 		server.serve_forever()
 	except KeyboardInterrupt:
 		print("\n[replay-web] stopped", flush=True)
 	finally:
-		server.server_close()
+		try:
+			server.server_close()
+		finally:
+			for sig, handler in previous_signals.items():
+				signal.signal(sig, handler)
 	return 0
 
 
