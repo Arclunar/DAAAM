@@ -1,11 +1,11 @@
-# TUM RGB-D outputs contain ordinary PLACES nodes. CODa instead clusters its
-# TRAVERSABILITY layer, so it keeps using daaam_ros's default CODa config.
+# Cluster DAAAM's native image-labelled traversability places. Ordinary GVD
+# PLACES remain a geometric skeleton and are not a substitute for these labels.
 daaam_labels:
   feature_type: BOTH
   distance_metric:
     type: cosine
 
-places_layer: PLACES
+places_layer: TRAVERSABILITY
 merge_label_strategy: SINGLE_MAX
 node_distance_aggregation: MAX
 
@@ -23,7 +23,5 @@ room_finder:
   dilation_diff_threshold_m: -1.0
 
 backend:
-  # cluster_places only knows TraversabilityNodeAttributes. The wrapper adapts
-  # ordinary PlaceNodeAttributes temporarily, so its incompatible merge
-  # functors must not run; the restored result keeps the original place nodes.
+  # Preserve the existing native place topology during offline semantic clustering.
   enable_node_merging: false

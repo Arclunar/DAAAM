@@ -15,9 +15,11 @@
 #   TOTAL (number of frames; default: the depth maps in $CODA_ROOT_DIR/3d_raw_estimated/cam0/0).
 #
 # The bag of a chunk is named after its frame range, $CODA_ROOT_DIR/coda_0_f<first>-<end>_<time>.bag, and a bag that
-# exists already for exactly that range (complete = it has metadata.yaml) is reused. Per chunk the logs are in
-# $CODA_ROOT_DIR/../output/coda_run_chunk<k>of<N>/ (bag.log, console.log, launch.log, play.log) and the results in
-# output/coda/out_<time>/; one line per chunk goes to output/coda_chunks.tsv.
+# exists already for exactly that range is reused when it is complete (metadata.yaml) and carries the replay sidecar
+# daaam_replay.json that scripts/make_coda_bag.sh writes; an older bag without it is recorded again, so that every
+# chunk's result gets its replay bundle. Per chunk the logs are in output/coda_run_chunk<k>of<N>/ (bag.log, console.log,
+# launch.log, play.log) and the results in output/coda/out_<time>/, all inside the repository (the bags stay under
+# $CODA_ROOT_DIR); one line per chunk goes to output/coda_chunks.tsv.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 : "${CODA_ROOT_DIR:?set CODA_ROOT_DIR (the compose file sets it to /data/CODa)}"
@@ -37,16 +39,16 @@ fi
 BASE=$((TOTAL / N))
 RATE="${RATE:-0.3}"
 LABELS="${LABELS:-$([ "${N}" -ge 4 ] && echo 1000 || echo 5000)}"
-OUT_ROOT="$(realpath -m "${CODA_ROOT_DIR}/../output")"
+OUT_ROOT="$(pwd)/output"
 TSV="${OUT_ROOT}/coda_chunks.tsv"
 mkdir -p "${OUT_ROOT}"
 
-newest_complete_bag() {   # newest bag of the chunk $1 that the dataloader closed (it writes metadata.yaml then)
+newest_complete_bag() {   # newest bag of the chunk $1 that the dataloader closed (metadata.yaml) with its replay sidecar
   local b
   # the names are made by the dataloader (no spaces), and ls -t gives the newest first
   # shellcheck disable=SC2045
   for b in $(ls -dt "${CODA_ROOT_DIR}/$1"_*.bag 2>/dev/null); do
-    if [ -f "${b}/metadata.yaml" ]; then echo "${b}"; return; fi
+    if [ -f "${b}/metadata.yaml" ] && [ -f "${b}/daaam_replay.json" ]; then echo "${b}"; return; fi
   done
 }
 

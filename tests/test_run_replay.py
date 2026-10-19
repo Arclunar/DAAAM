@@ -52,6 +52,12 @@ class RunReplayTest(unittest.TestCase):
 			while [ "$#" -gt 0 ]; do
 			  if [ "$1" = --out ]; then out="$2"; shift 2; else shift; fi
 			done
+			if [ "$mode" = finalize ]; then
+			  if [ "${{FAKE_FINALIZE_RC:-0}}" != 0 ]; then echo "fake finalize failure" >&2; exit "${{FAKE_FINALIZE_RC}}"; fi
+			  mkdir -p "$out"
+			  : > "$out/manifest.json"
+			  exit 0
+			fi
 			mkdir -p "$(dirname "$out")"
 			: > "$out"
 			""",
@@ -114,6 +120,7 @@ class RunReplayTest(unittest.TestCase):
 		old.mkdir(parents=True)
 		result = self._run(FAKE_CREATE_RUN="0")
 		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertFalse((old / "replay").exists())
 		self.assertFalse((old / "replay.html").exists())
 		self.assertFalse((old / "replay.rrd").exists())
 
@@ -121,34 +128,64 @@ class RunReplayTest(unittest.TestCase):
 		result = self._run()
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertEqual([call for call in self._calls() if "build_reference_mesh.py" in call], [])
-		self.assertNotIn("--reference-mesh", self._call("replay.py build"))
+		self.assertNotIn("--reference-mesh", self._call("replay.py finalize"))
 
-	def test_auto_builds_the_reference_after_the_pipeline_and_embeds_it_in_the_page_only(self) -> None:
+	def test_finalize_publishes_the_tum_bundle_and_never_a_page(self) -> None:
+		result = self._run(DATASET=self._dataset())
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		finalize = self._call("replay.py finalize")
+		self.assertIn("--dataset-kind tum", finalize)
+		self.assertIn("--sequence fr1_desk", finalize)
+		self.assertIn(f"--dataset {self.root / 'dataset'} --fps 15", finalize)
+		self.assertIn("--out output/test_run/out_new/replay", finalize)
+		modes = {call.split()[1] for call in self._calls() if call.startswith("scripts/replay.py")}
+		self.assertEqual(modes, {"record", "finalize", "rrd"}, "no page is built")
+		self.assertFalse(any(self.root.glob("output/**/replay.html")))
+		self.assertTrue((self.root / "output/test_run/out_new/replay/manifest.json").is_file())
+		self.assertTrue((self.root / "output/test_run/out_new/replay.rrd").is_file())
+		self.assertIn("output/test_run/out_new", result.stdout)
+		self.assertIn("just replay-web", result.stdout)
+		self.assertNotIn("file://", result.stdout)
+		self.assertFalse((self.root / "output/test_run/.replay-recording").exists(), "a complete run does not keep the raw snapshots")
+
+	def test_the_sequence_reaches_the_bundle_metadata(self) -> None:
+		result = self._run(SEQ="fr1_room")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertIn("--sequence fr1_room", self._call("replay.py finalize"))
+
+	def test_a_failed_finalize_keeps_the_raw_snapshots_and_fails_the_run(self) -> None:
+		result = self._run(FAKE_FINALIZE_RC="1")
+		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertTrue((self.root / "output/test_run/.replay-recording").is_dir())
+		self.assertIn("raw snapshots kept", result.stderr)
+		self.assertFalse(any(self.root.glob("output/**/replay.html")))
+
+	def test_auto_builds_the_reference_after_the_pipeline_and_puts_it_in_the_bundle_only(self) -> None:
 		dataset = self._dataset()
 		result = self._run(DATASET=dataset)
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		calls = self._calls()
 		pipeline = calls.index("pipeline")
 		builder = next(i for i, call in enumerate(calls) if "build_reference_mesh.py" in call)
-		page = next(i for i, call in enumerate(calls) if "replay.py build" in call)
+		page = next(i for i, call in enumerate(calls) if "replay.py finalize" in call)
 		self.assertLess(pipeline, builder, "the reconstruction must not slow the mapping run down")
 		self.assertLess(builder, page)
 		self.assertTrue(calls[builder].endswith(f"build_reference_mesh.py {dataset}"), calls[builder])
 		self.assertIn(f"--reference-mesh {FAKE_CACHE}", calls[page])
 		self.assertNotIn("--reference-mesh", self._call("replay.py rrd"))
-		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay.html")).is_file())
+		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay/manifest.json")).is_file())
 
 	def test_off_skips_the_reference_mesh_completely(self) -> None:
 		result = self._run(DATASET=self._dataset(), REFERENCE_MESH="off")
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertEqual([call for call in self._calls() if "build_reference_mesh.py" in call], [])
-		self.assertNotIn("--reference-mesh", self._call("replay.py build"))
+		self.assertNotIn("--reference-mesh", self._call("replay.py finalize"))
 
 	def test_rebuild_forces_a_new_cache(self) -> None:
 		result = self._run(DATASET=self._dataset(), REFERENCE_MESH="rebuild")
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertIn(" --force", self._call("build_reference_mesh.py"))
-		self.assertIn(f"--reference-mesh {FAKE_CACHE}", self._call("replay.py build"))
+		self.assertIn(f"--reference-mesh {FAKE_CACHE}", self._call("replay.py finalize"))
 
 	def test_the_cache_directory_override_reaches_the_builder(self) -> None:
 		result = self._run(DATASET=self._dataset(), REFERENCE_MESH_CACHE="/writable/cache")
@@ -157,21 +194,21 @@ class RunReplayTest(unittest.TestCase):
 		self.assertIn("--cache-dir /writable/cache", builder)
 		self.assertNotIn("--force", builder)
 
-	def test_an_automatic_failure_still_produces_the_dynamic_only_replay(self) -> None:
+	def test_an_automatic_failure_still_produces_the_dynamic_only_bundle(self) -> None:
 		result = self._run(DATASET=self._dataset(), FAKE_REFERENCE_RC="1")
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertIn("dynamic-only", result.stderr)
-		self.assertNotIn("--reference-mesh", self._call("replay.py build"))
-		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay.html")).is_file())
+		self.assertNotIn("--reference-mesh", self._call("replay.py finalize"))
+		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay/manifest.json")).is_file())
 		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay.rrd")).is_file())
 
-	def test_a_failed_rebuild_fails_the_run_but_keeps_the_dynamic_page_and_the_raw_snapshots(self) -> None:
+	def test_a_failed_rebuild_fails_the_run_but_keeps_the_dynamic_bundle_and_the_raw_snapshots(self) -> None:
 		result = self._run(DATASET=self._dataset(), REFERENCE_MESH="rebuild", FAKE_REFERENCE_RC="1")
 		self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertIn("could not be built", result.stderr)
-		self.assertNotIn("--reference-mesh", self._call("replay.py build"))
+		self.assertNotIn("--reference-mesh", self._call("replay.py finalize"))
 		self.assertTrue((self.root / "output/test_run/.replay-recording").is_dir())
-		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay.html")).is_file())
+		self.assertTrue(next(self.root.glob("output/test_run/out_*/replay/manifest.json")).is_file())
 
 	def test_an_invalid_mode_fails_before_the_pipeline_starts(self) -> None:
 		result = self._run(DATASET=self._dataset(), REFERENCE_MESH="maybe")

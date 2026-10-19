@@ -4,6 +4,7 @@
 import argparse
 import copy
 import json
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -71,9 +72,36 @@ def as_traversability_attributes(source: Dict[str, Any]) -> Dict[str, Any]:
 def prepare(src: Path, dst: Path, layer: str) -> None:
 	graph = load_graph(src)
 	key = layer_key(graph, layer)
+	# Ordinary PLACES do not accumulate the image-projected label_weights used
+	# by CODa's traversability nodes. Recover labels from explicit object edges,
+	# counting attached objects per label (not a guessed spatial association).
+	features = graph.get("metadata", {}).get("features", {})
+	object_key = layer_key(graph, "OBJECTS") if "OBJECTS" in graph.get("layer_names", {}) else (2, 0)
+	nodes = {node["id"]: node for node in graph.get("nodes", [])}
+	attached = defaultdict(Counter)
+	for edge in graph.get("edges", []):
+		a, b = nodes.get(edge["source"]), nodes.get(edge["target"])
+		if a is None or b is None:
+			continue
+		if is_layer_node(b, key):
+			a, b = b, a
+		if not is_layer_node(a, key) or not is_layer_node(b, object_key):
+			continue
+		label = b.get("attributes", {}).get("semantic_label")
+		feature = features.get(str(label), {})
+		if feature.get("clip_feature") and feature.get("sentence_embedding_feature"):
+			attached[a["id"]][label] += 1.0
+	usable = 0
 	for node in graph.get("nodes", []):
 		if is_layer_node(node, key):
-			node["attributes"] = as_traversability_attributes(node.get("attributes", {}))
+			attrs = as_traversability_attributes(node.get("attributes", {}))
+			if not attrs.get("label_weights"):
+				attrs["label_weights"] = sorted(attached[node["id"]].items())
+			usable += bool(attrs["label_weights"])
+			node["attributes"] = attrs
+	if not usable:
+		raise ValueError("No usable place labels: expected label_weights or attached objects with CLIP and sentence features")
+	print(f"Prepared {layer}: {usable} places with semantic label weights")
 	save_graph(graph, dst)
 
 
@@ -81,6 +109,9 @@ def restore(src: Path, original: Path, dst: Path, layer: str) -> None:
 	clustered = load_graph(src)
 	before = load_graph(original)
 	key = layer_key(before, layer)
+	room_key = layer_key(clustered, "ROOMS")
+	if not any(is_layer_node(node, room_key) for node in clustered.get("nodes", [])):
+		raise ValueError("Clustering produced no rooms; previous output is preserved. Check place labels and clustering thresholds")
 	original_attrs = {
 		node["id"]: node.get("attributes", {})
 		for node in before.get("nodes", [])
@@ -98,6 +129,29 @@ def restore(src: Path, original: Path, dst: Path, layer: str) -> None:
 	save_graph(clustered, dst)
 
 
+def validate(src: Path, layer: str, require_rooms: bool = False) -> None:
+	"""Reject empty native semantic inputs/results before a stage publishes them."""
+	graph = load_graph(src)
+	key = layer_key(graph, layer)
+	features = graph.get("metadata", {}).get("features", {})
+	usable = 0
+	for node in graph.get("nodes", []):
+		if not is_layer_node(node, key):
+			continue
+		weights = node.get("attributes", {}).get("label_weights", [])
+		if isinstance(weights, dict):
+			weights = weights.items()
+		usable += any(weight > 0 and features.get(str(label), {}).get("clip_feature")
+			and features.get(str(label), {}).get("sentence_embedding_feature") for label, weight in weights)
+	if not usable:
+		raise ValueError(f"No native semantic {layer} places with usable features. Check observed surfaces and completed DAM descriptions; old TUM runs need the handheld-camera profile")
+	if require_rooms:
+		room_key = layer_key(graph, "ROOMS")
+		if not any(is_layer_node(node, room_key) for node in graph.get("nodes", [])):
+			raise ValueError("Native place clustering produced no rooms; check semantic coverage and clustering thresholds")
+	print(f"Validated {usable} native semantic {layer} places")
+
+
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(description=__doc__)
 	subparsers = parser.add_subparsers(dest="command", required=True)
@@ -108,6 +162,10 @@ def parse_args() -> argparse.Namespace:
 		subparser.add_argument("--layer", default="PLACES")
 		if command == "restore":
 			subparser.add_argument("--original", type=Path, required=True)
+	validator = subparsers.add_parser("validate")
+	validator.add_argument("--src", type=Path, required=True)
+	validator.add_argument("--layer", default="TRAVERSABILITY")
+	validator.add_argument("--require-rooms", action="store_true")
 	return parser.parse_args()
 
 
@@ -115,6 +173,8 @@ def main() -> None:
 	args = parse_args()
 	if args.command == "prepare":
 		prepare(args.src, args.dst, args.layer)
+	elif args.command == "validate":
+		validate(args.src, args.layer, args.require_rooms)
 	else:
 		restore(args.src, args.original, args.dst, args.layer)
 

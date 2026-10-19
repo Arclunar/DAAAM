@@ -1,6 +1,7 @@
 import base64
 import builtins
 import contextlib
+import gzip
 import importlib.util
 import io
 import json
@@ -21,7 +22,9 @@ REPO = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("daaam_replay_reference", REPO / "scripts" / "replay.py")
 REPLAY = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(REPLAY)
-VIEWER = (REPO / "scripts" / "replay_viewer.html").read_text(encoding="utf-8")
+STATIC = REPO / "scripts" / "replay_web" / "static"
+VIEWER = (STATIC / "viewer.js").read_text(encoding="utf-8")
+STYLE = (STATIC / "replay.css").read_text(encoding="utf-8")
 
 DTYPES = {"f4": "<f4", "i4": "<i4", "u4": "<u4", "i2": "<i2", "u2": "<u2", "u1": "|u1"}
 
@@ -57,11 +60,6 @@ def reference_arrays(side: int = 2, origin=(10.0, 20.0, 30.0)) -> dict:
 	}
 
 
-def extract_data(html: str) -> dict:
-	start = html.index("window.REPLAY = ") + len("window.REPLAY = ")
-	return json.loads(html[start: html.index(";</script>", start)].replace("<\\/", "</"))
-
-
 def decode_chunk(chunk: str) -> dict:
 	raw = zlib.decompress(base64.b64decode(chunk))
 	head = struct.unpack_from("<I", raw, 0)[0]
@@ -74,17 +72,20 @@ def decode_chunk(chunk: str) -> dict:
 
 class ReplayReferenceMeshTest(unittest.TestCase):
 	def test_viewer_exposes_description_source_frame_in_object_details(self) -> None:
-		template = (REPO / "scripts" / "replay_viewer.html").read_text(encoding="utf-8")
-		self.assertIn("description_sources", template)
-		self.assertIn("描述来源 frame", template)
-		self.assertIn("entity-source", template)
-		self.assertIn("openDescriptionSource", template)
-		self.assertIn('id="description-source-modal"', template)
+		self.assertIn("description_sources", VIEWER)
+		self.assertIn("描述来源 frame", VIEWER)
+		self.assertIn("entity-source", VIEWER)
+		self.assertIn("openDescriptionSource", VIEWER)
+		self.assertIn('data-role="description-source-modal"', VIEWER)
+		self.assertIn("'描述源帧'", VIEWER)
+		self.assertIn("'无描述源帧'", VIEWER)
 
 	def test_selecting_an_entity_does_not_move_the_timeline(self) -> None:
-		template = (REPO / "scripts" / "replay_viewer.html").read_text(encoding="utf-8")
-		body = template.split("function selectEntity", 1)[1].split("function assemble", 1)[0]
-		self.assertNotIn("show(", body)
+		body = VIEWER.split("  selectEntity(kind, id", 1)[1].split("\n  clearSelection(", 1)[0]
+		self.assertNotIn("this.show(", body)
+		self.assertNotIn("this.setPlaying(", body)
+		modal = VIEWER.split("  openDescriptionSource(item, source)", 1)[1].split("\n  closeDescriptionSource()", 1)[0]
+		self.assertNotIn("this.show(", modal)
 
 	def setUp(self) -> None:
 		self.temp = tempfile.TemporaryDirectory()
@@ -93,7 +94,8 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 		self.recording.mkdir()
 		for frame in (1, 2):
 			write_snapshot(self.recording, frame, offset=frame * 0.1)
-		self.page = self.root / "replay.html"
+		self.run = self.root / "run"
+		self.run.mkdir()
 
 	def tearDown(self) -> None:
 		self.temp.cleanup()
@@ -103,58 +105,63 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 		np.savez(path, **(reference_arrays(**kwargs) if arrays is None else arrays))
 		return path
 
-	def build(self, *extra: str) -> subprocess.CompletedProcess:
+	def finalize_command(self, *extra: str) -> subprocess.CompletedProcess:
 		return subprocess.run(
-			[sys.executable, str(REPO / "scripts" / "replay.py"), "build", str(self.recording), "--out", str(self.page), *extra],
+			[sys.executable, str(REPO / "scripts" / "replay.py"), "finalize", str(self.recording), "--run", str(self.run),
+			 "--dataset-kind", "tum", "--sequence", "fr1_desk", "--out", str(self.run / "replay"), *extra],
 			cwd=REPO, capture_output=True, text=True,
 		)
 
-	def test_a_page_without_a_reference_is_the_legacy_page(self) -> None:
-		result = self.build()
-		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-		data = extract_data(self.page.read_text(encoding="utf-8"))
-		self.assertNotIn("reference_mesh", data)
-		self.assertEqual(len(data["chunks"]), 2)
-		self.assertNotIn("参考网格", result.stdout)
+	def finalize(self, reference=None):
+		from scripts.replay_bundle import BundleOptions, finalize_bundle
 
-	def test_the_reference_is_embedded_with_its_own_quantization(self) -> None:
+		return finalize_bundle(BundleOptions(recording=self.recording, source_graph=None, run_dir=self.run, output=self.run / "replay",
+			dataset_kind="tum", sequence="fr1_desk", reference_mesh=reference))
+
+	def reference_payload(self, manifest_path: Path) -> dict:
+		manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+		return json.loads(gzip.decompress((manifest_path.parent / manifest["reference_mesh"]["path"]).read_bytes()))
+
+	def test_the_bundle_stores_the_reference_once_with_its_own_quantization(self) -> None:
 		reference = reference_arrays(side=40)
-		result = self.build("--reference-mesh", str(self.save_reference(reference)))
-		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-		data = extract_data(self.page.read_text(encoding="utf-8"))
-		embedded = data["reference_mesh"]
-		self.assertEqual((embedded["vertices"], embedded["triangles"]), (1600, 2 * 39 * 39))
-		self.assertIn("1 cm", embedded["label"])
-		self.assertNotEqual(embedded["quant"]["min"], data["quant"]["min"], "the reference needs a grid of its own, not the one of the Hydra snapshots")
-		np.testing.assert_allclose(embedded["quant"]["min"], reference["positions"].min(axis=0), atol=1e-4)
-		arrays = decode_chunk(embedded["chunk"])
+		manifest_path = self.finalize(self.save_reference(reference))
+		manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+		entry = manifest["reference_mesh"]
+		self.assertEqual((entry["vertices"], entry["triangles"]), (1600, 2 * 39 * 39))
+		self.assertIn("1 cm", entry["label"])
+		payload = self.reference_payload(manifest_path)
+		self.assertNotEqual(payload["quant"]["min"], manifest["quant"]["min"], "the reference needs a grid of its own")
+		np.testing.assert_allclose(payload["quant"]["min"], reference["positions"].min(axis=0), atol=1e-4)
+		arrays = decode_chunk(payload["chunk"])
 		self.assertEqual(sorted(arrays), ["mesh_col", "mesh_faces", "mesh_nrm", "mesh_pos"])
-		quant_min, quant_scale = np.array(embedded["quant"]["min"]), np.array(embedded["quant"]["scale"])
+		quant_min, quant_scale = np.array(payload["quant"]["min"]), np.array(payload["quant"]["scale"])
 		restored = quant_min + (arrays["mesh_pos"].astype(np.float64) + 32768.0) * quant_scale
 		np.testing.assert_allclose(restored, reference["positions"], atol=float(quant_scale.max()))
 		np.testing.assert_array_equal(arrays["mesh_col"], reference["colors"])
 		np.testing.assert_allclose(arrays["mesh_nrm"] / 32767.0, reference["normals"], atol=1e-4)
 		np.testing.assert_array_equal(arrays["mesh_faces"], reference["triangles"])
 		self.assertEqual(arrays["mesh_faces"].dtype, np.uint16)
-		# the Hydra snapshots are untouched
-		self.assertEqual(len(data["chunks"]), 2)
-		self.assertEqual(decode_chunk(data["chunks"][0])["mesh_pos"].shape, (4, 3))
+		self.assertEqual(len(manifest["chunks"]), 1, "the Hydra snapshots are untouched by the reference")
 
 	def test_meshes_with_more_than_65535_vertices_keep_32_bit_indices(self) -> None:
-		result = self.build("--reference-mesh", str(self.save_reference(side=300)))
-		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-		arrays = decode_chunk(extract_data(self.page.read_text(encoding="utf-8"))["reference_mesh"]["chunk"])
+		arrays = decode_chunk(self.reference_payload(self.finalize(self.save_reference(side=300)))["chunk"])
 		self.assertEqual(arrays["mesh_pos"].shape, (90000, 3))
 		self.assertEqual(arrays["mesh_faces"].dtype, np.uint32)
 		self.assertEqual(int(arrays["mesh_faces"].max()), 90000 - 1)
 
-	def test_build_output_reports_counts_and_sizes(self) -> None:
-		result = self.build("--reference-mesh", str(self.save_reference(side=40)))
+	def test_a_bundle_without_a_reference_has_none(self) -> None:
+		manifest = json.loads(self.finalize().read_text(encoding="utf-8"))
+		self.assertIsNone(manifest["reference_mesh"])
+		self.assertFalse((self.run / "replay" / "reference").exists())
+
+	def test_finalize_output_reports_counts_and_sizes(self) -> None:
+		result = self.finalize_command("--reference-mesh", str(self.save_reference(side=40)))
 		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 		self.assertRegex(result.stdout, r"reference mesh: 1,600 vertices, 3,042 triangles, payload \d+(\.\d+)? MB")
-		self.assertRegex(result.stdout, r"\(\d+(\.\d+)? MB\)")
+		self.assertRegex(result.stdout, r"2 snapshots in 1 chunks \(\d+(\.\d+)? MB\)")
+		self.assertNotIn("参考网格", self.finalize_command().stdout)
 
-	def test_malformed_caches_are_rejected_with_the_path_and_no_page_is_written(self) -> None:
+	def test_malformed_caches_are_rejected_with_the_path_and_no_bundle_is_written(self) -> None:
 		good = reference_arrays()
 		cases = {
 			"missing": lambda a: a.pop("normals"),
@@ -168,22 +175,22 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 				arrays = {key: value.copy() for key, value in good.items()}
 				damage(arrays)
 				path = self.save_reference(arrays, f"{name}.npz")
-				result = self.build("--reference-mesh", str(path))
+				result = self.finalize_command("--reference-mesh", str(path))
 				self.assertNotEqual(result.returncode, 0, name)
 				self.assertIn(path.name, result.stderr)
-				self.assertFalse(self.page.exists(), "a rejected cache must not leave a page behind")
+				self.assertFalse((self.run / "replay").exists(), "a rejected cache must not leave a bundle behind")
 
-	def test_an_unreadable_cache_is_rejected(self) -> None:
+	def test_an_unreadable_or_missing_cache_is_rejected(self) -> None:
 		broken = self.root / "broken.npz"
 		broken.write_bytes(b"this is not an npz archive")
-		result = self.build("--reference-mesh", str(broken))
+		result = self.finalize_command("--reference-mesh", str(broken))
 		self.assertNotEqual(result.returncode, 0)
 		self.assertIn("broken.npz", result.stderr)
-		missing = self.build("--reference-mesh", str(self.root / "missing.npz"))
+		missing = self.finalize_command("--reference-mesh", str(self.root / "missing.npz"))
 		self.assertNotEqual(missing.returncode, 0)
 		self.assertIn("missing.npz", missing.stderr)
 
-	def test_building_from_a_cache_never_imports_open3d(self) -> None:
+	def test_finalizing_with_a_cache_never_imports_open3d(self) -> None:
 		real_import = builtins.__import__
 		attempts = []
 
@@ -193,51 +200,42 @@ class ReplayReferenceMeshTest(unittest.TestCase):
 				raise ImportError("open3d must not be imported to embed a cache")
 			return real_import(name, *args, **kwargs)
 
-		args = REPLAY.argparse.Namespace(
-			recording=str(self.recording), run=None, out=str(self.page), title=None, merge=0.005, dataset=None,
-			thumb_width=320, max_depth=4.0, fps=15.0, reference_mesh=str(self.save_reference()),
-		)
 		with mock.patch.object(builtins, "__import__", guarded), contextlib.redirect_stdout(io.StringIO()):
-			code = REPLAY.build(args)
-		self.assertEqual(code, 0)
-		self.assertEqual(attempts, [], "embedding a cache must not even try to import Open3D")
-		self.assertNotIn("open3d", (REPO / "scripts" / "replay.py").read_text(encoding="utf-8"))
-
-	def test_the_page_is_written_atomically(self) -> None:
-		self.page.write_text("previous page")
-		result = self.build("--reference-mesh", str(self.root / "missing.npz"))
-		self.assertNotEqual(result.returncode, 0)
-		self.assertEqual(self.page.read_text(), "previous page")
-		self.assertEqual(self.build().returncode, 0)
-		self.assertEqual(sorted(p.name for p in self.root.glob("replay.html*")), ["replay.html"])
+			self.finalize(self.save_reference())
+		self.assertEqual(attempts, [], "using a cache must not even try to import Open3D")
+		for script in ("replay.py", "replay_bundle.py"):
+			self.assertNotIn("open3d", (REPO / "scripts" / script).read_text(encoding="utf-8"))
 
 
-class ReplayViewerTemplateTest(unittest.TestCase):
+class ReplayViewerSourceTest(unittest.TestCase):
 	def test_the_viewer_has_the_mesh_source_selector(self) -> None:
-		self.assertIn('id="mesh-mode"', VIEWER)
+		self.assertIn('data-role="mesh-mode"', VIEWER)
 		for option in ('value="reference"', 'value="dynamic"', 'value="none"'):
 			self.assertIn(option, VIEWER)
 		self.assertIn("1 cm 参考网格", VIEWER)
 		self.assertIn("动态 Hydra 网格", VIEWER)
 		self.assertIn("隐藏网格", VIEWER)
-		self.assertIn('id="mesh-status"', VIEWER)
+		self.assertIn('data-role="mesh-status"', VIEWER)
 		self.assertIn("不是真值", VIEWER)
 
 	def test_the_viewer_calls_the_static_mesh_a_reference_never_ground_truth(self) -> None:
 		self.assertNotRegex(VIEWER, "真值网格|ground[- ]truth mesh")
 
-	def test_the_viewer_is_self_contained(self) -> None:
-		self.assertEqual(re.findall(r"https?://", VIEWER), [], "the page must not reference anything on the network")
-		self.assertNotRegex(VIEWER, r"\b(fetch|XMLHttpRequest|WebSocket|importScripts)\s*\(")
-		self.assertNotRegex(VIEWER, r"<script[^>]+src=|<link[^>]+href=")
+	def test_the_application_loads_nothing_from_outside_the_service(self) -> None:
+		for path in [REPO / "replay.html", *sorted(STATIC.iterdir())]:
+			with self.subTest(path=path.name):
+				text = path.read_text(encoding="utf-8")
+				self.assertEqual(re.findall(r"https?://(?!www\.w3\.org/2000/svg)", text), [], "no network reference outside the loopback service")
+				self.assertNotRegex(text, r"\b(XMLHttpRequest|WebSocket|importScripts|eval)\s*\(")
+		self.assertNotRegex(VIEWER, r"\bwindow\.REPLAY\b")
 
 	def test_the_viewer_has_the_label_mode_and_the_selection_overlay(self) -> None:
-		self.assertIn('id="label-mode"', VIEWER)
+		self.assertIn('data-role="label-mode"', VIEWER)
 		for option in ('value="selected"', 'value="all"', 'value="none"'):
 			self.assertIn(option, VIEWER)
-		self.assertNotIn('id="c-objlab"', VIEWER)
-		self.assertIn('id="selection-overlay"', VIEWER)
-		self.assertRegex(VIEWER, r"#selection-overlay\s*\{[^}]*pointer-events:\s*none")   # the overlay never takes a click from the canvas
+		self.assertNotIn("c-objlab", VIEWER)
+		self.assertIn('data-role="selection-overlay"', VIEWER)
+		self.assertRegex(STYLE, r"\.viewer__overlay\s*\{[^}]*pointer-events:\s*none")   # the overlay never takes a click from the canvas
 		self.assertIn("#ffb000", VIEWER)
 
 	def test_label_membership_no_longer_depends_on_the_camera(self) -> None:

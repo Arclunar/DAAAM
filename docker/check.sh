@@ -17,7 +17,7 @@ if ! docker info --format '{{json .Runtimes}}' | grep -q 'nvidia'; then
 fi
 
 docker compose config --quiet
-docker compose run --rm daaam bash -lc '
+docker compose run --rm -T daaam-ws bash -c '
 set -euo pipefail
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 test "$ROS_DISTRO" = jazzy

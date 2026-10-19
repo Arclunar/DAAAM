@@ -48,7 +48,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from daaam.config import PipelineConfig  # 全管道配置（见 src/daaam/config.py）
-from daaam.datasets import ImageSequenceDataset, HM3DSemDataset, CodaDataset  # 三种离线数据集
+from daaam.datasets import ImageSequenceDataset, HM3DSemDataset, CodaDataset, LiveDataset  # 三种离线数据集 + 实时数据源（见 --dataset-type LiveDataset）
 from daaam.hydra.runner import HydraPipelineRunner  # 封装 PipelineOrchestrator 的离线运行器
 from daaam import ROOT_DIR  # 仓库根目录绝对路径
 from daaam.utils.hf_cache import resolve_cached_hf_model  # 缓存里有模型时返回本地快照目录（离线可用）
@@ -95,11 +95,12 @@ def parse_args():
 	parser.add_argument(
 		"--dataset-type",
 		type=str,
-		choices=["ImageSequenceDataset", "HM3DSemDataset", "CodaDataset"],
+		choices=["ImageSequenceDataset", "HM3DSemDataset", "CodaDataset", "LiveDataset"],
 		default="ImageSequenceDataset",
-		help="Dataset class name to use"
+		help="Dataset class name to use (LiveDataset: frames pulled from a running simulator, see --live-url; "
+			"data_path is then the folder that records the session)"
 	)
-	# 选择数据集类（对应 main 中实例化数据集的三分支）。
+	# 选择数据集类（对应 main 中实例化数据集的分支）。
 
 	parser.add_argument(
 		"--dataset-name",
@@ -160,6 +161,20 @@ def parse_args():
 		help="Dataset framerate"
 	)
 	# 数据集的录制帧率（用于时间对齐与实时模拟）。
+
+	# LiveDataset options
+	parser.add_argument(
+		"--live-url", type=str, default="tcp://127.0.0.1:8002",
+		help="LiveDataset: where the simulator bridge serves frames (scripts/habitat_live/bridge.py)"
+	)
+	parser.add_argument(
+		"--no-live-record", action="store_true",
+		help="LiveDataset: do not record the session into data_path"
+	)
+	parser.add_argument(
+		"--live-connect-timeout", type=float, default=120.0,
+		help="LiveDataset: seconds to wait for the simulator to come up"
+	)
 
 	# CODA-specific options
 	# --- CODA 自动驾驶数据集专用选项 ---
@@ -646,6 +661,20 @@ def main():
 				velocity_window=dataset_config["velocity_window"],
 				velocity_alpha=dataset_config["velocity_alpha"],
 			)
+		elif args.dataset_type == "LiveDataset":
+			# frames come from a running simulator (scripts/habitat_live/bridge.py); data_path records the session
+			dataset = LiveDataset(
+				Path(args.data_path),
+				config=dataset_config,
+				url=args.live_url,
+				fps=config.dataset.fps,
+				record=not args.no_live_record,
+				max_frames=config.dataset.max_frames,
+				compute_velocities=dataset_config["compute_velocities"],
+				velocity_window=dataset_config["velocity_window"],
+				velocity_alpha=dataset_config["velocity_alpha"],
+				connect_timeout=args.live_connect_timeout,
+			)
 		else:
 			dataset = ImageSequenceDataset(
 				Path(args.data_path),
@@ -655,7 +684,11 @@ def main():
 				velocity_window=dataset_config["velocity_window"],
 				velocity_alpha=dataset_config["velocity_alpha"],
 			)
-		print(f"Loaded {len(dataset)} frames from dataset")
+		if isinstance(dataset, LiveDataset):
+			print(f"Live source: {args.live_url} (frames are mapped as they arrive; the session is recorded in {args.data_path})" if not args.no_live_record
+				else f"Live source: {args.live_url} (frames are mapped as they arrive; not recorded)")
+		else:
+			print(f"Loaded {len(dataset)} frames from dataset")
 	except Exception as e:
 		print(f"Error loading dataset: {e}")
 		sys.exit(1)
@@ -726,13 +759,33 @@ def main():
 	print(f"Starting pipeline processing...")
 	print(f"Output will be saved to: {runner.output_dir}")
 
+	if isinstance(dataset, LiveDataset):
+		import signal
+
+		def stop_live_stream(signum, _frame):
+			# the first Ctrl-C / SIGTERM ends the stream: the frame being mapped is finished, then the map is saved;
+			# a second one interrupts for good
+			print("\n[live] stopping: finishing the current frame and saving the map (signal again to abort)", flush=True)
+			dataset.request_stop()
+			signal.signal(signum, signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL)
+
+		signal.signal(signal.SIGINT, stop_live_stream)
+		signal.signal(signal.SIGTERM, stop_live_stream)
+
 	try:
 		# 这里是真正干活的地方：逐帧读取数据集，送进
 		# 分割 → 跟踪 → 分配 → 语义描述 → 场景图 的处理流水线
-		stats = runner.run(
-			max_frames=config.dataset.max_frames,
-			frame_callback=frame_callback
-		)
+		try:
+			stats = runner.run(
+				max_frames=config.dataset.max_frames,
+				frame_callback=frame_callback
+			)
+		finally:
+			if isinstance(dataset, LiveDataset):
+				dataset.close()  # finishes the recording of the session
+		if isinstance(dataset, LiveDataset):
+			stats["total_frames"] = stats["frames_processed"]  # a live stream has no length
+			stats["live"] = dataset.stats()
 
 		# ── 步骤 8：输出统计与结果 ──
 		# Print summary statistics
@@ -761,6 +814,14 @@ def main():
 
 		print(f"Tracks created: {stats.get('tracks_created', 0)}")
 		print(f"Corrections applied: {stats.get('corrections_applied', 0)}")
+
+		if 'live' in stats:
+			live = stats['live']
+			print(
+				f"Live session: {live['mapped_fps']:.2f} frames/s mapped, frame age on arrival {live['frame_age_ms_mean']:.0f} ms "
+				f"(p95 {live['frame_age_ms_p95']:.0f} ms), motion between mapped frames {live['step_m_mean']:.2f} m / "
+				f"{live['turn_deg_mean']:.1f} deg (max {live['step_m_max']:.2f} m / {live['turn_deg_max']:.0f} deg)"
+			)
 
 		if 'dsg_nodes' in stats:
 			print(f"DSG nodes: {stats['dsg_nodes']}")

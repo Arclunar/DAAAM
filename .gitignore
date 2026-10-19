@@ -6,6 +6,7 @@ config/labels_pseudo.*
 null/
 /logs/
 /.superpowers/
+/.replay-web/
 /docs/openai_apikey.txt
 /docs/orchestrator_process_frame.html
 /\\

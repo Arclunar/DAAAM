@@ -7,6 +7,13 @@ from typing import Optional, Dict, Any, Tuple
 import numpy as np
 
 
+class DatasetExhausted(IndexError):
+	"""Raised by `__getitem__` of a dataset without a fixed length (a live source) when its stream has ended.
+
+	HydraPipelineRunner.run() treats it as the end of the data: the frames mapped so far are finalized and saved.
+	"""
+
+
 @dataclass
 class DatasetFrame:
 	"""Container for a single frame from a dataset.

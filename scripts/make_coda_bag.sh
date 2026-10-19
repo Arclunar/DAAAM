@@ -12,6 +12,10 @@
 #
 # The depth maps (scripts/run_foundation_stereo_coda.py) must exist for every frame up to the end of the range: the
 # loader pairs them with the images by sorted index.
+#
+# A closed bag gets the sidecar NAME_<time>.bag/daaam_replay.json: dataset kind, sequence, first frame, frame count, frame
+# rate and time origin (the first stamp of $CODA_ROOT_DIR/timestamps/0.txt). scripts/run_coda_example.sh reads it to give
+# the run's result its replay bundle; it is written through a temporary file and only after the bag is complete.
 set -uo pipefail
 
 START="${1:-0}"
@@ -24,6 +28,23 @@ esac
 case "${NAME}" in
   ''|*/*) echo "NAME is a bag name without a directory" >&2; exit 2 ;;
 esac
+
+STAMPS="${CODA_ROOT_DIR}/timestamps/0.txt"
+if [ ! -f "${STAMPS}" ]; then
+  echo "${STAMPS} is missing (timestamps/0.txt of the CODa download): the replay metadata of the bag needs the sequence's time origin" >&2
+  exit 2
+fi
+TOTAL="$(grep -c . "${STAMPS}")"
+ORIGIN="$(head -n 1 "${STAMPS}" | tr -d '[:space:]')"
+if ! [[ "${ORIGIN}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "the first line of ${STAMPS} is not a time stamp: '${ORIGIN}'" >&2
+  exit 2
+fi
+if [ "${START}" -ge "${TOTAL}" ] || { [ "${FRAMES}" -gt 0 ] && [ $((START + FRAMES)) -gt "${TOTAL}" ]; }; then
+  echo "frames ${START}..$((START + FRAMES - 1)) are outside sequence 0, which has ${TOTAL} frames" >&2
+  exit 2
+fi
+if [ "${FRAMES}" -gt 0 ]; then COUNT="${FRAMES}"; else COUNT=$((TOTAL - START)); fi
 
 # The ROS dataloader returns the frames start_frame .. end_frame-start_frame-1 (it compares start_frame + index with
 # end_frame - start_frame), so a range that does not start at frame 0 needs end_frame = 2 * start + length. -1 = to the end.
@@ -40,7 +61,16 @@ ros2 launch daaam_ros dataloader_coda_with_depth.launch.yaml sequence:=0 dataset
 # the bag of this run is the new one; the dataloader writes metadata.yaml when it closes it: without it the bag is incomplete
 bag="$(comm -13 <(echo "${before}") <(bags) | tail -n 1)"
 if [ -n "${bag}" ] && [ -f "${bag}/metadata.yaml" ]; then
+  sidecar="${bag}/daaam_replay.json"
+  temporary="${bag}/.daaam_replay.json.$$.tmp"
+  if ! printf '{"dataset_kind":"coda","sequence":"0","start_frame":%d,"frame_count":%d,"fps":10.0,"time_origin":%s}\n' \
+      "${START}" "${COUNT}" "${ORIGIN}" > "${temporary}" || ! mv -f "${temporary}" "${sidecar}"; then
+    rm -f "${temporary}"
+    echo "Could not write ${sidecar}" >&2
+    exit 1
+  fi
   echo "Bag: ${bag} ($(du -sh "${bag}" | cut -f1))"
+  echo "Replay metadata: ${sidecar} (frames ${START}..$((START + COUNT - 1)) of sequence 0)"
   exit 0
 fi
 echo "No complete bag was written (the dataloader exited with ${rc})" >&2

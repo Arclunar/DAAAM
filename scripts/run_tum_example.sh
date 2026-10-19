@@ -16,6 +16,7 @@
 #     "workers.num_grounding_workers=0" 可在不加载 DAM 的情况下测试 Hydra 部分。
 #   ZMQ_URL：向实时查看器发布场景图的地址，默认 "none"；
 #     scripts/run_live_preview.sh 会将其设为 tcp://127.0.0.1:8001。
+#   DEPTH_LB / DEPTH_UB：深度范围（米），默认 0.3 / 4.0；用同样的范围重跑 Habitat 实时会话的录制（USAGE.md 9.8）时要和实时运行的一致。
 #
 # 注意事项：
 #   * TARGET_FPS 控制输入帧的处理速率。DAM 异步返回回答，而流水线结束时不会等待尚未返回的回答。
@@ -41,6 +42,8 @@ FPS="${FPS:-15}"
 HYDRA_CONFIG="${HYDRA_CONFIG:-config/hydra_config/tum_rgbd_khronos.yaml}"
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 ZMQ_URL="${ZMQ_URL:-none}"
+DEPTH_LB="${DEPTH_LB:-0.3}"
+DEPTH_UB="${DEPTH_UB:-4.0}"
 
 if [ ! -d "${DATASET}/rgb" ]; then
   echo "Dataset ${DATASET} not found. Download and convert the sequence first: just tum-fetch ${SEQ}" >&2
@@ -68,7 +71,7 @@ python scripts/run_pipeline.py "${DATASET}" \
   --sam-model fastsam/FastSAM-x.pt \
   --semantic-config "${LABELS_BASE}.yaml" \
   --labelspace-colors "${LABELS_BASE}.csv" \
-  --depth-scale 5000 --fps "${FPS}" --depth-lb 0.3 --depth-ub 4.0 \
+  --depth-scale 5000 --fps "${FPS}" --depth-lb "${DEPTH_LB}" --depth-ub "${DEPTH_UB}" \
   --zmq-url "${ZMQ_URL}" --dataset-name "${NAME}" \
   "${max_frames_args[@]}" --target-fps "${TARGET_FPS}" \
   --save-images --save-interval 30 --verbose \
@@ -78,6 +81,11 @@ python scripts/run_pipeline.py "${DATASET}" \
 # when the grounding worker (DAM) dropped out, which the pipeline itself does not treat as an error
 latest="$(ls -dt "output/${NAME}"/out_* 2>/dev/null | head -n 1 || true)"
 if [ -n "${latest}" ]; then
+  if [ "${rc}" -eq 0 ] && [ -f "${latest}/dsg.json" ]; then
+    # Revisit final native place geometry using actual saved fragment/depth
+    # observations, after asynchronous DAM descriptions have been persisted.
+    python scripts/lift_native_places.py --run "${latest}" --dataset "${DATASET}" || rc=$?
+  fi
   python scripts/summarize_run.py "${latest}" --max-objects 10 || true
 fi
 exit "${rc}"

@@ -35,7 +35,24 @@ log() { printf '\n[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
+resolve_workspace() {
+  local resolved
+  resolved=$(docker compose config --format json | python3 -c '
+import json, sys
+c=json.load(sys.stdin)
+m={v["target"]:v for v in c["services"]["daaam-ws"]["volumes"]}
+assert m["/opt/daaam_ws/src"]["type"] == "bind"
+print(m["/opt/daaam_ws/src"]["source"])
+print(c["volumes"][m["/opt/daaam_ws"]["source"]]["name"])
+')
+  SOURCE_TREE=$(head -n 1 <<<"${resolved}")
+  VOLUME=$(tail -n 1 <<<"${resolved}")
+  docker volume inspect "${VOLUME}" >/dev/null 2>&1 || die "workspace volume ${VOLUME} not found"
+}
+
 step_image() {
+  resolve_workspace
+  [ -f "${SOURCE_TREE}/daaam/pyproject.toml" ] || die "active source tree is incomplete"
   docker image inspect "${BASE_IMAGE}" >/dev/null 2>&1 || die "base image ${BASE_IMAGE} not found (docker compose build daaam-ws)"
   docker volume inspect "${VOLUME}" >/dev/null 2>&1 || die "workspace volume ${VOLUME} not found"
   docker run --rm -v "${VOLUME}:/ws:ro" --entrypoint test "${BASE_IMAGE}" -x /ws/.venv/bin/python -a -f /ws/install/setup.bash \
@@ -45,17 +62,11 @@ step_image() {
   log "copying the workspace volume and this checkout into a container"
   docker run --name "${STAGE_CONTAINER}" --user root --entrypoint bash \
     -v "${VOLUME}:/mnt/src_volume:ro" -v "${REPO}:/mnt/src_repo:ro" \
+    --mount "type=bind,src=${SOURCE_TREE},dst=/mnt/src_tree,readonly" \
     "${BASE_IMAGE}" -e -u -o pipefail -c '
       rm -rf /opt/daaam_ws/.venv
-      cd /mnt/src_volume
-      tar -cf - --exclude=./cache --exclude=./log --exclude=./vendor . | tar -xf - -C /opt/daaam_ws
-      mkdir -p /opt/daaam_ws/cache/huggingface /opt/daaam_ws/cache/torch /opt/daaam_ws/src/daaam
+      bash /mnt/src_repo/docker/copy_workspace.sh /mnt/src_volume /mnt/src_tree /mnt/src_repo /opt/daaam_ws
       chmod 1777 /opt/daaam_ws/cache
-      cd /mnt/src_repo
-      tar -cf - --exclude=./.git --exclude=./output --exclude=./datasets --exclude=./logs --exclude=./checkpoints \
-                --exclude=./.claude --exclude=./dist --exclude=__pycache__ \
-                --exclude=./.env --exclude="*apikey*" --exclude="*api_key*" . | tar -xf - -C /opt/daaam_ws/src/daaam
-      mkdir -p /opt/daaam_ws/src/daaam/checkpoints /opt/daaam_ws/src/daaam/datasets /opt/daaam_ws/src/daaam/output
       chown -R daaam:daaam /opt/daaam_ws/src/daaam
     ' || { docker rm -f "${STAGE_CONTAINER}" >/dev/null 2>&1 || true; die "copying into the container failed"; }
 
@@ -124,6 +135,7 @@ step_export() {
   fi
 
   if wanted hf; then
+    resolve_workspace
     log "Hugging Face cache -> ${out}/daaam-assets-hf.tar.zst"
     docker run --rm -v "${VOLUME}:/ws:ro" --entrypoint tar "${BASE_IMAGE}" \
       -C /ws/cache/huggingface -cf - --exclude='*.incomplete' --exclude='.locks' hub \

@@ -12,7 +12,7 @@ import math
 from daaam.pipeline import PipelineOrchestrator, PipelineConfig
 from daaam.hydra.integration import HydraIntegration, HYDRA_AVAILABLE
 from daaam.pipeline.models import Frame
-from daaam.datasets import BaseDataset
+from daaam.datasets import BaseDataset, DatasetExhausted
 from daaam.utils.logging import setup_main_logging
 from daaam.utils.performance import performance_measure
 from daaam import ROOT_DIR
@@ -333,9 +333,13 @@ class HydraPipelineRunner:
 			for i in range(num_frames):
 				frame_start_time = time.time()
 				
-				# Get frame from dataset
-				dataset_frame = self.dataset[i]
-				
+				# Get frame from dataset (a live stream ends when its source closes or is stopped)
+				try:
+					dataset_frame = self.dataset[i]
+				except DatasetExhausted as end:
+					self.logger.info(f"Dataset ended after {i} frames: {end}")
+					break
+
 				# Convert to pipeline frame
 				frame = dataset_frame.to_pipeline_frame()
 				

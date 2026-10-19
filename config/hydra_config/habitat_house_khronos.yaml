@@ -1,0 +1,177 @@
+---
+# Hydra / Khronos configuration for house-scale indoor RGB-D mapped live while someone walks (scripts/habitat_live.sh).
+#
+# Derived from DAAAM-ROS's config/hydra_config/clio_dataset_khronos.yaml (a building-scale dataset) with the changes that
+# config/hydra_config/tum_rgbd_khronos.yaml needed for this offline hydra_python build; the voxel size is the clio one
+# (10 cm), the TUM one is for a desk (5 cm, see HYDRA_CONFIG in scripts/run_habitat_live.sh). Changes against clio, and why:
+#   * tracker.temporal_window 10 -> 3 s: Khronos only extracts an object into the scene graph once its track has not been
+#     observed for temporal_window seconds of the run clock, so this is how long an object lags behind the mesh. A live run
+#     stamps frame k with k / FPS (3 by default), i.e. 3 s is about 9 mapped frames.
+#   * The ROS-only output sinks (RosMetaDataListener, TraversabilityVisualizer) are removed: they are not registered in the
+#     offline hydra_python build and only print "[ERROR] No module of type ..." lines.
+#   * projective_integrator.extra_integration_distance 1.0 -> 0: required with hydra.skip_invalid_depth (src/daaam/hydra/
+#     integration.py), which puts the pixels without a depth measurement at 1 mm so that Hydra skips them; only
+#     extra_integration_distance = 0 makes it do so. A simulator's depth has such pixels where no surface was hit (an open
+#     ceiling, a window) and without this they would carve free space through the walls.
+#   * frontend.freespace_places and the room finder, relaxed: with skip_invalid_depth the free space is only what the camera
+#     really saw, not the rays through every hole of the depth image, and the clio values then leave very few places and no
+#     room. voronoi min_distance_m 0.30 -> 0.20, parent_l1_separation 20 -> 12, compression_distance_m 1.5 -> 1.0,
+#     min_node_distance_m 0.4 -> 0.3, min_places_component_size 3 -> 2, room_finder min_component_size / min_room_size 10 -> 5.
+#     gvd.min_distance_m must lie above sqrt(3)/2 times the voxel size of the TSDF it works on (the TSDF is downsampled by 2:
+#     0.1 m -> 0.2 m, so above 0.173 m) and below truncation_distance (0.3 m); 0.2 does.
+#   * traversability_places: a camera that looks ahead from 1.2 m above the floor, not a robot's low sensor. height_below 0.3 /
+#     height_above 0 as in the TUM config.
+#
+# Use with:  scripts/run_pipeline.py ... --hydra-config-path config/hydra_config/habitat_house_khronos.yaml
+config_verbosity: 0
+paths: [khronos, hydra]
+map_window:
+  type: spatial
+  max_radius_m: 8.0
+active_window:
+  type: ActiveWindow
+  volumetric_map:
+    with_semantics: true
+    voxels_per_side: 16
+    voxel_size: 0.1
+    truncation_distance: 0.3
+  projective_integrator:
+    type: ProjectiveIntegrator
+    extra_integration_distance: 0.0
+  object_detector:
+    type: InstanceForwarding
+    min_cluster_size: 20
+    use_full_connectivity: true
+    use_3d: true
+    grid_size: 0.1
+    max_range: 4.0
+  tracker:
+    type: ExternalTracker
+    temporal_window: 3.0
+    min_num_observations: 8
+  object_extractor:
+    type: MeshObjectExtractor
+    verbosity: 1
+    min_object_allocation_confidence: 0.5
+    min_object_volume: 0.005 # m^3
+    max_object_volume: 10.0 # m^3
+    min_dynamic_displacement: 1 # m
+    only_extract_reconstructed_objects: true
+    min_object_reconstruction_confidence: 0.5
+    min_object_reconstruction_observations: 0
+    object_reconstruction_resolution: -0.02
+    visualize_classification: false
+    projective_integrator:
+      num_threads: 8
+frontend:
+  enable_mesh_objects: false
+  pgmo:
+    time_horizon: 15.0
+    d_graph_resolution: 2.5
+    mesh_resolution: 0.005
+  objects:
+    min_cluster_size: 40
+    cluster_tolerance: 0.25
+    bounding_box_type: OBB
+  traversability_places:
+    type: traversability
+    estimator:
+      type: HeightTraversabilityEstimator
+      height_below: 0.3
+      height_above: 0.0
+      min_confidence: 1.0
+      min_traversability: 1.0
+      pessimistic: true
+    clustering:
+      type: BlockTraversabilityClustering
+      min_place_width: &min_place_width 0.1 # m
+      max_place_width: &max_place_width 2.0 # m
+      recursive: true
+      simplify_boundary_traversability: true
+      project_labels_to_ground: true
+      label_depth_tolerance: 1.0
+      label_use_const_weight: false
+  freespace_places:
+    type: gvd
+    filter_places: true
+    min_places_component_size: 2
+    filter_ground: false
+    gvd:
+      max_distance_m: 4.5
+      min_distance_m: 0.2 # must lie between 0.87 * (downsampled TSDF voxel size, here 0.2 m) and truncation_distance
+      min_diff_m: 0.1
+      voronoi_config:
+        mode: L1_THEN_ANGLE
+        min_distance_m: 0.20
+        parent_l1_separation: 12
+        parent_cos_angle_separation: 0.2
+    graph:
+      type: CompressionGraphExtractor
+      compression_distance_m: 1.0
+      min_node_distance_m: 0.3
+      min_edge_distance_m: 0.25
+      node_merge_distance_m: 0.7
+      merge_policy: distance
+    tsdf_interpolator:
+      type: downsample
+      ratio: 2
+backend:
+  publish_backend_tf: true
+  add_places_to_deformation_graph: false
+  optimize_on_lc: false # disable optimization on single robot [REQUIRED]
+  enable_node_merging: false
+  update_functors:
+    agents:
+      type: UpdateAgentsFunctor
+    objects:
+      type: UpdateObjectsFunctor
+    places:
+      type: UpdatePlacesFunctor
+    traversability:
+      type: UpdateTraversabilityFunctor
+      min_place_size: *min_place_width # m
+      max_place_size: *max_place_width # m
+      use_metric_distance: false
+      tolerance: 0.1 # m
+    rooms:
+      type: UpdateRoomsFunctor
+      room_finder:
+        min_dilation_m: 0.5
+        max_dilation_m: 1.2
+        min_component_size: 5
+        min_room_size: 5
+        dilation_threshold_mode: PLATEAU
+        min_lifetime_length_m: 0.1
+        plateau_ratio: 0.15
+        clustering_mode: NEIGHBORS
+        dilation_diff_threshold_m: -1.0
+    buildings:
+      type: UpdateBuildingsFunctor
+    zmq_labels:
+      type: ZmqRoomLabelUpdater
+  pgmo:
+    run_mode: FULL # kimera_pgmo run mode FULL is required
+    embed_trajectory_delta_t: 5.0
+    num_interp_pts: 3
+    interp_horizon: 10.0
+    enable_sparsify: false
+    trans_node_dist: 1.0
+    rot_node_dist: 1.2
+    optimizer:
+      type: KimeraRpgoOptimizer
+      solver: LM
+      gnc:
+        inlier_probability: 0.9
+        mu_step: 1.6
+        max_iterations: 100
+    covariance:
+      odom: 1.0e-02
+      loop_close: 5.0e-02
+      sg_loop_close: 1.0e-01
+      prior: 1.0e-02
+      mesh_mesh: 1.0e-02
+      pose_mesh: 1.0e-02
+      place_mesh: 1.0e-02
+      place_edge: 10.0
+      place_merge: 10.0
+      object_merge: 10.0

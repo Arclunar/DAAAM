@@ -63,6 +63,7 @@ class ClusterPlacesAdapterTest(unittest.TestCase):
 		attrs = graph["nodes"][0]["attributes"]
 		self.assertEqual(attrs["type"], "TraversabilityNodeAttributes")
 		self.assertEqual(attrs["first_observed_ns"], 123)
+		self.assertEqual(attrs["label_weights"], [[4, 1.0]])
 		self.assertNotIn("real_place", attrs)
 		self.assertEqual(graph["nodes"][1], self.graph["nodes"][1])
 
@@ -98,6 +99,63 @@ class ClusterPlacesAdapterTest(unittest.TestCase):
 		self.assertTrue(attrs["is_predicted"])
 		self.assertIn(room, restored["nodes"])
 		self.assertIn({"source": 80, "target": 7}, restored["edges"])
+
+	def test_prepare_derives_empty_weights_from_attached_objects_with_combined_features(self):
+		self.place["attributes"]["label_weights"] = []
+		self.graph["layer_names"]["OBJECTS"] = {"layer": 2, "partition": 0}
+		self.graph["metadata"] = {"features": {
+			"4": {"clip_feature": [1.0], "sentence_embedding_feature": [1.0]},
+			"5": {"clip_feature": [1.0]},
+		}}
+		self.graph["nodes"][1]["attributes"]["semantic_label"] = 4
+		self.graph["nodes"].extend([
+			{"id": 100, "layer": 2, "partition": 0, "attributes": {"semantic_label": 4}},
+			{"id": 101, "layer": 2, "partition": 0, "attributes": {"semantic_label": 5}},
+			{"id": 102, "layer": 2, "partition": 2, "attributes": {"semantic_label": 4}},
+		])
+		self.graph["edges"] = [
+			{"source": 7, "target": 99}, {"source": 100, "target": 7},
+			{"source": 101, "target": 7}, {"source": 102, "target": 7},
+		]
+		self.original.write_text(json.dumps(self.graph))
+		result = self._run("prepare", "--src", str(self.original), "--dst", str(self.prepared))
+		self.assertEqual(result.returncode, 0, result.stderr)
+		attrs = json.loads(self.prepared.read_text())["nodes"][0]["attributes"]
+		self.assertEqual(attrs["label_weights"], [[4, 2.0]])
+
+	def test_prepare_refuses_no_usable_labels_without_publishing(self):
+		self.place["attributes"]["label_weights"] = []
+		self.original.write_text(json.dumps(self.graph))
+		result = self._run("prepare", "--src", str(self.original), "--dst", str(self.prepared))
+		self.assertNotEqual(result.returncode, 0)
+		self.assertIn("label", result.stderr.lower())
+		self.assertFalse(self.prepared.exists())
+
+	def test_restore_refuses_empty_rooms_without_replacing_previous_output(self):
+		self.clustered.write_text(json.dumps(self.graph))
+		self.restored.write_text("previous valid result")
+		result = self._run("restore", "--src", str(self.clustered), "--original", str(self.original),
+			"--dst", str(self.restored))
+		self.assertNotEqual(result.returncode, 0)
+		self.assertIn("room", result.stderr.lower())
+		self.assertEqual(self.restored.read_text(), "previous valid result")
+
+	def test_native_validation_rejects_missing_image_labels_and_empty_rooms(self):
+		self.graph["layer_names"]["TRAVERSABILITY"] = {"layer": 3, "partition": 2}
+		self.place["partition"] = 2
+		self.place["attributes"]["label_weights"] = []
+		self.graph["metadata"] = {"features": {"4": {"clip_feature": [1.0], "sentence_embedding_feature": [1.0]}}}
+		self.original.write_text(json.dumps(self.graph))
+		args = ("validate", "--src", str(self.original), "--layer", "TRAVERSABILITY")
+		result = self._run(*args)
+		self.assertNotEqual(result.returncode, 0)
+		self.assertIn("native", result.stderr.lower())
+		self.place["attributes"]["label_weights"] = [[4, 1.0]]
+		self.original.write_text(json.dumps(self.graph))
+		self.assertEqual(self._run(*args).returncode, 0)
+		result = self._run(*args, "--require-rooms")
+		self.assertNotEqual(result.returncode, 0)
+		self.assertIn("room", result.stderr.lower())
 
 
 if __name__ == "__main__":

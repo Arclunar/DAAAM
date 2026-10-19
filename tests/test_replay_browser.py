@@ -1,332 +1,373 @@
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
+"""Real-browser tests of the replay viewer inside the workspace (RUN_BROWSER_TESTS=1, Selenium and Chrome).
+
+Every result is a real bundle finalized by the fixture service (tests/replay_web_fixture_server.py) and opened through
+the loopback service, so these tests cover the HTTP chunk loading as well as the WebGL viewer. `window.replayDebug` is
+the debug handle of the active tab's viewer.
+"""
+
 import time
 import unittest
-from pathlib import Path
 
-import numpy as np
+from tests.replay_browser_support import RUN_BROWSER_TESTS, ActionChains, By, FixtureService, Keys, WebDriverWait, make_driver, severe_logs
 
-
-REPO = Path(__file__).resolve().parents[1]
-RUN_BROWSER_TESTS = os.environ.get("RUN_BROWSER_TESTS") == "1"
-
-try:
-	from selenium import webdriver
-	from selenium.webdriver.common.by import By
-	from selenium.webdriver.common.action_chains import ActionChains
-	from selenium.webdriver.support.ui import WebDriverWait
-except ImportError:
-	webdriver = None
+PANE = "section.result-pane:not([hidden])"
 
 
-def find_chrome():
-	configured = os.environ.get("CHROME_BINARY")
-	if configured and Path(configured).is_file():
-		return configured
-	for command in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
-		found = shutil.which(command)
-		if found:
-			return found
-	for candidate in (
-		r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-		r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-	):
-		if Path(candidate).is_file():
-			return candidate
-	return None
+def frames(*items):
+	return [{"frame": frame, "object": obj, "place": place, "offset": offset} for frame, obj, place, offset in items]
 
 
-CHROME_BINARY = find_chrome()
-if RUN_BROWSER_TESTS and webdriver is None:
-	raise RuntimeError("RUN_BROWSER_TESTS=1 requires the Selenium Python package")
-if RUN_BROWSER_TESTS and CHROME_BINARY is None:
-	raise RuntimeError("RUN_BROWSER_TESTS=1 requires Chrome, Chromium, or CHROME_BINARY")
+@unittest.skipUnless(RUN_BROWSER_TESTS, "set RUN_BROWSER_TESTS=1 to run the real-browser interaction tests")
+class ReplayViewerBrowserTestCase(unittest.TestCase):
+	fixtures = None
+
+	@classmethod
+	def setUpClass(cls) -> None:
+		cls.fixtures = FixtureService()
+
+	@classmethod
+	def tearDownClass(cls) -> None:
+		if cls.fixtures is not None:
+			cls.fixtures.close()
+
+	def setUp(self) -> None:
+		self.driver = make_driver()
+		self.wait = WebDriverWait(self.driver, 30)
+
+	def tearDown(self) -> None:
+		self.driver.quit()
+
+	def result(self, **arguments) -> str:
+		return self.fixtures.call("make_result", **arguments)["path"]
+
+	def script(self, source: str, *args):
+		return self.driver.execute_script(source, *args)
+
+	def open_viewer(self, path: str, snapshot: int) -> None:
+		"""Open the workspace (if needed) and the result, and wait until the viewer shows `snapshot`."""
+		if not self.script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"):
+			self.driver.get(self.fixtures.base + "/replay.html")
+			self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready)"))
+		self.script("window.replayWorkspace.openFromUser(arguments[0])", path)
+		self.wait.until(lambda d: d.execute_script("return window.replayWorkspace.activeTab() && window.replayWorkspace.activeTab().canonicalPath") == path)
+		self.wait.until(lambda d: d.execute_script("return !!window.replayDebug && window.replayDebug.S.cur") == snapshot)
+
+	def el(self, role: str):
+		return self.driver.find_element(By.CSS_SELECTOR, f"{PANE} [data-role={role}]")
+
+	def set_slider(self, index: int) -> None:
+		self.script(f"const s = document.querySelector('{PANE} [data-role=slider]'); s.value = arguments[0]; s.dispatchEvent(new Event('input'));", index)
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == index)
+
+	def choose(self, role: str, value: str) -> None:
+		self.script(f"const e = document.querySelector('{PANE} [data-role=' + arguments[0] + ']'); e.value = arguments[1]; e.dispatchEvent(new Event('input', {{bubbles: true}}));", role, value)
+		self.script("window.replayDebug.draw()")
+
+	def label_keys(self):
+		return self.script(f"return Array.from(document.querySelectorAll('{PANE} [data-role=labels] .lab'), (e) => e.dataset.labelKey).sort()")
 
 
-def write_reference(path, side=30):
-	"""A flat side x side grid (two triangles per cell), the stand-in for the cached 1 cm reference mesh."""
-	ys, xs = np.mgrid[0:side, 0:side]
-	positions = np.stack([xs.ravel() * 0.05 - 0.5, ys.ravel() * 0.05 - 0.5, np.full(side * side, -0.1)], axis=1).astype(np.float32)
-	index = np.arange(side * side).reshape(side, side)
-	a, b, c, d = index[:-1, :-1].ravel(), index[:-1, 1:].ravel(), index[1:, :-1].ravel(), index[1:, 1:].ravel()
-	np.savez(
-		path,
-		positions=positions,
-		colors=np.tile(np.array([90, 140, 200], np.uint8), (side * side, 1)),
-		normals=np.tile(np.array([0.0, 0.0, 1.0], np.float32), (side * side, 1)),
-		triangles=np.concatenate([np.stack([a, b, c], axis=1), np.stack([b, d, c], axis=1)]).astype(np.uint32),
-	)
-	return side * side, 2 * (side - 1) ** 2
+class ReplayBrowserTest(ReplayViewerBrowserTestCase):
+	def test_source_frame_button_opens_image_without_moving_the_timeline(self) -> None:
+		path = self.result(name="source", snapshots=frames((1, 7, 3, 0.0)))
+		self.open_viewer(path, 0)
+		before = self.script("return window.replayDebug.S.cur")
+		button = self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"] .entity-source')
+		self.assertTrue(button.is_enabled())
+		self.assertEqual(button.text, "描述源帧")
+		button.click()
+		self.wait.until(lambda d: "open" in self.el("description-source-modal").get_attribute("class").split())
+		self.wait.until(lambda d: self.el("description-source-image").get_property("naturalWidth") > 0)
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), before)
+		caption = self.el("description-source-caption").text
+		self.assertIn("frame 1", caption)
+		self.assertIn("相机 rgb", caption)
+		self.assertTrue(self.el("description-source-image").get_attribute("src").startswith(self.fixtures.base + "/api/runs/"))
+		self.el("description-source-close").click()
+		self.assertNotIn("open", self.el("description-source-modal").get_attribute("class").split())
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), before)
+
+	def test_an_object_without_recorded_provenance_has_no_source_frame(self) -> None:
+		path = self.result(name="nosource", snapshots=frames((1, 7, 3, 0.0)), description=False)
+		self.open_viewer(path, 0)
+		button = self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"] .entity-source')
+		self.assertFalse(button.is_enabled())
+		self.assertEqual(button.text, "无描述源帧")
+
+	def test_playback_uses_snapshot_timestamps_at_one_times_speed(self) -> None:
+		path = self.result(name="playback", snapshots=frames(*[(frame, 7, 3, frame / 15.0) for frame in range(1, 13)]), max_chunk_snapshots=4)
+		self.open_viewer(path, 11)
+		self.el("first").click()
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
+		self.el("play").click()
+		time.sleep(0.7)
+		current = self.script("return window.replayDebug.S.wanted")
+		self.assertGreaterEqual(current, 7, "15 FPS data played substantially slower than its timestamps")
+
+	def test_entity_browser_selects_without_moving_the_timeline_and_hides_it(self) -> None:
+		path = self.result(name="entities", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.assertEqual(self.el("bbox-mode").get_attribute("value"), "selected")
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"]').click()
+		self.assertEqual(self.el("slider").get_attribute("value"), "1")
+		self.assertEqual(self.script("return window.replayDebug.S.selectedKey"), "object:7")
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), 1, "selection never moves the timeline")
+		self.assertEqual(self.script("return window.replayDebug.G.highlightNodes"), 0)
+		self.assertFalse(self.script("return window.replayDebug.G.overlay.visible"))
+		self.set_slider(0)
+		# the selection is an amber node plus a screen-space box overlay, no longer thin white WebGL lines
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.G.highlightNodes === 1 && window.replayDebug.G.overlay.visible"))
+		self.assertGreater(self.script("return window.replayDebug.G.overlay.segments"), 0)
+		polygon = self.script("return window.replayDebug.projectBox(window.replayDebug.S.objItems[0]).polygon")
+		self.assertGreaterEqual(len(polygon), 3)
+		bounds = self.script(f"const g = document.querySelector('{PANE} [data-role=gl]'); return [g.clientWidth, g.clientHeight]")
+		self.assertTrue(all(0 <= point[0] <= bounds[0] and 0 <= point[1] <= bounds[1] for point in polygon))
+		camera_cases = self.script("""
+			const eye = window.replayDebug.S.eye;
+			const inside = window.replayDebug.projectBox({mn: eye.map((value) => value - 0.01), mx: eye.map((value) => value + 0.01)});
+			const boundary = window.replayDebug.projectBox({mn: [eye[0], eye[1] - 0.01, eye[2] - 0.01], mx: [eye[0] + 0.01, eye[1] + 0.01, eye[2] + 0.01]});
+			return [inside.area, boundary ? boundary.area : null];
+		""")
+		viewport_area = bounds[0] * bounds[1]
+		self.assertEqual(camera_cases[0], viewport_area)
+		self.assertTrue(camera_cases[1] is None or camera_cases[1] < viewport_area * 0.99)
+		covering_face = self.script("return window.replayDebug.projectBox({mn: [-100, -100, -0.02], mx: [100, 100, 0.02]})")
+		self.assertIsNotNone(covering_face)
+		self.assertGreater(covering_face["area"], bounds[0] * bounds[1] * 0.2)
+		self.assertIn("首次", self.el("entity-detail").text)
+
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"] .entity-eye').click()
+		self.assertTrue(self.script("return window.replayDebug.S.hidden.has('object:7')"))
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.G.highlightNodes === 0 && !window.replayDebug.G.overlay.visible"))
+		self.set_slider(1)
+		self.set_slider(0)
+		self.assertTrue(self.script("return window.replayDebug.S.hidden.has('object:7')"))
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"] .entity-eye').click()
+		self.assertFalse(self.script("return window.replayDebug.S.hidden.has('object:7')"))
+
+		self.el("entity-tab-places").click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="place:3"]').click()
+		self.assertEqual(self.script("return window.replayDebug.S.selectedKey"), "place:3")
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), 0)
+
+		corner = self.script("return window.replayDebug.project(window.replayDebug.S.objItems[0].mn)")
+		canvas = self.el("gl")
+		ActionChains(self.driver).move_to_element_with_offset(
+			canvas, corner[0] - canvas.size["width"] / 2 + 4, corner[1] - canvas.size["height"] / 2 + 4,
+		).click().perform()
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.selectedKey") == "object:7")
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), 0, "picking in the map never moves the timeline")
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_the_first_view_fetches_bounded_chunks_and_images_by_url(self) -> None:
+		path = self.result(name="chunks", snapshots=frames(*[(frame, 7, 3, frame / 15.0) for frame in range(1, 10)]), max_chunk_snapshots=2)
+		self.open_viewer(path, 8)
+		time.sleep(1.0)
+		requests = self.script("return performance.getEntriesByType('resource').map((entry) => entry.name)")
+		timeline = [url for url in requests if "/timeline/" in url]
+		self.assertLessEqual(len(timeline), 2, timeline)
+		self.assertTrue(any("/timeline/4?v=" in url for url in timeline), "the last chunk holds the last snapshot")
+		self.assertNotIn("data:image", self.driver.page_source)
+		sources = self.script(f"return [...document.querySelectorAll('{PANE} .camera-card__image')].map((img) => img.getAttribute('src'))")
+		self.assertEqual(len(sources), 2)
+		self.assertTrue(all(source.startswith("/api/runs/") for source in sources), sources)
+		self.wait.until(lambda d: d.execute_script(f"return [...document.querySelectorAll('{PANE} .camera-card__image')].every((img) => img.naturalWidth > 0)"))
+		self.set_slider(0)
+		self.assertGreaterEqual(len([url for url in self.script("return performance.getEntriesByType('resource').map((entry) => entry.name)") if "/timeline/" in url]), 3)
+		self.assertEqual(severe_logs(self.driver), [])
+
+	def test_a_corrupt_chunk_stops_only_that_result_and_names_the_chunk(self) -> None:
+		good = self.result(name="good", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		bad = self.result(name="bad", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0), (9, 9, 5, 2.0)), max_chunk_snapshots=1)
+		damaged = self.fixtures.call("corrupt_chunk", path=bad, index=0)["chunk"]
+		self.open_viewer(good, 1)
+		self.open_viewer(bad, 2)
+		self.set_slider(1)
+		self.script(f"const s = document.querySelector('{PANE} [data-role=slider]'); s.value = 0; s.dispatchEvent(new Event('input'));")
+		self.wait.until(lambda d: not self.el("error").get_attribute("hidden") and damaged in self.el("error").text)
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), 1, "the last good snapshot stays on screen")
+		self.script("window.replayWorkspace.activate([...window.replayWorkspace.tabs.values()][0].tabId)")
+		self.set_slider(0)
+		self.assertEqual(self.el("error").get_attribute("hidden"), "true")
 
 
-def write_rich_snapshot(path, frame):
-	"""Anchors that overlap on screen: three objects a few centimetres apart, two places, a room and a building."""
-	lower = np.array([[0.0, 0.0, 0.0], [0.02, 0.01, 0.0], [0.04, 0.02, 0.0]], np.float32)
-	arrays = {
-		"mesh_pos": np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]], np.float32),
-		"mesh_col": np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]], np.uint8),
-		"mesh_faces": np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], np.uint32),
-		"obj_cid": np.array([11, 12, 13], np.int32),
-		"obj_label": np.array([42, 43, 44], np.uint32),
-		"obj_min": lower,
-		"obj_max": lower + np.array([0.4, 0.4, 0.6], np.float32),
-		"place_cid": np.array([3, 4], np.int32),
-		"place_pos": np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]], np.float32),
-		"place_rad": np.array([0.2, 0.2], np.float32),
-		"place_edges": np.zeros((0, 2), np.int32),
-		"room_pos": np.array([[0.5, 0.5, 0.0]], np.float32),
-		"room_place_edges": np.zeros((0, 2), np.int32),
-		"bld_pos": np.array([[0.5, 0.5, 0.0]], np.float32),
-		"bld_room_edges": np.zeros((0, 2), np.int32),
-		"obj_place_edges": np.zeros((0, 2), np.int32),
-		"agent_pos": np.array([[0.0, 0.0, 0.0]], np.float32),
-		"agent_quat": np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),
-		"agent_t": np.array([frame / 15.0], np.float64),
-		"place_t": np.array([frame / 15.0], np.float64),
-	}
-	np.savez(path / ("snap_%06d.npz" % frame), **arrays)
+class ReplayTabsBrowserTest(ReplayViewerBrowserTestCase):
+	def test_tabs_own_their_time_and_only_the_active_one_renders_or_loads_images(self) -> None:
+		first = self.result(name="first", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		second = self.result(name="second", kind="coda", snapshots=frames((1, 7, 3, 0.0), (2, 8, 4, 1.0), (3, 9, 5, 2.0)))
+		self.open_viewer(first, 1)
+		self.set_slider(0)
+		self.open_viewer(second, 2)
+		state = self.script("""
+			const tabs = [...window.replayWorkspace.tabs.values()];
+			return tabs.map((tab) => [tab.viewer.active, tab.viewer.S.cur, tab.viewer.G.draws,
+				[...tab.pane.querySelectorAll('.camera-card__image')].map((img) => img.hasAttribute('src'))]);
+		""")
+		self.assertEqual([row[:2] for row in state], [[False, 0], [True, 2]])
+		self.assertEqual(state[0][3], [False, False], "a background tab decodes no camera images")
+		background_draws = state[0][2]
+		self.script("window.dispatchEvent(new Event('resize')); window.replayDebug.draw();")
+		time.sleep(0.6)
+		self.assertEqual(self.script("return [...window.replayWorkspace.tabs.values()][0].viewer.G.draws"), background_draws, "a background tab does not render")
+		self.script("window.replayWorkspace.activate([...window.replayWorkspace.tabs.values()][0].tabId)")
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
+		self.wait.until(lambda d: d.execute_script(f"return [...document.querySelectorAll('{PANE} .camera-card__image')].every((img) => img.naturalWidth > 0)"))
+		self.assertEqual(self.script("return [...window.replayWorkspace.tabs.values()][1].viewer.S.cur"), 2)
+
+	def test_a_background_tab_pauses_playback_and_resumes_on_return(self) -> None:
+		path = self.result(name="long", snapshots=frames(*[(frame, 7, 3, frame / 15.0) for frame in range(1, 90)]), max_chunk_snapshots=16)
+		other = self.result(name="other", snapshots=frames((1, 7, 3, 0.0)))
+		self.open_viewer(path, 88)
+		self.el("first").click()
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
+		self.el("play").click()
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.wanted") >= 3)
+		self.open_viewer(other, 0)
+		paused = self.script("const v = [...window.replayWorkspace.tabs.values()][0].viewer; return [v.playing, v.wasPlaying, v.S.wanted]")
+		self.assertEqual(paused[:2], [False, True])
+		time.sleep(0.6)
+		self.assertEqual(self.script("return [...window.replayWorkspace.tabs.values()][0].viewer.S.wanted"), paused[2], "time stands still in the background")
+		self.script("window.replayWorkspace.activate([...window.replayWorkspace.tabs.values()][0].tabId)")
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.viewer.playing"))
+		self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.wanted") > paused[2])
+
+	def test_the_view_of_each_tab_is_restored_after_a_reload(self) -> None:
+		path = self.result(name="restore", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0), (9, 9, 5, 2.0)))
+		self.open_viewer(path, 2)
+		self.set_slider(1)
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:8"]').click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:7"] .entity-eye').click()
+		self.choose("label-mode", "all")
+		self.script("const d = window.replayDebug; d.S.yaw = 2.25; d.S.pitch = 0.3; d.S.dist *= 1.5; d.viewer.changed();")
+		expected = self.script("return [window.replayDebug.S.dist, window.replayDebug.S.target]")
+		self.wait.until(lambda d: (d.execute_script("return JSON.parse(localStorage.getItem('daaam.replay.workspace.v1'))")["tabs"][0]["viewerState"] or {}).get("camera", {}).get("yaw") == 2.25)
+		self.driver.refresh()
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready && window.replayDebug && window.replayDebug.viewer.started)"))
+		restored = self.script("""
+			const d = window.replayDebug;
+			return [d.S.cur, d.S.selectedKey, [...d.S.hidden], document.querySelector('section.result-pane:not([hidden]) [data-role=label-mode]').value, d.S.yaw, d.S.pitch, d.S.dist, d.S.target];
+		""")
+		self.assertEqual(restored[:4], [1, "object:8", ["object:7"], "all"])
+		self.assertAlmostEqual(restored[4], 2.25)
+		self.assertAlmostEqual(restored[5], 0.3)
+		self.assertAlmostEqual(restored[6], expected[0], places=4)
+		for got, want in zip(restored[7], expected[1]):
+			self.assertAlmostEqual(got, want, places=4)
 
 
-def build_page(recording, page, reference=None):
-	command = [sys.executable, str(REPO / "scripts" / "replay.py"), "build", str(recording), "--out", str(page)]
-	if reference is not None:
-		command += ["--reference-mesh", str(reference)]
-	return subprocess.run(command, cwd=REPO, capture_output=True, text=True)
+class ReplayCameraCardsBrowserTest(ReplayViewerBrowserTestCase):
+	"""The current-time camera cards: dragged by their handle, raised, kept inside the workspace and remembered per result."""
 
+	def card(self, key: str):
+		return self.driver.find_element(By.CSS_SELECTOR, f"{PANE} .camera-card[data-camera={key}]")
 
-def make_driver():
-	options = webdriver.ChromeOptions()
-	options.binary_location = CHROME_BINARY
-	options.add_argument("--headless=new")
-	options.add_argument("--disable-gpu")
-	options.add_argument("--no-sandbox")
-	options.add_argument("--window-size=1280,800")
-	options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-	return webdriver.Chrome(options=options)
+	def handle(self, key: str):
+		return self.card(key).find_element(By.CSS_SELECTOR, ".camera-card__handle")
 
+	def position(self, key: str):
+		rect = self.card(key).rect
+		return round(rect["x"]), round(rect["y"])
 
-def write_snapshot(path, frame, object_id, place_id, offset):
-	arrays = {
-		"mesh_pos": np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]], np.float32),
-		"mesh_col": np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]], np.uint8),
-		"mesh_faces": np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], np.uint32),
-		"obj_cid": np.array([object_id], np.int32),
-		"obj_label": np.array([42], np.uint32),
-		"obj_min": np.array([[offset, 0.0, 0.0]], np.float32),
-		"obj_max": np.array([[offset + 0.4, 0.4, 0.6]], np.float32),
-		"place_cid": np.array([place_id], np.int32),
-		"place_pos": np.array([[offset, 0.0, 0.0]], np.float32),
-		"place_rad": np.array([0.2], np.float32),
-		"place_edges": np.zeros((0, 2), np.int32),
-		"room_pos": np.zeros((0, 3), np.float32),
-		"room_place_edges": np.zeros((0, 2), np.int32),
-		"bld_pos": np.zeros((0, 3), np.float32),
-		"bld_room_edges": np.zeros((0, 2), np.int32),
-		"obj_place_edges": np.array([[0, 0]], np.int32),
-		"agent_pos": np.array([[offset, 0.0, 0.0]], np.float32),
-		"agent_quat": np.array([[1.0, 0.0, 0.0, 0.0]], np.float32),
-		"agent_t": np.array([frame / 15.0], np.float64),
-		"place_t": np.array([frame / 15.0], np.float64),
-	}
-	np.savez(path / ("snap_%06d.npz" % frame), **arrays)
+	def stored_layout(self, index: int = 0):
+		state = self.script("return JSON.parse(localStorage.getItem('daaam.replay.workspace.v1'))")
+		return ((state or {}).get("tabs") or [{}])[index].get("viewerState", {}).get("cameraLayout") or {}
 
+	def drag(self, key: str, dx: int, dy: int) -> None:
+		ActionChains(self.driver).move_to_element(self.handle(key)).click_and_hold().move_by_offset(dx // 2, dy // 2).move_by_offset(dx - dx // 2, dy - dy // 2).release().perform()
 
-@unittest.skipUnless(RUN_BROWSER_TESTS, "set RUN_BROWSER_TESTS=1 to run the real-browser interaction test")
-class ReplayBrowserTest(unittest.TestCase):
-	def test_source_frame_button_opens_image_without_moving_the_timeline(self):
-		import cv2
+	def drag_to_corner(self, key: str, bottom_right: bool) -> None:
+		"""Drag a handle to a corner of the browser window (Selenium cannot move the pointer outside it)."""
+		rect = self.handle(key).rect
+		width, height = self.script("return [window.innerWidth, window.innerHeight]")
+		target = (width - 3, height - 3) if bottom_right else (3, 3)
+		self.drag(key, int(target[0] - (rect["x"] + rect["width"] / 2)), int(target[1] - (rect["y"] + rect["height"] / 2)))
 
-		with tempfile.TemporaryDirectory() as temp:
-			root = Path(temp)
-			recording, run, dataset = root / "recording", root / "run", root / "dataset"
-			recording.mkdir(); run.mkdir(); (dataset / "rgb").mkdir(parents=True)
-			write_snapshot(recording, 1, 7, 3, 0.0)
-			cv2.imwrite(str(dataset / "rgb" / "000000.png"), np.full((8, 8, 3), (0, 255, 0), np.uint8))
-			(run / "corrections.yaml").write_text(
-				"label_names:\n  - label: 42\n    name: a green object\n"
-				"    description_source:\n      frame_id: 1\n      timestamp: 0.067\n",
-				encoding="utf-8",
-			)
-			page = root / "replay.html"
-			result = subprocess.run(
-				[sys.executable, str(REPO / "scripts" / "replay.py"), "build", str(recording),
-				 "--run", str(run), "--dataset", str(dataset), "--thumb-width", "8", "--out", str(page)],
-				cwd=REPO, capture_output=True, text=True,
-			)
-			self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+	def wait_for_images(self) -> None:
+		self.wait.until(lambda d: d.execute_script(f"return [...document.querySelectorAll('{PANE} .camera-card__image')].every((img) => img.complete && img.naturalWidth > 0)"))
 
-			driver = make_driver()
-			try:
-				driver.get(page.as_uri())
-				wait = WebDriverWait(driver, 10)
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
-				before = driver.execute_script("return window.replayDebug.S.cur")
-				button = driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:7"] .entity-source')
-				self.assertTrue(button.is_enabled())
-				button.click()
-				wait.until(lambda d: "open" in d.find_element(By.ID, "description-source-modal").get_attribute("class").split())
-				wait.until(lambda d: d.find_element(By.ID, "description-source-image").get_property("naturalWidth") > 0)
-				self.assertEqual(driver.execute_script("return window.replayDebug.S.cur"), before)
-				self.assertIn("frame 1", driver.find_element(By.ID, "description-source-caption").text)
-				driver.find_element(By.ID, "description-source-close").click()
-				self.assertNotIn("open", driver.find_element(By.ID, "description-source-modal").get_attribute("class").split())
-			finally:
-				driver.quit()
+	def test_a_card_moves_by_its_handle_without_moving_time_and_comes_back_after_a_reload(self) -> None:
+		path = self.result(name="cards", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		original_time = self.script("return window.replayDebug.S.cur")
+		before = self.position("rgb")
+		self.drag("rgb", -120, -80)
+		after = self.position("rgb")
+		self.assertNotEqual(before, after)
+		self.assertAlmostEqual(after[0], before[0] - 120, delta=2)
+		self.assertAlmostEqual(after[1], before[1] - 80, delta=2)
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), original_time, "moving a card never moves the timeline")
+		self.assertEqual(self.el("slider").get_attribute("value"), str(original_time))
+		self.wait.until(lambda d: "rgb" in self.stored_layout())
+		self.driver.refresh()
+		self.wait.until(lambda d: d.execute_script("return !!(window.replayWorkspace && window.replayWorkspace.ready && window.replayDebug && window.replayDebug.viewer.started)"))
+		self.wait_for_images()
+		restored = self.position("rgb")
+		self.assertAlmostEqual(restored[0], after[0], delta=2)
+		self.assertAlmostEqual(restored[1], after[1], delta=2)
 
-	def test_playback_uses_snapshot_timestamps_at_one_times_speed(self):
-		with tempfile.TemporaryDirectory() as temp:
-			root = Path(temp)
-			recording = root / "recording"
-			recording.mkdir()
-			for frame in range(1, 13):
-				write_snapshot(recording, frame, 7, 3, frame / 15.0)
-			page = root / "replay.html"
-			result = subprocess.run(
-				[
-					sys.executable,
-					str(REPO / "scripts" / "replay.py"),
-					"build",
-					str(recording),
-					"--out",
-					str(page),
-				],
-				cwd=REPO,
-				capture_output=True,
-				text=True,
-			)
-			self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+	def test_each_tab_keeps_its_own_camera_layout(self) -> None:
+		first = self.result(name="cards_a", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		second = self.result(name="cards_b", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(first, 1)
+		self.wait_for_images()
+		default = self.position("rgb")
+		self.drag("rgb", -150, -100)
+		moved = self.position("rgb")
+		self.open_viewer(second, 1)
+		self.wait_for_images()
+		self.assertEqual(self.position("rgb"), default, "a new tab starts from the default layout")
+		self.script("window.replayWorkspace.activate([...window.replayWorkspace.tabs.values()][0].tabId)")
+		self.wait_for_images()
+		self.assertEqual(self.position("rgb"), moved)
 
-			options = webdriver.ChromeOptions()
-			options.binary_location = CHROME_BINARY
-			options.add_argument("--headless=new")
-			options.add_argument("--disable-gpu")
-			options.add_argument("--no-sandbox")
-			driver = webdriver.Chrome(options=options)
-			try:
-				driver.get(page.as_uri())
-				wait = WebDriverWait(driver, 10)
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 11)
-				driver.find_element(By.ID, "first").click()
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
-				driver.find_element(By.ID, "play").click()
-				time.sleep(0.7)
-				current = driver.execute_script("return window.replayDebug.S.wanted")
-				self.assertGreaterEqual(current, 7, "15 FPS data played substantially slower than its timestamps")
-			finally:
-				driver.quit()
+	def test_cards_stay_inside_the_workspace_and_reset_restores_the_default_layout(self) -> None:
+		path = self.result(name="cards_clamp", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		defaults = {key: self.position(key) for key in ("rgb", "depth")}
+		self.drag_to_corner("depth", bottom_right=True)   # its body ends up past the bottom-right corner
+		self.drag_to_corner("rgb", bottom_right=False)   # and its handle above the workspace
+		for _ in range(2):
+			pane = self.driver.find_element(By.CSS_SELECTOR, PANE).rect
+			for key in ("rgb", "depth"):
+				rect = self.card(key).rect
+				self.assertGreaterEqual(rect["x"], pane["x"] - 1, key)
+				self.assertGreaterEqual(rect["y"], pane["y"] - 1, key)
+				self.assertLessEqual(rect["x"] + rect["width"], pane["x"] + pane["width"] + 1, key)
+				self.assertLessEqual(rect["y"] + rect["height"], pane["y"] + pane["height"] + 1, key)
+			self.driver.set_window_size(960, 720)
+			self.wait.until(lambda d: d.execute_script("return window.innerWidth") < 1000)
+			time.sleep(0.3)
+		self.driver.set_window_size(1280, 1000)
+		self.wait.until(lambda d: d.execute_script("return window.innerWidth") > 1200)
+		time.sleep(0.3)
+		self.el("reset-cameras").click()
+		self.assertEqual({key: self.position(key) for key in ("rgb", "depth")}, defaults)
+		self.wait.until(lambda d: self.stored_layout() == {})
 
-	def test_entity_browser_selects_without_moving_the_timeline_and_hides_it(self):
-		with tempfile.TemporaryDirectory() as temp:
-			root = Path(temp)
-			recording = root / "recording"
-			recording.mkdir()
-			write_snapshot(recording, 1, 7, 3, 0.0)
-			write_snapshot(recording, 5, 8, 4, 1.0)
-			page = root / "replay.html"
-			result = subprocess.run(
-				[
-					sys.executable,
-					str(REPO / "scripts" / "replay.py"),
-					"build",
-					str(recording),
-					"--out",
-					str(page),
-				],
-				cwd=REPO,
-				capture_output=True,
-				text=True,
-			)
-			self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-			options = webdriver.ChromeOptions()
-			options.binary_location = CHROME_BINARY
-			options.add_argument("--headless=new")
-			options.add_argument("--disable-gpu")
-			options.add_argument("--no-sandbox")
-			options.add_argument("--window-size=1280,800")
-			options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-			driver = webdriver.Chrome(options=options)
-			try:
-				driver.get(page.as_uri())
-				wait = WebDriverWait(driver, 10)
-				wait.until(lambda d: d.find_element(By.ID, "entity-browser"))
-				self.assertEqual(driver.find_element(By.ID, "bbox-mode").get_attribute("value"), "selected")
-				row = driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:7"]')
-				row.click()
-				self.assertEqual(driver.find_element(By.ID, "slider").get_attribute("value"), "1")
-				self.assertEqual(driver.execute_script("return window.replayDebug.S.selectedKey"), "object:7")
-				self.assertEqual(driver.execute_script("return window.replayDebug.G.highlightNodes"), 0)
-				self.assertFalse(driver.execute_script("return window.replayDebug.G.overlay.visible"))
-				driver.execute_script("document.getElementById('slider').value = 0; document.getElementById('slider').dispatchEvent(new Event('input'))")
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
-				# the selection is an amber node plus a screen-space box overlay, no longer thin white WebGL lines
-				wait.until(lambda d: d.execute_script("return window.replayDebug.G.highlightNodes === 1 && window.replayDebug.G.overlay.visible"))
-				self.assertGreater(driver.execute_script("return window.replayDebug.G.overlay.segments"), 0)
-				polygon = driver.execute_script("return window.replayDebug.projectBox(window.replayDebug.S.objItems[0]).polygon")
-				self.assertGreaterEqual(len(polygon), 3)
-				bounds = driver.execute_script("return [document.getElementById('gl').clientWidth, document.getElementById('gl').clientHeight]")
-				self.assertTrue(all(0 <= point[0] <= bounds[0] and 0 <= point[1] <= bounds[1] for point in polygon))
-				camera_cases = driver.execute_script("""
-					const eye = window.replayDebug.S.eye;
-					const inside = window.replayDebug.projectBox({
-						mn: eye.map((value) => value - 0.01),
-						mx: eye.map((value) => value + 0.01),
-					});
-					const boundary = window.replayDebug.projectBox({
-						mn: [eye[0], eye[1] - 0.01, eye[2] - 0.01],
-						mx: [eye[0] + 0.01, eye[1] + 0.01, eye[2] + 0.01],
-					});
-					return [inside.area, boundary ? boundary.area : null];
-				""")
-				viewport_area = bounds[0] * bounds[1]
-				self.assertEqual(camera_cases[0], viewport_area)
-				self.assertTrue(camera_cases[1] is None or camera_cases[1] < viewport_area * 0.99)
-				covering_face = driver.execute_script("return window.replayDebug.projectBox({mn: [-100, -100, -0.02], mx: [100, 100, 0.02]})")
-				self.assertIsNotNone(covering_face)
-				self.assertGreater(covering_face["area"], bounds[0] * bounds[1] * 0.2)
-				self.assertIn("首次", driver.find_element(By.ID, "entity-detail").text)
-
-				eye = driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:7"] .entity-eye')
-				eye.click()
-				self.assertTrue(driver.execute_script("return window.replayDebug.S.hidden.has('object:7')"))
-				wait.until(lambda d: d.execute_script("return window.replayDebug.G.highlightNodes === 0 && !window.replayDebug.G.overlay.visible"))
-				driver.execute_script("document.getElementById('slider').value = 1; document.getElementById('slider').dispatchEvent(new Event('input'))")
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 1)
-				driver.execute_script("document.getElementById('slider').value = 0; document.getElementById('slider').dispatchEvent(new Event('input'))")
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == 0)
-				self.assertTrue(driver.execute_script("return window.replayDebug.S.hidden.has('object:7')"))
-				eye = driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:7"] .entity-eye')
-				eye.click()
-				self.assertFalse(driver.execute_script("return window.replayDebug.S.hidden.has('object:7')"))
-
-				driver.find_element(By.ID, "entity-tab-places").click()
-				place = driver.find_element(By.CSS_SELECTOR, '[data-entity-key="place:3"]')
-				place.click()
-				self.assertEqual(driver.execute_script("return window.replayDebug.S.selectedKey"), "place:3")
-
-				corner = driver.execute_script(
-					"return window.replayDebug.project(window.replayDebug.S.objItems[0].mn)"
-				)
-				canvas = driver.find_element(By.ID, "gl")
-				ActionChains(driver).move_to_element_with_offset(
-					canvas,
-					corner[0] - canvas.size["width"] / 2 + 4,
-					corner[1] - canvas.size["height"] / 2 + 4,
-				).click().perform()
-				wait.until(lambda d: d.execute_script("return window.replayDebug.S.selectedKey") == "object:7")
-				severe = [entry for entry in driver.get_log("browser") if entry["level"] == "SEVERE"]
-				self.assertEqual(severe, [])
-			finally:
-				driver.quit()
+	def test_a_clicked_card_comes_to_the_front_and_a_focused_handle_moves_with_the_keyboard(self) -> None:
+		path = self.result(name="cards_keys", snapshots=frames((1, 7, 3, 0.0), (5, 8, 4, 1.0)))
+		self.open_viewer(path, 1)
+		self.wait_for_images()
+		z = lambda key: int(self.script("return getComputedStyle(arguments[0]).zIndex", self.card(key)))
+		self.handle("rgb").click()
+		self.assertGreater(z("rgb"), z("depth"))
+		self.handle("depth").click()
+		self.assertGreater(z("depth"), z("rgb"))
+		original_time = self.script("return window.replayDebug.S.cur")
+		before = self.position("rgb")
+		self.handle("rgb").send_keys(Keys.ARROW_LEFT)
+		self.assertEqual(self.position("rgb"), (before[0] - 10, before[1]))
+		self.handle("rgb").send_keys(Keys.SHIFT, Keys.ARROW_UP)
+		self.assertEqual(self.position("rgb"), (before[0] - 10, before[1] - 1))
+		self.assertEqual(self.script("return window.replayDebug.S.cur"), original_time, "arrow keys on a card handle do not step the timeline")
 
 
 LABEL_VISIBILITY_SCRIPT = """
-	const d = window.replayDebug, gl = document.getElementById('gl');
+	const d = window.replayDebug, gl = document.querySelector('section.result-pane:not([hidden]) [data-role=gl]');
 	return d.labels().map((item) => {
-		const el = document.querySelector('#labels .lab[data-label-key="' + item.key + '"]');
+		const el = document.querySelector('section.result-pane:not([hidden]) [data-role=labels] .lab[data-label-key="' + item.key + '"]');
 		const s = d.project(item.pos);
 		const inside = !!s && s[0] >= 0 && s[0] <= gl.clientWidth && s[1] >= 0 && s[1] <= gl.clientHeight;
 		return [item.key, inside, !!el && el.style.display !== 'none'];
@@ -334,93 +375,55 @@ LABEL_VISIBILITY_SCRIPT = """
 """
 
 
-@unittest.skipUnless(RUN_BROWSER_TESTS, "set RUN_BROWSER_TESTS=1 to run the real-browser interaction test")
-class ReplayViewerFeaturesBrowserTest(unittest.TestCase):
-	"""Mesh source selector, stable label modes and the selection overlay of scripts/replay_viewer.html."""
+class ReplayViewerFeaturesBrowserTest(ReplayViewerBrowserTestCase):
+	"""Mesh source selector, stable label modes and the selection overlay of the viewer."""
 
-	def setUp(self):
-		self.temp = tempfile.TemporaryDirectory()
-		self.root = Path(self.temp.name)
-		self.recording = self.root / "recording"
-		self.recording.mkdir()
-		self.page = self.root / "replay.html"
-		self.driver = None
+	def open_page(self, reference: bool = False, rich: bool = False) -> None:
+		snapshots = frames((1, 7, 3, 0.1), (4, 7, 3, 0.4))
+		path = self.result(name="features", snapshots=snapshots, rich=rich, reference=reference)
+		self.open_viewer(path, 1)
 
-	def tearDown(self):
-		if self.driver is not None:
-			self.driver.quit()
-		self.temp.cleanup()
-
-	def open_page(self, reference=None, rich=False):
-		for frame in (1, 4):
-			if rich:
-				write_rich_snapshot(self.recording, frame)
-			else:
-				write_snapshot(self.recording, frame, 7, 3, frame / 10.0)
-		result = build_page(self.recording, self.page, reference)
-		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-		self.driver = make_driver()
-		self.driver.get(self.page.as_uri())
-		self.wait = WebDriverWait(self.driver, 20)
-		self.wait.until(lambda d: d.execute_script("return !!window.replayDebug && window.replayDebug.S.cur") == 1)
-		return self.driver
-
-	def script(self, source, *args):
-		return self.driver.execute_script(source, *args)
-
-	def choose(self, element_id, value):
-		self.script("const e = document.getElementById(arguments[0]); e.value = arguments[1]; e.dispatchEvent(new Event('input', {bubbles: true}));", element_id, value)
-		self.script("window.replayDebug.draw()")
-
-	def label_keys(self):
-		return self.script("return Array.from(document.querySelectorAll('#labels .lab'), (e) => e.dataset.labelKey).sort()")
-
-	def severe_logs(self):
-		return [entry for entry in self.driver.get_log("browser") if entry["level"] == "SEVERE"]
-
-	def test_the_reference_mesh_is_the_default_and_the_sources_switch_offline(self):
-		reference = self.root / "reference.npz"
-		vertices, triangles = write_reference(reference)
-		driver = self.open_page(reference)
-		self.assertEqual(self.script("return Array.from(document.getElementById('mesh-mode').options, (o) => o.value)"), ["reference", "dynamic", "none"])
-		self.assertEqual(self.script("return document.getElementById('mesh-mode').value"), "reference")
+	def test_the_reference_mesh_is_the_default_and_the_sources_switch_without_reuploading(self) -> None:
+		self.open_page(reference=True)
+		vertices, triangles = 900, 2 * 29 * 29
+		self.assertEqual(self.script(f"return Array.from(document.querySelector('{PANE} [data-role=mesh-mode]').options, (o) => o.value)"), ["reference", "dynamic", "none"])
+		self.assertEqual(self.el("mesh-mode").get_attribute("value"), "reference")
 		self.wait.until(lambda d: d.execute_script("window.replayDebug.draw(); return window.replayDebug.G.meshKey") == "reference")
 		self.assertEqual(self.script("return [window.replayDebug.G.meshCount, window.replayDebug.G.meshTriangles]"), [vertices, triangles])
-		self.assertIn("不是真值", driver.find_element(By.ID, "mesh-status").text)
-		self.assertIn("1 cm", driver.find_element(By.ID, "mesh-status").text)
+		self.assertIn("不是真值", self.el("mesh-status").text)
+		self.assertIn("1 cm", self.el("mesh-status").text)
 		uploads = self.script("return window.replayDebug.G.meshUploads")
 		for index in (0, 1, 0):   # scrubbing the timeline must not upload the static mesh again
-			self.script("const s = document.getElementById('slider'); s.value = arguments[0]; s.dispatchEvent(new Event('input'));", index)
-			self.wait.until(lambda d: d.execute_script("return window.replayDebug.S.cur") == index)
+			self.set_slider(index)
 			self.script("window.replayDebug.draw()")
 		self.assertEqual(self.script("return window.replayDebug.G.meshUploads"), uploads)
 		self.assertEqual(self.script("return window.replayDebug.G.meshKey"), "reference")
-
 		self.choose("mesh-mode", "dynamic")
 		self.assertTrue(self.script("return window.replayDebug.G.meshKey.startsWith('dynamic:')"))
 		self.assertEqual(self.script("return [window.replayDebug.G.meshCount, window.replayDebug.G.meshTriangles]"), [4, 4])
-		self.assertNotIn("不是真值", driver.find_element(By.ID, "mesh-status").text)
+		self.assertNotIn("不是真值", self.el("mesh-status").text)
 		self.choose("mesh-mode", "none")
 		self.assertEqual(self.script("return [window.replayDebug.G.meshKey, window.replayDebug.G.meshCount]"), ["none", 0])
 		self.choose("mesh-mode", "reference")
 		self.assertEqual(self.script("return [window.replayDebug.G.meshKey, window.replayDebug.G.meshCount]"), ["reference", vertices])
 		self.assertEqual(self.script("return window.replayDebug.D.reference_mesh.vertices"), vertices)
-		self.assertEqual(self.severe_logs(), [])
+		self.assertEqual(len([url for url in self.script("return performance.getEntriesByType('resource').map((e) => e.name)") if url.split("?")[0].endswith("/reference")]), 1, "the reference is fetched once")
+		self.assertEqual(severe_logs(self.driver), [])
 
-	def test_a_page_without_a_reference_offers_only_the_dynamic_mesh(self):
+	def test_a_bundle_without_a_reference_offers_only_the_dynamic_mesh(self) -> None:
 		self.open_page()
-		self.assertEqual(self.script("return Array.from(document.getElementById('mesh-mode').options, (o) => o.value)"), ["dynamic", "none"])
-		self.assertEqual(self.script("return document.getElementById('mesh-mode').value"), "dynamic")
+		self.assertEqual(self.script(f"return Array.from(document.querySelector('{PANE} [data-role=mesh-mode]').options, (o) => o.value)"), ["dynamic", "none"])
+		self.assertEqual(self.el("mesh-mode").get_attribute("value"), "dynamic")
 		self.assertTrue(self.script("window.replayDebug.draw(); return window.replayDebug.G.meshKey.startsWith('dynamic:')"))
 		self.assertEqual(self.script("return window.replayDebug.G.meshCount"), 4)
-		self.assertEqual(self.severe_logs(), [])
+		self.assertEqual(severe_logs(self.driver), [])
 
-	def test_all_cards_keep_their_membership_while_the_camera_moves_and_one_control_hides_them(self):
-		driver = self.open_page(rich=True)
-		self.assertEqual(self.script("return document.getElementById('label-mode').value"), "selected")
+	def test_all_cards_keep_their_membership_while_the_camera_moves_and_one_control_hides_them(self) -> None:
+		self.open_page(rich=True)
+		self.assertEqual(self.el("label-mode").get_attribute("value"), "selected")
 		self.assertEqual(self.label_keys(), [], "no card before something is selected")
-		driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:12"]').click()
-		self.wait.until(lambda d: d.execute_script("window.replayDebug.draw(); return document.querySelectorAll('#labels .lab').length") == 1)
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:12"]').click()
+		self.wait.until(lambda d: d.execute_script(f"window.replayDebug.draw(); return document.querySelectorAll('{PANE} [data-role=labels] .lab').length") == 1)
 		self.assertEqual(self.label_keys(), ["object:12"])
 
 		self.choose("label-mode", "all")
@@ -432,28 +435,26 @@ class ReplayViewerFeaturesBrowserTest(unittest.TestCase):
 			for key, inside, shown in self.script(LABEL_VISIBILITY_SCRIPT):
 				self.assertEqual(inside, shown, f"{key} is hidden only when its own anchor is off screen")
 		self.script("window.replayDebug.resetView(); window.replayDebug.draw();")
-		self.assertEqual(self.script("return Array.from(document.querySelectorAll('#labels .lab')).pop().dataset.labelKey"), "object:12")
-		self.assertEqual(self.script("return getComputedStyle(document.querySelector('#labels .lab.selected')).zIndex"), "2")
+		self.assertEqual(self.script(f"return Array.from(document.querySelectorAll('{PANE} [data-role=labels] .lab')).pop().dataset.labelKey"), "object:12")
+		self.assertEqual(self.script(f"return getComputedStyle(document.querySelector('{PANE} [data-role=labels] .lab.selected')).zIndex"), "2")
 
-		driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:13"] .entity-eye').click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:13"] .entity-eye').click()
 		self.script("window.replayDebug.draw()")
 		self.assertEqual(self.label_keys(), [key for key in everything if key != "object:13"])
-		driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:13"] .entity-eye').click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:13"] .entity-eye').click()
 		self.script("window.replayDebug.draw()")
 		self.assertEqual(self.label_keys(), everything)
 
 		self.choose("label-mode", "none")
-		self.assertEqual(self.script("return Array.from(document.querySelectorAll('#labels .lab')).filter((e) => e.style.display !== 'none').length"), 0)
-		self.assertGreaterEqual(self.script("return document.querySelectorAll('#entity-list .entity-row').length"), 3, "the entity browser stays")
-		self.assertIn("物体", self.script("return document.getElementById('entity-detail').textContent"))
-		self.assertEqual(self.severe_logs(), [])
+		self.assertEqual(self.script(f"return Array.from(document.querySelectorAll('{PANE} [data-role=labels] .lab')).filter((e) => e.style.display !== 'none').length"), 0)
+		self.assertGreaterEqual(self.script(f"return document.querySelectorAll('{PANE} [data-role=entity-list] .entity-row').length"), 3, "the entity browser stays")
+		self.assertIn("物体", self.el("entity-detail").get_attribute("textContent"))
+		self.assertEqual(severe_logs(self.driver), [])
 
-	def test_the_selected_box_overlay_is_vivid_depth_independent_and_transparent_to_clicks(self):
-		reference = self.root / "reference.npz"
-		write_reference(reference)
-		driver = self.open_page(reference, rich=True)
+	def test_the_selected_box_overlay_is_vivid_depth_independent_and_transparent_to_clicks(self) -> None:
+		self.open_page(reference=True, rich=True)
 		self.assertFalse(self.script("return window.replayDebug.G.overlay.visible"))
-		driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:12"]').click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:12"]').click()
 		self.wait.until(lambda d: d.execute_script("window.replayDebug.draw(); return window.replayDebug.G.overlay.visible"))
 		overlay = self.script("return window.replayDebug.G.overlay")
 		self.assertEqual(overlay["color"], "#ffb000")
@@ -461,27 +462,28 @@ class ReplayViewerFeaturesBrowserTest(unittest.TestCase):
 		self.assertGreaterEqual(overlay["lineWidth"], 4)
 		self.assertGreater(overlay["segments"], 0)
 		self.assertGreater(overlay["corners"], 0)
-		self.assertEqual(self.script("return getComputedStyle(document.getElementById('selection-overlay')).pointerEvents"), "none")
-		self.assertEqual(self.script("const g = document.getElementById('gl'); return document.elementFromPoint(g.clientWidth / 2, g.clientHeight / 2).id"), "gl")
-		pixel = """
-			const d = window.replayDebug, item = d.S.objItems.find((i) => i.id === 12), c = document.getElementById('selection-overlay');
-			const s = d.project(item.mn), k = c.width / document.getElementById('gl').clientWidth;
+		self.assertEqual(self.script(f"return getComputedStyle(document.querySelector('{PANE} [data-role=selection-overlay]')).pointerEvents"), "none")
+		self.assertEqual(self.script(f"""
+			const g = document.querySelector('{PANE} [data-role=gl]'), r = g.getBoundingClientRect();
+			return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2).dataset.role;
+		"""), "gl")
+		pixel = f"""
+			const d = window.replayDebug, item = d.S.objItems.find((i) => i.id === 12), c = document.querySelector('{PANE} [data-role=selection-overlay]');
+			const s = d.project(item.mn), k = c.width / document.querySelector('{PANE} [data-role=gl]').clientWidth;
 			return Array.from(c.getContext('2d').getImageData(Math.round(s[0] * k), Math.round(s[1] * k), 1, 1).data);
 		"""
 		self.assertEqual(self.script(pixel), [255, 176, 0, 255], "the corner dot is exactly the amber of the selection")
-
 		for bbox_mode in ("none", "all", "selected"):   # visible whatever the ordinary box mode says
 			self.choose("bbox-mode", bbox_mode)
 			self.assertTrue(self.script("return window.replayDebug.G.overlay.visible"), bbox_mode)
 		for mesh_mode in ("reference", "dynamic", "none"):   # and through either mesh
 			self.choose("mesh-mode", mesh_mode)
 			self.assertTrue(self.script("return window.replayDebug.G.overlay.visible"), mesh_mode)
-
-		driver.find_element(By.CSS_SELECTOR, '[data-entity-key="object:12"] .entity-eye').click()
+		self.driver.find_element(By.CSS_SELECTOR, f'{PANE} [data-entity-key="object:12"] .entity-eye').click()
 		self.script("window.replayDebug.draw()")
 		self.assertFalse(self.script("return window.replayDebug.G.overlay.visible"))
 		self.assertEqual(self.script(pixel)[3], 0, "the overlay is cleared when the selected entity is hidden")
-		self.assertEqual(self.severe_logs(), [])
+		self.assertEqual(severe_logs(self.driver), [])
 
 
 if __name__ == "__main__":

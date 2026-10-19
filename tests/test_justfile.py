@@ -34,9 +34,37 @@ class JustfileTest(unittest.TestCase):
 		self.assertIn("tests.test_output_layout", output)
 		self.assertIn("tests.test_cluster_places_adapter", output)
 		self.assertIn("tests.test_scene_graph_utils", output)
+		for module in ("tests.test_replay_manifest", "tests.test_replay_datasets", "tests.test_replay_web_paths", "tests.test_replay_web_runs",
+				"tests.test_replay_web_server", "tests.test_replay_artifacts", "tests.test_replay_events", "tests.test_replay_jobs",
+				"tests.test_replay_bundle", "tests.test_replay_workspace_browser"):
+			self.assertIn(module, output)
+		host, container = output.split("docker compose run", 1)
+		for module in ("tests.test_replay_web_server", "tests.test_replay_artifacts", "tests.test_replay_events", "tests.test_replay_jobs"):
+			self.assertIn(module, host, "the service runs on the WSL host and is tested there: " + module)
+		self.assertIn("tests.test_replay_bundle", container.split("powershell", 1)[0], "the finalizer needs the container")
 		self.assertIn("RUN_BROWSER_TESTS", output)
 		self.assertIn("import selenium", output)
 		self.assertIn("browser test skipped", output)
+
+	def test_test_recipe_runs_the_agent_suites_without_asking_a_provider(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, output)
+		host, rest = output.split("docker compose run", 1)
+		container = rest.split("powershell", 1)[0]
+		for module in ("tests.test_replay_history", "tests.test_replay_agent_protocol", "tests.test_replay_agent_client", "tests.test_replay_chat"):
+			self.assertIn(module, host, "the service side of the chat is standard library only and is tested on the host: " + module)
+		for module in ("tests.test_scene_agent_conversation", "tests.test_replay_query"):
+			self.assertIn(module, container, "the Agent and the scene graph loader need the container: " + module)
+		for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+			self.assertNotIn(key, output, "the suites use fake providers: no command of the recipe hands over a key")
+
+	def test_the_container_guard_sees_the_replay_agent_worker(self) -> None:
+		for recipe in ("tum-post", "coda-post"):
+			result = self._dry_run(recipe)
+			text = result.stdout + result.stderr
+			self.assertEqual(result.returncode, 0, text)
+			self.assertIn("agent_worker", text, recipe + ": an idle chat worker holds models on the GPU, so a heavy job started from a terminal waits for it")
 
 	def test_bare_just_keeps_live_preview_as_the_default(self) -> None:
 		result = subprocess.run(
@@ -111,7 +139,7 @@ class JustfileTest(unittest.TestCase):
 		self.assertEqual(default.returncode, 0, text)
 		self.assertIn("-e RESULT_ROOT=output/tum_replay", text)
 		self.assertIn("-e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml", text)
-		self.assertIn("-e PLACES_LAYER=PLACES", text)
+		self.assertIn("-e PLACES_LAYER=TRAVERSABILITY", text)
 		self.assertNotIn("RESULT_ROOT=output/tum_replay_", text)
 		self.assertIn("scripts/postprocess_coda.sh", text)
 
@@ -120,7 +148,7 @@ class JustfileTest(unittest.TestCase):
 		self.assertEqual(chosen.returncode, 0, text)
 		self.assertIn("-e RESULT_ROOT=output/tum_replay_fr1_room", text)
 		self.assertIn("-e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml", text)
-		self.assertIn("-e PLACES_LAYER=PLACES", text)
+		self.assertIn("-e PLACES_LAYER=TRAVERSABILITY", text)
 		self.assertIn("scripts/postprocess_coda.sh out_a out_b", text)
 
 		summarize = self._dry_run("tum-summarize", "fr3_walking_xyz", "out_x")
@@ -137,6 +165,35 @@ class JustfileTest(unittest.TestCase):
 			# `-e NAME` without a value forwards the caller's value, and nothing when it is not set
 			self.assertRegex(text, r"-e REFERENCE_MESH(?![\w=])", recipe)
 			self.assertIn("-e REFERENCE_MESH_CACHE", text, recipe)
+
+	def test_tum_run_reports_the_new_result_bundle_without_searching_for_a_page(self) -> None:
+		for args in ((), ("30", "fr1_room")):
+			output = self._dry_run("tum-run", *args)
+			text = output.stdout + output.stderr
+			self.assertEqual(output.returncode, 0, text)
+			self.assertIn("scripts/run_replay.sh", text)
+			self.assertNotIn("replay.html", text)
+			self.assertIn("-newer", text, "only a result created by this run is reported")
+			self.assertIn("replay/manifest.json", text)
+			self.assertIn("just replay-web", text)
+			self.assertIn("replay.rrd", text)
+
+	def test_the_replay_recipes_describe_bundles_instead_of_pages(self) -> None:
+		text = (REPO / "justfile").read_text(encoding="utf-8")
+		for recipe in ("tum-test frames=", "tum-run frames="):
+			comment = text.split(recipe, 1)[0].rstrip().splitlines()[-1]
+			self.assertIn("replay/", comment, recipe)
+			self.assertNotIn("replay.html", comment, recipe)
+
+	def test_replay_web_serves_the_workspace_on_loopback(self) -> None:
+		result = self._dry_run("replay-web")
+		text = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, text)
+		self.assertIn("python3 -m scripts.replay_web.server --host 127.0.0.1 --port 8765", text)
+		self.assertIn("http://127.0.0.1:8765/replay.html", text)
+		self.assertNotIn("docker compose", text, "the service runs on the WSL host, not in the container")
+		other = self._dry_run("replay-web", "localhost", "9000")
+		self.assertIn("--host localhost --port 9000", other.stdout + other.stderr)
 
 	def test_old_replay_recipe_is_removed(self) -> None:
 		result = self._dry_run("replay")
@@ -168,6 +225,88 @@ class JustfileTest(unittest.TestCase):
 		self.assertIn("--source-root src", output)
 		self.assertIn("--template scripts/orchestrator_graph_viewer.html", output)
 		self.assertIn("--output docs/orchestrator_process_frame.html", output)
+
+	def test_gs_world_recipes_run_in_the_container(self) -> None:
+		from scripts.gs_world import env
+
+		install = self._dry_run("gs-install")
+		text = install.stdout + install.stderr
+		self.assertEqual(install.returncode, 0, text)
+		self.assertIn("--no-deps --target /opt/daaam_ws/gs_site", text, "gsplat stays out of the DAAAM virtual environment")
+		for package in env.PACKAGES:
+			self.assertIn(package, text, "the recipe installs the versions gs_world checks for")
+		self.assertIn(f"gsplat=={env.GSPLAT_VERSION}", text)
+
+		train = self._dry_run("gs-train", "fr1_room", "--iterations", "7000")
+		text = train.stdout + train.stderr
+		self.assertEqual(train.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.train fr1_room --iterations 7000", text)
+		self.assertIn("agent_worker", text, "training waits for the other heavy containers")
+		render = self._dry_run("gs-render")
+		text = render.stdout + render.stderr
+		self.assertEqual(render.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.render latest", text)
+
+		bag = self._dry_run("gs-bag", "/tmp/rec.bag", "--list")
+		text = bag.stdout + bag.stderr
+		self.assertEqual(bag.returncode, 0, text)
+		self.assertIn(":/bag_in:ro", text, "the bag's folder is mounted read-only")
+		self.assertIn("python -m scripts.gs_world.rosbag_to_rgbd", text)
+		self.assertIn("--list", text)
+
+		daaam = self._dry_run("gs-daaam", "/data/gs_world/models/tum_fr1_room/t/renders/original")
+		text = daaam.stdout + daaam.stderr
+		self.assertEqual(daaam.returncode, 0, text)
+		self.assertIn("scripts/gs_world/run_daaam.sh /data/gs_world/models/tum_fr1_room/t/renders/original all", text)
+
+		comparison = self._dry_run("gs-compare", "output/tum_replay_fr1_room", "output/gs_tum_fr1_room_original")
+		text = comparison.stdout + comparison.stderr
+		self.assertEqual(comparison.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.compare_maps output/tum_replay_fr1_room output/gs_tum_fr1_room_original", text)
+		self.assertNotEqual(self._dry_run("gs-compare").returncode, 0, "at least the reference is required")
+
+		for recipe in ("coda-post", "gs-daaam"):
+			args = ("x",) if recipe == "gs-daaam" else ()
+			result = self._dry_run(recipe, *args)
+			self.assertIn("scripts.gs_world.train", result.stdout + result.stderr,
+				recipe + ": a pipeline does not start next to a 3DGS training")
+
+	def test_test_recipe_runs_the_gs_world_suites_in_the_container(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		container = output.split("docker compose run", 1)[1].split("powershell", 1)[0]
+		for module in ("tests.test_gs_world_data", "tests.test_gs_world_model", "tests.test_gs_world_rosbag"):
+			self.assertIn(module, container, "the gs_world suites need numpy, OpenCV and torch from the container")
+
+	def test_habitat_live_recipes_run_the_host_script_that_starts_the_bridge_and_the_mapper(self) -> None:
+		live = self._dry_run("habitat-live")
+		text = live.stdout + live.stderr
+		self.assertEqual(live.returncode, 0, text)
+		self.assertIn("bash scripts/habitat_live.sh all", text)
+		self.assertIn("run_habitat_live", text, "the container guard sees the mapper of a live session")
+		limited = self._dry_run("habitat-live", "300")
+		self.assertIn("bash scripts/habitat_live.sh 300", limited.stdout + limited.stderr)
+
+		check = self._dry_run("habitat-live-test", "90")
+		text = check.stdout + check.stderr
+		self.assertEqual(check.returncode, 0, text)
+		self.assertIn("AUTOPILOT=1 RUN_SECONDS=90 KEEP_VIEWER=0 REPLAY=1 NAME=habitat_live_test bash scripts/habitat_live.sh", text)
+		self.assertIn("run_habitat_live", text, "the test run is guarded as well")
+
+		bridge = self._dry_run("habitat-bridge", "--speed", "0.9")
+		text = bridge.stdout + bridge.stderr
+		self.assertEqual(bridge.returncode, 0, text)
+		self.assertIn("bash scripts/habitat_live.sh --bridge-only --speed 0.9", text)
+
+	def test_test_recipe_runs_the_habitat_live_suites(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		self.assertEqual(result.returncode, 0, output)
+		host, rest = output.split("docker compose run", 1)
+		container = rest.split("powershell", 1)[0]
+		for module in ("tests.test_live_protocol", "tests.test_habitat_live_control", "tests.test_habitat_live_scripts"):
+			self.assertIn(module, host, "standard library and numpy only, tested on the WSL host: " + module)
+		self.assertIn("tests.test_live_dataset", container, "the live dataset needs OpenCV and SciPy from the container")
 
 if __name__ == "__main__":
 	unittest.main()

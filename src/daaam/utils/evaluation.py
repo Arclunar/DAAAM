@@ -179,8 +179,8 @@ def preprocess_scene_graph(
 	Returns:
 		Scene graph with timestamps relative to start_time
 	"""
-	# Validation: start_time should be a Unix timestamp (very large number > 1e9)
-	if start_time < 1e9:
+	# Validation: start_time should be a Unix timestamp (very large number > 1e9); 0 means the graph is already relative
+	if 0 != start_time < 1e9:
 		print(f"WARNING: start_time={start_time} doesn't look like a Unix timestamp. "
 			  f"Expected value > 1e9 (year 2001+). This may indicate a coordinate system bug.")
 

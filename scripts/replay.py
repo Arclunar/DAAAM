@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""Review a mapping run without RViz: record the scene graph while Hydra builds it, then build one web page with a time
-slider from the recording.
+"""Review a mapping run without RViz: record the scene graph while Hydra builds it, then finalize the recording into the
+run's replay data bundle, which the replay workspace (`just replay-web`, the repository's single replay.html) plays.
 
 Hydra publishes the whole scene graph (mesh included) over ZMQ after every backend update, about once per frame; that
-stream is what RViz shows. `record` subscribes to it and keeps every n-th graph as a compact snapshot. `build` turns the
-snapshots into a self-contained HTML file (data inlined, WebGL rendering, no server and no internet access needed) with
-a progress bar to drag; `rrd` writes the same timed snapshots to a native Rerun recording. Subscribing costs the pipeline
+stream is what RViz shows. `record` subscribes to it and keeps every n-th graph as a compact snapshot. `finalize` turns
+the snapshots into RUN/replay/ (scripts/replay_bundle.py: bounded gzip timeline chunks, camera and DAM source images, a
+manifest written last); `rrd` writes the same timed snapshots to a native Rerun recording. Subscribing costs the pipeline
 nothing measurable; RViz is what slows a live run down.
 
-scripts/run_replay.sh does all of this around a pipeline run. By hand:
+scripts/run_replay.sh does all of this around a TUM pipeline run. By hand:
 	python scripts/replay.py record --out /tmp/rec [--zmq-url tcp://127.0.0.1:8001] [--every 5]   # stop with Ctrl-C
-	python scripts/replay.py build /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --dataset datasets/tum_fr1_desk --out replay.html
+	python scripts/replay.py finalize /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --dataset-kind tum --sequence fr1_desk \
+		--dataset datasets/tum_fr1_desk --fps 15 --out output/NAME/out_YYYYMMDD_HHMMSS/replay
 	python scripts/replay.py rrd /tmp/rec --run output/NAME/out_YYYYMMDD_HHMMSS --out replay.rrd
-With --dataset the page also shows the RGB and depth image of the frame the pipeline had processed at each moment.
-With --reference-mesh CACHE.npz (written by scripts/build_reference_mesh.py, the 1 cm Open3D TSDF reference mesh of the
-whole dataset) the page can switch between that static mesh and Hydra's time-varying one; it is embedded once, in a
-payload of its own. Open3D is not needed to embed a cache.
+A run without a recording (CODa) is finalized from its final graph: `finalize --graph RUN/dsg.json --dataset-kind coda
+--sequence 0 --start-frame S --frame-count N ...` (scripts/run_coda_example.sh passes the bag's daaam_replay.json).
+With --dataset the bundle also holds the RGB and depth image of the frame the pipeline had processed at each moment and the
+exact frames DAM described objects from. With --reference-mesh CACHE.npz (written by scripts/build_reference_mesh.py, the
+1 cm Open3D TSDF reference mesh of the whole dataset) the viewer can switch between that static mesh and Hydra's
+time-varying one; it is stored once, as a member of its own. Open3D is not needed to use a cache.
 """
 
 import argparse
 import base64
 import json
-import os
 import signal
 import struct
 import sys
-import time
 import zipfile
 import zlib
 from pathlib import Path
@@ -33,7 +34,6 @@ from pathlib import Path
 import numpy as np
 
 DEFAULT_URL = "tcp://127.0.0.1:8001"
-TEMPLATE = Path(__file__).with_name("replay_viewer.html")
 
 
 # ---------------------------------------------------------------- record
@@ -164,13 +164,13 @@ def record(args) -> int:
 	return 0
 
 
-# ---------------------------------------------------------------- build
+# ---------------------------------------------------------------- snapshot payloads (scripts/replay_bundle.py)
 
 DTYPE_CODES = {"<f4": "f4", "<i4": "i4", "<u4": "u4", "<i2": "i2", "<u2": "u2", "|u1": "u1"}
 
 
 def pack(arrays: dict) -> bytes:
-	"""[uint32 header length][JSON header][arrays, each 8-byte aligned]: read by unpack() in replay_viewer.html."""
+	"""[uint32 header length][JSON header][arrays, each 8-byte aligned]: read by unpack() in scripts/replay_web/static/replay_data.js."""
 	header, blobs, offset = [], [], 0
 	for name, array in arrays.items():
 		array = np.ascontiguousarray(array)
@@ -188,7 +188,6 @@ def pack(arrays: dict) -> bytes:
 
 REFERENCE_ARRAYS = {"positions": ("float32", 3), "colors": ("uint8", 3), "normals": ("float32", 3), "triangles": ("uint32", 3)}
 REFERENCE_LABEL = "1 cm 全序列参考网格"
-LARGE_PAGE_BYTES = 100e6
 
 
 def quantization(points):
@@ -240,7 +239,7 @@ def load_reference_mesh(path):
 
 
 def reference_payload(arrays) -> dict:
-	"""The static reference mesh for window.REPLAY: positions on a grid of their own (the Hydra snapshots have another one),
+	"""The static reference mesh of a replay bundle: positions on a grid of their own (the Hydra snapshots have another one),
 	normals as int16, 32-bit triangle indices only where 16 bits do not reach, everything deflated in one chunk."""
 	positions, quant = quantize_positions(arrays["positions"])
 	count = len(positions)
@@ -262,7 +261,7 @@ def reference_payload(arrays) -> dict:
 
 
 def merge_vertices(pos, col, faces, cell):
-	"""Merge vertices that fall into the same cell (the mesh holds about 20 % coincident vertices) to shrink the page."""
+	"""Merge vertices that fall into the same cell (the mesh holds about 20 % coincident vertices) to shrink the bundle."""
 	if cell <= 0 or len(pos) == 0:
 		return pos, col, faces
 	key = np.floor((pos - pos.min(axis=0)) / cell).astype(np.int64)
@@ -326,31 +325,6 @@ def description_sources(run_dir) -> dict:
 	return sources
 
 
-def description_source_images(dataset, sources, width) -> dict:
-	"""Unique DAM source frame ID -> small RGB JPEG, shared by every object described from that frame."""
-	import cv2
-
-	result = {}
-	root = Path(dataset)
-	files = sorted((root / "rgb").glob("*.png")) + sorted((root / "rgb").glob("*.jpg"))
-	for source in sources.values():
-		index = source["frame_id"] - 1  # pipeline frame IDs are one-based; dataset filenames are zero-based
-		if index < 0 or index >= len(files):
-			continue
-		key = str(source["frame_id"])
-		if key in result:
-			continue
-		image = cv2.imread(str(files[index]))
-		if image is None:
-			continue
-		size = (width, max(1, round(image.shape[0] * width / image.shape[1])))
-		image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
-		ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
-		if ok:
-			result[key] = base64.b64encode(encoded.tobytes()).decode()
-	return result
-
-
 def estimate_times(numbers, snaps, fps) -> list:
 	"""Data time (s) of each snapshot: the newest place update time, extrapolated linearly where there are no places yet.
 	The pipeline publishes about one graph per frame, so the graph number is a good clock."""
@@ -365,35 +339,6 @@ def estimate_times(numbers, snaps, fps) -> list:
 	else:
 		slope, intercept = 1.0 / fps, -1.0 / fps
 	return [t if t is not None else max(0.0, intercept + slope * n) for n, t in zip(numbers, stamps)]
-
-
-def frame_images(dataset, times, fps, width, max_depth):
-	"""JPEGs (base64) of the RGB image and of the colour-coded depth image that belong to each snapshot: the pipeline stamps
-	frame k with k / fps, so the data time of a snapshot times the frame rate is the frame it had just processed."""
-	import cv2
-
-	root = Path(dataset)
-	files = sorted((root / "rgb").glob("*.png")) + sorted((root / "rgb").glob("*.jpg"))
-	if not files:
-		return None
-	info = json.loads((root / "camera_info.json").read_text()) if (root / "camera_info.json").exists() else {}
-	depth_scale = float(info.get("depth_scale", 1000.0))
-	index = [int(min(max(round(t * fps), 0), len(files) - 1)) for t in times]
-
-	def jpeg(image):
-		return base64.b64encode(cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()).decode()
-
-	rgb, depth = [], []
-	for k in index:
-		image = cv2.imread(str(files[k]))
-		size = (width, max(1, round(image.shape[0] * width / image.shape[1])))
-		rgb.append(jpeg(cv2.resize(image, size, interpolation=cv2.INTER_AREA)))
-		raw = cv2.imread(str(root / "depth" / f"{files[k].stem}.png"), cv2.IMREAD_UNCHANGED)
-		raw = cv2.resize(np.zeros(image.shape[:2], np.uint16) if raw is None else raw, size, interpolation=cv2.INTER_NEAREST)
-		colour = cv2.applyColorMap(np.clip(raw.astype(np.float32) / depth_scale / max_depth * 255.0, 0, 255).astype(np.uint8), cv2.COLORMAP_JET)
-		colour[raw == 0] = 0  # no measurement
-		depth.append(jpeg(colour))
-	return {"fps": fps, "count": len(files), "index": index, "max_depth": max_depth, "rgb": rgb, "depth": depth}
 
 
 def load_snapshots(recording):
@@ -455,7 +400,7 @@ def ensure_entity_ids(snaps) -> None:
 
 
 def entity_catalog(snaps, times) -> dict:
-	"""Summarise every object and place over the retained snapshots for the HTML entity browser."""
+	"""Summarise every object and place over the retained snapshots for the viewer's entity browser."""
 	objects, places = {}, {}
 	for snap_index, (snap, timestamp) in enumerate(zip(snaps, times)):
 		for i, category_id in enumerate(snap["obj_cid"]):
@@ -618,77 +563,48 @@ def rrd(args) -> int:
 	return 0
 
 
-def build(args) -> int:
-	rec = Path(args.recording)
-	reference_arrays = None
-	if getattr(args, "reference_mesh", None):
-		try:
-			reference_arrays = load_reference_mesh(args.reference_mesh)
-		except ValueError as error:
-			print(f"[replay] reference mesh rejected: {error}", file=sys.stderr)
-			return 1
-	numbers, snaps = load_snapshots(rec)
-	if not snaps:
-		print(f"[replay] no snapshots in {rec}: the pipeline did not publish a scene graph (was it started with --zmq-url?)", file=sys.stderr)
-		return 1
-	ensure_entity_ids(snaps)
-	for snap in snaps:
-		snap["mesh_pos"], snap["mesh_col"], snap["mesh_faces"] = merge_vertices(snap["mesh_pos"], snap["mesh_col"], snap["mesh_faces"], args.merge)
+def finalize(args) -> int:
+	"""Turn a recording, or the final scene graph of a run without one, into the run's versioned replay/ bundle."""
+	if (args.recording is None) == (args.graph is None):
+		args.parser.error("finalize needs exactly one source: a recording directory or --graph DSG")
+	sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+	from scripts.replay_bundle import BundleOptions, describe, finalize_bundle
 
-	meshes = [s["mesh_pos"] for s in snaps if len(s["mesh_pos"])]
-	everything = np.concatenate(meshes) if meshes else np.zeros((1, 3), np.float32)
-	qmin, qscale = quantization(everything)
-
-	chunks = []
-	for snap in snaps:
-		arrays = {k: v for k, v in snap.items() if k not in ("place_t", "agent_t")}
-		arrays["mesh_pos"], _ = quantize_positions(snap["mesh_pos"], qmin, qscale)
-		if len(snap["mesh_pos"]) < 65536:
-			arrays["mesh_faces"] = snap["mesh_faces"].astype(np.uint16)
-		chunks.append(base64.b64encode(zlib.compress(pack(arrays), 6)).decode())
-
-	times = estimate_times(numbers, snaps, args.fps)
-	frames = frame_images(args.dataset, times, args.fps, args.thumb_width, args.max_depth) if args.dataset else None
-	if args.dataset and frames is None:
-		print(f"[replay] no images in {args.dataset}/rgb: the page will not show the camera images", file=sys.stderr)
-	run_dir = find_run_dir(Path(args.run)) if args.run else None
-	sources = description_sources(run_dir)
-	source_images = description_source_images(args.dataset, sources, args.thumb_width) if args.dataset and sources else {}
-	title = args.title or (Path(args.run).resolve().name if args.run else rec.name)
-	data = {
-		"title": title,
-		"quant": {"min": qmin.tolist(), "scale": qscale.tolist()},
-		"snapshots": [{"n": n, "t": round(t, 3)} for n, t in zip(numbers, times)],
-		"labels": label_names(run_dir),
-		"description_sources": sources,
-		"description_frames": source_images,
-		"catalog": entity_catalog(snaps, times),
-		"frames": frames,
-		"chunks": chunks,
-	}
-	if reference_arrays is not None:
-		data["reference_mesh"] = reference_payload(reference_arrays)
-	html = TEMPLATE.read_text(encoding="utf-8").replace("<!--REPLAY_DATA-->", "<script>window.REPLAY = " + json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", "<\\/") + ";</script>")
-	out = Path(args.out)
-	temporary = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+	options = BundleOptions(
+		recording=Path(args.recording) if args.recording else None,
+		source_graph=Path(args.graph) if args.graph else None,
+		run_dir=Path(args.run),
+		output=Path(args.out),
+		dataset_kind=args.dataset_kind,
+		sequence=args.sequence,
+		dataset=Path(args.dataset) if args.dataset else None,
+		fps=args.fps,
+		time_origin=args.time_origin,
+		start_frame=args.start_frame,
+		frame_count=args.frame_count,
+		title=args.title or "",
+		merge=args.merge,
+		thumb_width=args.thumb_width,
+		max_depth=args.max_depth,
+		reference_mesh=Path(args.reference_mesh) if args.reference_mesh else None,
+		max_chunk_snapshots=args.max_chunk_snapshots,
+		max_chunk_bytes=args.max_chunk_bytes,
+	)
 	try:
-		temporary.write_text(html, encoding="utf-8")
-		os.replace(temporary, out)  # a page is complete or absent, never half written
-	finally:
-		temporary.unlink(missing_ok=True)
-	size = out.stat().st_size
-	if reference_arrays is not None:
-		reference = data["reference_mesh"]
-		print(f"[replay] reference mesh: {reference['vertices']:,} vertices, {reference['triangles']:,} triangles, payload {reference['payload_bytes'] / 1e6:.1f} MB")
-		if size > LARGE_PAGE_BYTES:
-			print(f"[replay] WARNING: the page is {size / 1e6:.0f} MB because of the 1 cm reference mesh; it opens more slowly (the mesh is not simplified)", file=sys.stderr)
-	images = f", {len(frames['rgb'])} RGB + depth images" if frames else ""
-	print(f"[replay] {len(snaps)} snapshots, data time {times[0]:.1f}-{times[-1]:.1f} s, {len(data['labels'])} object descriptions{images} -> {out} ({size / 1e6:.1f} MB)")
+		manifest_path = finalize_bundle(options)
+	except (ValueError, OSError) as error:
+		print(f"[replay] finalize failed: {error}", file=sys.stderr)
+		return 1
+	manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+	reference = manifest.get("reference_mesh")
+	if reference:
+		print(f"[replay] reference mesh: {reference['vertices']:,} vertices, {reference['triangles']:,} triangles, payload {reference['bytes'] / 1e6:.1f} MB")
+	print(describe(manifest, manifest_path.parent))
 	return 0
 
 
 def main() -> int:
-	parser = argparse.ArgumentParser(description="Record a mapping run and build a web page to review it")
+	parser = argparse.ArgumentParser(description="Record a mapping run and finalize its replay data bundle (opened with just replay-web)")
 	sub = parser.add_subparsers(dest="command", required=True)
 
 	p = sub.add_parser("record", help="subscribe to Hydra's ZMQ stream and save snapshots")
@@ -697,18 +613,26 @@ def main() -> int:
 	p.add_argument("--every", type=int, default=5, help="keep every n-th graph (about one is published per frame)")
 	p.set_defaults(func=record)
 
-	p = sub.add_parser("build", help="turn a recording into a self-contained HTML page")
-	p.add_argument("recording", help="directory written by `record`")
-	p.add_argument("--run", help="pipeline output directory of the run (object descriptions are read from its corrections.yaml)")
-	p.add_argument("--out", default="replay.html")
+	p = sub.add_parser("finalize", help="turn a recording (or a final scene graph) into the versioned replay/ data bundle of a run")
+	p.add_argument("recording", nargs="?", help="directory written by `record`; leave out and give --graph for a one-snapshot bundle")
+	p.add_argument("--graph", help="final scene graph (dsg.json) of a run without a recording, e.g. CODa")
+	p.add_argument("--run", required=True, help="pipeline output directory of the run (object descriptions are read from its corrections.yaml)")
+	p.add_argument("--out", required=True, help="bundle directory to publish, normally RUN/replay")
+	p.add_argument("--dataset-kind", choices=("tum", "coda"), required=True)
+	p.add_argument("--sequence", required=True, help="dataset sequence: a TUM name such as fr1_desk, or a CODa sequence number")
+	p.add_argument("--dataset", help="dataset directory: camera images of every snapshot and the exact DAM source frames are copied from it")
+	p.add_argument("--fps", type=float, default=15.0, help="frame rate of the run (run time -> dataset frame)")
+	p.add_argument("--time-origin", type=float, help="dataset time of t = 0 (default: TUM 0, CODa the first line of timestamps/<sequence>.txt)")
+	p.add_argument("--start-frame", type=int, default=0, help="first dataset frame of the run (CODa bags can start later)")
+	p.add_argument("--frame-count", type=int, help="number of frames in the run (required with --graph)")
 	p.add_argument("--title")
 	p.add_argument("--merge", type=float, default=0.005, help="merge mesh vertices closer than this many metres (0 = off)")
-	p.add_argument("--dataset", help="dataset directory with rgb/ and depth/: the page then shows the RGB and depth image of each moment")
-	p.add_argument("--thumb-width", type=int, default=320, help="width in pixels of those images")
-	p.add_argument("--max-depth", type=float, default=4.0, help="depth in metres that maps to the far end of the colour scale")
-	p.add_argument("--fps", type=float, default=15.0, help="frame rate the pipeline ran with (data time -> frame number of the images; also the clock when no graph carries a time stamp)")
-	p.add_argument("--reference-mesh", help="cache (.npz) of the 1 cm reference mesh written by scripts/build_reference_mesh.py: the page can then show it instead of Hydra's mesh")
-	p.set_defaults(func=build)
+	p.add_argument("--thumb-width", type=int, default=320, help="width in pixels of the camera images")
+	p.add_argument("--max-depth", type=float, help="depth in metres at the far end of the colour scale (default: TUM 4, CODa 30)")
+	p.add_argument("--reference-mesh", help="cache (.npz) of the 1 cm reference mesh written by scripts/build_reference_mesh.py")
+	p.add_argument("--max-chunk-snapshots", type=int, default=24, help="at most this many snapshots per timeline chunk")
+	p.add_argument("--max-chunk-bytes", type=int, default=8 * 1024 * 1024, help="uncompressed size target of a timeline chunk")
+	p.set_defaults(func=finalize, parser=p)
 
 	p = sub.add_parser("rrd", help="turn a recording into a timed native Rerun .rrd file")
 	p.add_argument("recording", help="directory written by `record`")

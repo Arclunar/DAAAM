@@ -1,0 +1,54 @@
+# Visualizer config of Hydra's RViz2 streaming visualizer for a house-scale live run (scripts/run_habitat_live.sh).
+# Copy of hydra_ros/hydra_visualizer/config/visualizer_config.yaml (a building-scale default) with these changes, so that an
+# apartment with a few hundred objects and places stays readable:
+#   * renderer.layer_z_step 5.5 -> 2.0: the object, place and room layers float 4, 6 and 8.4 m above the mesh, not 11, 16.5 and 23 m;
+#   * no text over the objects (layer 2): they only carry pseudo label numbers, and a few hundred of them cover the picture;
+#   * the traversability places (partition 3p2, about 1000 nodes) are not drawn: the free-space places show the same map;
+#   * the edges between the layers are thin and faint (places -> objects: 0.08 / 0.5 -> 0.02 / 0.12, rooms -> places: 0.08 / 0.4 -> 0.03 / 0.15).
+# Switch the layers back on in RViz (Scene Graph display) or point VISUALIZER_CONFIG at another file to see them.
+---
+renderer:
+  layer_z_step: 2.0  # unit separation between layers (5.5 by default)
+  collapse_layers: false  # whether or not to apply offsets to each of the layers
+  layers:
+    2:
+      z_offset_scale: 2.0
+      visualize: true
+      nodes: {draw: true, scale: 0.40, color: {type: LabelColorAdapter}, alpha: 0.8, use_sphere: false}
+      text: {draw: false, collapse: true, adapter: {type: LabelTextAdapter}, height: 0.5, scale: 0.45}
+      bounding_boxes: {draw: true, collapse: true, scale: 0.05, edge_scale: 0.05, alpha: 0.9, edge_break_ratio: 0.5}
+    3:
+      z_offset_scale: 3.0
+      visualize: true
+      nodes: {scale: 0.2, color: {type: ParentColorAdapter, colormap: {palette: colorbrewer}}, alpha: 0.9, use_sphere: true}
+      edges: {scale: 0.01, alpha: 0.5, color: {type: UniformEdgeColorAdapter}}
+    4:
+      z_offset_scale: 4.2
+      visualize: true
+      nodes: {scale: 0.6, color: {type: IdColorAdapter, colormap: {palette: colorbrewer}}, alpha: 0.8, use_sphere: false}
+      text: {draw: true, height: 1.25, scale: 1.0}
+      edges: {scale: 0.1, alpha: 0.2, color: {type: UniformEdgeColorAdapter}}
+    2p*:
+      z_offset_scale: 0.0
+      visualize: true
+      nodes: {scale: 0.15, alpha: 0.9, use_sphere: false, color: {type: PartitionColorAdapter}}
+      edges: {scale: 0.05, alpha: 0.9, draw_interlayer: false}
+      text: {draw_layer: true, height: 0.9, scale: 0.8}
+    3p1:
+      z_offset_scale: 3.0
+      visualize: true
+      nodes: {scale: 0.2, color: {type: LabelColorAdapter}, alpha: 0.9, use_sphere: true}
+      boundaries: {draw: true, collapse: false, wireframe_scale: 0.1, use_node_color: true, alpha: 1.0}
+      edges: {scale: 0.01, alpha: 0.5, color: {type: UniformEdgeColorAdapter}}
+    3p2:
+      z_offset_scale: 3.0
+      visualize: false
+      nodes: {scale: 0.2, color: {type: LabelColorAdapter}, alpha: 0.9, use_sphere: true}
+      boundaries: {draw: true, collapse: false, wireframe_scale: 0.1, use_node_color: true, alpha: 1.0}
+      text: {draw: false, collapse: true, adapter: {type: IdTextAdapter}, height: 0.5, scale: 0.45}
+      edges: {scale: 0.1, alpha: 0.8, color: {type: TraversabilityEdgeColorAdapter}}
+  interlayer_edges:
+    - {from: 3*, to: 2p*, draw: false}
+    - {from: 3*, to: 2, use_child_color: true, scale: 0.02, alpha: 0.12}
+    - {from: 4, to: 3*, scale: 0.03, alpha: 0.15}
+  layer_plugins: []

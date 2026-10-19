@@ -24,14 +24,22 @@ run:
 
 
 # 进入已经运行的 DAAAM 容器
-exec:
-    @cid=$(docker ps -q --filter label=com.docker.compose.service=daaam-ws | head -n 1); if [ -z "$cid" ]; then echo "没有正在运行的 DAAAM 容器"; exit 1; fi; docker exec -it "$cid" bash
+exec container="":
+    python3 docker/dev.py exec {{ quote(container) }}
 
-# 运行 replay/justfile 回归测试
+# 增量编译整个工作区或指定包及其依赖，例如 just build hydra_ros
+build *packages:
+    python3 docker/dev.py build {{ quote(packages) }}
+
+# 核对 WSL 源码挂载、原依赖卷、GPU 和 ROS/Python 环境
+check:
+    python3 docker/dev.py check
+
+# 运行回归测试:宿主机上的标准库测试(含回看服务及其问答)、容器里的测试(含数据包生成和场景问答 Agent;问答测试全用假模型,不请求模型服务),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
-    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter -v
-    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_browser tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils -v
-    @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction test"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser -v on a machine with Selenium and Chrome'; fi
+    python3 -m unittest tests.test_justfile tests.test_dev_workspace tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_shutdown tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat tests.test_live_protocol tests.test_habitat_live_control tests.test_habitat_live_scripts -v
+    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query tests.test_tum_native_places tests.test_lift_native_places tests.test_region_summary_empty tests.test_live_dataset tests.test_gs_world_data tests.test_gs_world_model tests.test_gs_world_rosbag -v
+    @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 
 # 重新分析当前源码并生成可离线打开的 process_frame 函数调用图
 orchestrator-graph:
@@ -45,7 +53,7 @@ tum-list:
 tum-fetch +names:
     docker compose run --rm -T -e https_proxy={{ proxy }} daaam-ws python scripts/fetch_tum.py get {{ names }}
 
-# 使用 TUM RGB-D 数据快速端到端测试；默认 30 帧、不带 DAM，生成 replay.html 和 replay.rrd；seq 选序列(just tum-list)
+# 使用 TUM RGB-D 数据快速端到端测试；默认 30 帧、不带 DAM，生成 replay/ 回看数据包(用 just replay-web 打开)和 replay.rrd；seq 选序列(just tum-list)
 tum-test frames="30" seq="fr1_desk":
     docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_rrd_test{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e EXTRA_OVERRIDES=workers.num_grounding_workers=0 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }} 15
 
@@ -53,23 +61,30 @@ tum-test frames="30" seq="fr1_desk":
 live-test seq="fr1_desk":
     docker compose run --rm -T -e KEEP_VIEWER=0 -e SEQ={{ seq }} -e NAME=tum_live_test{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e EXTRA_OVERRIDES=workers.num_grounding_workers=0 daaam-ws bash scripts/run_live_preview.sh 120 15
 
-# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay.html 和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
+# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay/ 回看数据包(用 just replay-web 打开)和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
 tum-run frames="298" seq="fr1_desk":
-    @marker=$(mktemp); docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e REPLAY_EVERY=5 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }}; rc=$?; page=$(find output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -name replay.html -newer "$marker" 2>/dev/null | head -n 1); rm -f "$marker"; if [ -n "$page" ]; then rrd=$(dirname "$page")/replay.rrd; echo; echo "回看网页: $PWD/$page"; printf '在 Windows 里打开(资源管理器或浏览器地址栏): \\\\wsl.localhost\\%s%s\n' "$WSL_DISTRO_NAME" "$(echo "$PWD/$page" | tr / '\\')"; if [ -f "$rrd" ]; then echo "Rerun 录制: $PWD/$rrd"; echo "播放命令: just rerun-play '$rrd'"; fi; fi; exit $rc
+    @marker=$(mktemp); docker compose run --rm -T -e SEQ={{ seq }} -e NAME=tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e REPLAY_EVERY=5 -e REFERENCE_MESH -e REFERENCE_MESH_CACHE daaam-ws bash scripts/run_replay.sh {{ frames }}; rc=$?; result=$(find output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -mindepth 1 -maxdepth 1 -type d -name 'out_*' -newer "$marker" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-); rm -f "$marker"; if [ -n "$result" ]; then echo; echo "结果目录: $PWD/$result"; if [ -f "$result/replay/manifest.json" ]; then echo "回看: just replay-web(在页面的结果列表里打开它,或输入上面的目录)"; fi; if [ -f "$result/replay.rrd" ]; then echo "Rerun 录制: $PWD/$result/replay.rrd"; echo "播放命令: just rerun-play '$result/replay.rrd'"; fi; fi; exit $rc
 
 # 后处理指定 TUM 环境最近一次 tum-run 结果:对象句子嵌入 → 地点聚类成区域;runs 可写一个或多个 out_<时间> 目录名
 tum-post seq="fr1_desk" *runs: _coda-guard
-    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=PLACES daaam-ws bash scripts/postprocess_coda.sh {{ runs }}
+    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=TRAVERSABILITY daaam-ws bash scripts/postprocess_coda.sh {{ runs }}
 
 # 同上,再用 OpenAI(gpt-5-nano,要 .env 里的 OPENAI_API_KEY)为 TUM 区域生成摘要
 tum-summarize seq="fr1_desk" *runs: _coda-guard
-    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=PLACES daaam-ws bash scripts/postprocess_coda.sh --summaries {{ runs }}
+    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=TRAVERSABILITY daaam-ws bash scripts/postprocess_coda.sh --summaries {{ runs }}
 
 # 预先构建(或检查)一个序列的 1 cm 参考网格:Open3D TSDF 对整段序列的重建,缓存在数据集的 .daaam/reference_mesh/,之后的
 # just tum-run 直接用它;mode 写 rebuild 强制重建。just tum-run / tum-test 默认也会自动构建,环境变量 REFERENCE_MESH=off|rebuild 和
 # REFERENCE_MESH_CACHE=目录(只读数据集用)原样传进去;需要 Open3D(pip install open3d==0.19.0,约 450 MB),见 USAGE.md 9.6 节
 reference-mesh seq="fr1_desk" mode="auto":
     docker compose run --rm -T -e REFERENCE_MESH_CACHE daaam-ws python scripts/build_reference_mesh.py /datasets/tum_{{ seq }}{{ if mode == "rebuild" { " --force" } else if mode == "auto" { "" } else { error("mode 只能是 auto 或 rebuild") } }}
+
+# 回看工作区:在 WSL 里启动只监听本机(127.0.0.1)的服务,用浏览器打开打印的地址;页面列出 output/ 里的结果,也能输入任意
+# WSL 可见的结果目录(/home/…、/mnt/e/…、E:\…、\\wsl.localhost\…),多个结果用标签页切换;场景图文件一出现就自动换上,页面里的
+# Postprocess / Summarize / 全部运行 在 daaam-ws 容器里跑(需要 Docker);Ctrl+C 停止。见 USAGE.md 9.0.1
+replay-web host="127.0.0.1" port="8765":
+    @echo "回看工作区: http://{{ host }}:{{ port }}/replay.html"
+    python3 -m scripts.replay_web.server --host {{ host }} --port {{ port }}
 
 # 在浏览器版 Rerun 中播放 .rrd；不传路径时自动选择 output 下最新的 replay.rrd
 rerun-play rrd="":
@@ -85,7 +100,23 @@ mesh dsg="":
     @dsg="{{ dsg }}"; if [ -z "$dsg" ]; then dsg=$(find output -type f \( -name dsg_updated.json -o -name dsg.json \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-); fi; if [ -z "$dsg" ] || [ ! -f "$dsg" ]; then echo "找不到 DSG 文件，请先运行 just tum-run 或指定 DSG 路径" >&2; exit 1; fi; echo "物体 Mesh 数据: $dsg"; {{ just_executable() }} rerun-web "$dsg" 1
 
 
-# ── CODa 数据集(RUNNING.md 的流程):数据放在 $DAAAM_DATA_DIR/CODa(容器里是 /data/CODa);步骤和本机实测的结果见 USAGE.md 4.4 ──
+# ── Habitat 实时建图:自己在模拟器里走,DAAAM 同时建图,RViz 里看场景图一点点长出来(步骤、按键和实测见 USAGE.md 9.8)──
+# 用 ~/warmoon_ws/habitat_ws 里已有的 habitat-sim 环境和 ReplicaCAD 场景(只读使用,不往里装东西);位置不同就设 HABITAT_PYTHON / HABITAT_DATA
+
+# 边走边建图:弹出 Habitat 窗口(先点一下它;W/S 前后,A/D 平移,方向键或 Q/E 转向和抬头低头,Shift 加速,R 回起点,P 自动走,Esc 退出)并同时建图,RViz 里实时显示;DAM=1 再加物体描述;frames 写数字就在那么多帧后停止,默认 all = 关掉 Habitat 窗口或 Ctrl+C 为止,地图随后保存
+habitat-live frames="all": _coda-guard
+    bash scripts/habitat_live.sh {{ frames }}
+
+# 不用手动操作的整套验证:自动驾驶在公寓里走 seconds 秒(从建图的第一帧起算),RViz 照常显示,结束后窗口自动关闭;录下会话并生成 replay/ 回看数据包(just replay-web 打开)
+habitat-live-test seconds="240": _coda-guard
+    AUTOPILOT=1 RUN_SECONDS={{ seconds }} KEEP_VIEWER=0 REPLAY=1 NAME=habitat_live_test bash scripts/habitat_live.sh
+
+# 只开 Habitat 窗口和帧服务(调试用;建图在另一个终端:docker compose run --rm -T daaam-ws bash scripts/run_habitat_live.sh)
+habitat-bridge *args:
+    bash scripts/habitat_live.sh --bridge-only {{ args }}
+
+
+# ── CODa 数据集(RUNNING.md 的流程):数据放在 $DAAAM_DATA_DIR/CODa(容器里是 /data/CODa),运行输出直接写在仓库的 output/ 里(output/coda、output/coda_run*);步骤和本机实测的结果见 USAGE.md 4.4 ──
 # 一次性准备:`just coda-download` → `just coda-depth`(要几个小时,可断点续传)
 # 日常:`just coda-bag` → `just coda-run`;整段序列(8213 帧)内存装不下,用 `just coda-chunks` 分段跑
 # 结果:`just coda-list` 看有哪些 → `just coda-post` → `just coda-summarize`(OpenAI)→ `just coda-view <结果>` / `just coda-ask "问题" <结果>`
@@ -130,6 +161,39 @@ coda-ask question run: _coda-guard
 coda-view run:
     @{{ just_executable() }} rerun-web output/coda/{{ run }}/clustered_dsg_with_summaries.json
 
-# 内部:已有别的管线 / 深度估计 / 后处理 / 问答的容器在跑就不启动(显存和 WSL 内存装不下两个)
+
+# ── 3DGS 测试世界(gsplat,scripts/gs_world):把带位姿的 RGB-D 训练成 3D 高斯模型,再沿原轨迹或新轨迹渲染出 RGB-D 数据集给 DAAAM 建图;模型、渲染和 bag 转换结果在 $DAAAM_DATA_DIR/gs_world(容器里 /data/gs_world,本机 E:\daaam-data\gs_world),见 USAGE.md 9.7 ──
+# 一次性:`just gs-install`(下载 4 个包约 6.8 MB,装进工作区卷的独立目录)→ `just gs-check`(第一次为本机 GPU 编译 CUDA 扩展,约 2 分钟)
+# 日常:`just gs-train fr1_room` → `just gs-render latest` → `just gs-daaam <渲染目录>`;D455 实录:`just gs-bag <bag> --list` → `just gs-bag <bag> --extrinsic …` → `just gs-train <转换目录>`
+
+# 安装 gsplat 1.5.3 和 ninja、jaxtyping、wadler-lindig 到工作区卷的 /opt/daaam_ws/gs_site(--no-deps,不改 DAAAM 的 venv;版本与 scripts/gs_world/env.py 一致)
+gs-install:
+    docker compose run --rm -T daaam-ws pip install --no-deps --target /opt/daaam_ws/gs_site gsplat==1.5.3 ninja==1.13.2 jaxtyping==0.3.11 wadler-lindig==0.1.7
+
+# 检查 gsplat:第一次运行为本机 GPU 编译 CUDA 扩展(约 2 分钟,结果留在工作区卷里),再渲染并反传一个小场景
+gs-check:
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.check
+
+# 训练 3DGS 模型(MCMC 增密 + 抗锯齿 + 深度监督 + 逐帧曝光补偿):data 是 /datasets 下的名字(fr1_room 或 tum_fr1_room)或容器里的数据集目录,可追加 train 的参数(如 --iterations 7000、--pose-opt);fr1_room 3 万步约 25 分钟,输出 /data/gs_world/models/<数据集>/<UTC 时间>
+gs-train data *args: _coda-guard
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.train {{ data }} {{ args }}
+
+# 用模型渲染 RGB-D 数据集:model 是模型目录或 latest(最新的模型);追加 --trajectory test|轨迹文件、--offset X,Y,Z、--rotate RX,RY,RZ、--exposure nearest 等;输出 <模型>/renders/<轨迹名>,渲染原轨迹时顺带和原始帧对比
+gs-render model="latest" *args: _coda-guard
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.render {{ model }} {{ args }}
+
+# 把 D455 的 ROS1 bag(彩色 + 对齐深度 + camera_info + 里程计话题或 --trajectory 轨迹)转成带位姿的 RGB-D 数据集:bag 是 WSL 里的路径(只读挂进容器),先加 --list 看话题,外参如 --extrinsic /data/calib/chain.yaml:T_cam_livox;输出 /data/gs_world/datasets/<bag 名>
+gs-bag bag *args:
+    @bag="$(realpath {{ quote(bag) }})"; docker compose run --rm -T -v "$(dirname "$bag")":/bag_in:ro daaam-ws python -m scripts.gs_world.rosbag_to_rgbd "/bag_in/$(basename "$bag")" {{ args }}
+
+# 用 DAAAM 给 gs_world 数据集(渲染结果或转换后的 bag)建图,像 tum-run 一样生成 replay/ 回看数据包和 replay.rrd;frames 写 all 为全部帧;输出 output/gs_<数据集>_<轨迹>(name 可改)
+gs-daaam dataset frames="all" name="": _coda-guard
+    docker compose run --rm -T daaam-ws bash scripts/gs_world/run_daaam.sh {{ dataset }} {{ frames }} {{ name }}
+
+# 比较同一世界坐标系里的几个 DAAAM 结果(第一个是参照,如真实帧的 output/tum_replay_fr1_room):物体 / 地点 / 房间数、0.3 m 内一一配上的物体比例和距离、配上的物体 DAM 描述的一致程度;runs 写 output/<名字> 或其中的 out_* 目录,可追加 --radius、--json
+gs-compare +runs:
+    docker compose run --rm -T --no-deps daaam-ws python -m scripts.gs_world.compare_maps {{ runs }}
+
+# 内部:已有别的管线 / 深度估计 / 后处理 / 问答 / 3DGS 训练或渲染的容器在跑就不启动(显存和 WSL 内存装不下两个)
 _coda-guard:
-    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|demo_query|daaam_node' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理或问答的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它" >&2; exit 1; fi
+    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|run_habitat_live|demo_query|agent_worker|daaam_node|scripts.gs_world.train|scripts.gs_world.render' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理、问答或 3DGS 训练 / 渲染的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它(回看页面的问答 worker 叫 daaam-replay-agent,空闲 15 分钟会自己退出)" >&2; exit 1; fi
