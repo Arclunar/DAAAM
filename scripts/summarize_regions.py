@@ -400,6 +400,11 @@ def main(data_dir: str, model_name: str, n_samples: int, feature_key: str, scene
 	print(f"Found {len(set(objs_by_region.keys()) | set(bg_objs_by_region.keys()))} regions "
 		  f"({len(objs_by_region)} with foreground objects, "
 		  f"{len(bg_objs_by_region)} with background objects)")
+	if not objs_by_region and not bg_objs_by_region:
+		raise click.ClickException(
+			"No regions with assigned objects: check clustered_dsg.json room/place edges and rerun Postprocess. "
+			"No summaries were published."
+		)
 	if feature_key == 'combined':
 		print(f"Note: Using concatenated clip_feature + sentence_embedding_feature from scene_graph.metadata")
 	else:

@@ -774,7 +774,7 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize output/tum
 
 - 命令是固定的（不拼接页面上的任何文字）：`docker compose run --rm -T --name daaam-replay-job-<编号> -v <结果目录>:/selected-result …
   daaam-ws bash scripts/postprocess_coda.sh --atomic --stage <阶段> /selected-result`。结果目录就是打开的那个目录，数据集类型来自
-  数据包清单（TUM 会带上 `config/cluster_places_config_tum.yaml` 和 `PLACES_LAYER=PLACES`，CODa 用脚本默认值），不看目录名。
+  数据包清单（TUM 会带上 `config/cluster_places_config_tum.yaml` 和 `PLACES_LAYER=TRAVERSABILITY`，CODa 用脚本默认值），不看目录名。
   容器里只挂这一个结果目录。**需要 Docker 在运行**；API 密钥只在仓库的 `.env` 里，由容器读取，不会发给浏览器。
 - 按钮由服务端状态决定，页面不猜文件名：前提不满足时按钮灰着，旁边写出原因（例如"Summarize needs clustered_dsg.json: run
   Postprocess first"、缺 `OPENAI_API_KEY`）；这个结果有任务在排队或运行时三个按钮都等着。
@@ -981,10 +981,19 @@ just live-test fr1_room                    # RViz 实时预览（120 帧）
 仍可单独覆盖。
 
 `tum-post` 和 `tum-summarize` 复用 4.4 节 CODa 的后处理链和命令入口，但使用 TUM 专用的
-`config/cluster_places_config_tum.yaml`：TUM 聚类 `PLACES` 层并采用小场景阈值，CODa 仍聚类 `TRAVERSABILITY` 层。
+`config/cluster_places_config_tum.yaml`：TUM 和 CODa 都聚类 DAAAM 原生的 `TRAVERSABILITY` 层，TUM 使用小场景阈值。
 `postprocess_scene_graph.py` 写入对象句子嵌入并生成 `dsg_updated.json`，`cluster_places.launch.yaml` 生成
-`clustered_dsg.json`。由于上游 `cluster_places_node` 只接受 `TraversabilityNodeAttributes`，共享脚本会临时转换 TUM 的普通
-Place 属性，聚类后再还原，临时文件不会保留；`tum-summarize` 的对象到区域关联也使用 `PLACES`，然后调用
+`clustered_dsg.json`。原生 place 通过向下投影到重建表面、再投影进图像，从对应 fragment 累积 `label_weights`，
+以标签查找 DAM 描述及语义特征；普通 GVD `PLACES` 仅是另一层几何骨架，不替代这条语义路径。
+TUM 手持相机朝向桌面，使用相机下方 0.3 m、上方 0 m 的观测切片；旧配置检查相机上方 0.5 m，导致该层为空。
+这只是已观测局部空间的抽取参数，不代表机器人足迹可安全通过。后处理会验证原生标签和聚类区域；
+TUM 运行结束后还会执行 `scripts/lift_native_places.py`：根据最终原生 `t` 节点的 XY 坐标沿 Z 轴向下寻找
+真实 RGB-D 表面，校验相机 Z 深度与观测深度（误差不超过 4 cm），用已保存的逐像素 fragment 标签投票。
+默认只读取每 30 帧保存的标签图；不调用新模型、不从邻近 object 推断，未知或被遮挡表面不提供语义。
+节点保存可读描述、标签权重及 `metadata.semantic_lifting.sources` 中的来源帧，特征通过标签查图级 `features`；
+这一步在结果保存后执行，在线原生投影未经此校验的权重仍留在节点元数据中供诊断。
+缺少原生 place 的旧结果需要重新执行 `just tum-run all <序列名>`，只重跑摘要不能恢复未记录的投影观测。
+`tum-summarize` 的对象到区域关联也使用 `TRAVERSABILITY`，然后调用
 `summarize_regions.py`，生成 `clustered_dsg_with_summaries.json` 和 `region_summaries.yaml`。不写结果目录时处理该
 序列最新的 `tum-run`；指定某次结果时把目录名放在序列名后，例如
 `just tum-summarize fr1_room out_20261016_123456`。摘要需要仓库 `.env` 中的 `OPENAI_API_KEY`；第一次后处理还可能

@@ -139,7 +139,7 @@ class JustfileTest(unittest.TestCase):
 		self.assertEqual(default.returncode, 0, text)
 		self.assertIn("-e RESULT_ROOT=output/tum_replay", text)
 		self.assertIn("-e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml", text)
-		self.assertIn("-e PLACES_LAYER=PLACES", text)
+		self.assertIn("-e PLACES_LAYER=TRAVERSABILITY", text)
 		self.assertNotIn("RESULT_ROOT=output/tum_replay_", text)
 		self.assertIn("scripts/postprocess_coda.sh", text)
 
@@ -148,7 +148,7 @@ class JustfileTest(unittest.TestCase):
 		self.assertEqual(chosen.returncode, 0, text)
 		self.assertIn("-e RESULT_ROOT=output/tum_replay_fr1_room", text)
 		self.assertIn("-e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml", text)
-		self.assertIn("-e PLACES_LAYER=PLACES", text)
+		self.assertIn("-e PLACES_LAYER=TRAVERSABILITY", text)
 		self.assertIn("scripts/postprocess_coda.sh out_a out_b", text)
 
 		summarize = self._dry_run("tum-summarize", "fr3_walking_xyz", "out_x")

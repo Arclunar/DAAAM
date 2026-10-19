@@ -377,7 +377,7 @@ class JobCommandTest(JobTestCase):
 			"-v", "/data/output/tum_replay/out_1:/selected-result",
 			"-e", "PYTHONUNBUFFERED=1",
 			"-e", "CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml",
-			"-e", "PLACES_LAYER=PLACES",
+			"-e", "PLACES_LAYER=TRAVERSABILITY",
 			"daaam-ws", "bash", "scripts/postprocess_coda.sh", "--atomic", "--stage", "postprocess", "/selected-result",
 		])
 		coda = Path("/mnt/e/output/coda/out_2")

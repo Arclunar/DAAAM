@@ -28,7 +28,7 @@ CODA_ORIGIN = 1673884185.589118
 SENTENCE = {"model_name": "sentence-transformers/sentence-t5-xl", "backend": "sentence_transformers", "dim": 768, "pretrained": None}
 CLIP = {"model_name": "ViT-L-14", "backend": "openclip", "dim": 768, "pretrained": "openai"}
 PROVENANCE = {"schema_version": 1, "sentence": SENTENCE, "clip": CLIP}
-TUM = DatasetContext("tum", "fr1_desk", 0.0, "PLACES")
+TUM = DatasetContext("tum", "fr1_desk", 0.0, "TRAVERSABILITY")
 CODA = DatasetContext("coda", "0", CODA_ORIGIN, "TRAVERSABILITY")
 
 
@@ -52,14 +52,14 @@ class DatasetContextTest(unittest.TestCase):
 		tum = DatasetContext.from_manifest({"kind": "tum", "sequence": "fr1_desk", "time_origin": 0.0, "fps": 15.0})
 		coda = DatasetContext.from_manifest({"kind": "coda", "sequence": "0", "time_origin": CODA_ORIGIN, "fps": 10.0})
 
-		self.assertEqual(tum, DatasetContext("tum", "fr1_desk", 0.0, "PLACES"))
+		self.assertEqual(tum, DatasetContext("tum", "fr1_desk", 0.0, "TRAVERSABILITY"))
 		self.assertEqual(coda, DatasetContext("coda", "0", CODA_ORIGIN, "TRAVERSABILITY"))
 
 	def test_the_context_is_immutable_and_usable_as_a_key(self):
 		with self.assertRaises(dataclasses.FrozenInstanceError):
 			TUM.kind = "coda"
-		self.assertEqual({TUM: 1}[DatasetContext("tum", "fr1_desk", 0.0, "PLACES")], 1)
-		self.assertNotEqual(TUM, DatasetContext("tum", "fr1_room", 0.0, "PLACES"))
+		self.assertEqual({TUM: 1}[DatasetContext("tum", "fr1_desk", 0.0, "TRAVERSABILITY")], 1)
+		self.assertNotEqual(TUM, DatasetContext("tum", "fr1_room", 0.0, "TRAVERSABILITY"))
 
 	def test_unsupported_or_inconsistent_datasets_are_refused(self):
 		bad = [

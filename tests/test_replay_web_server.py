@@ -550,13 +550,13 @@ class ReplayServerJobsApiTest(ReplayServerTestCase):
 		self.assertEqual(self.start({"stage": "all"}, path=f"/api/runs/{other['run_id']}")[0], 201)
 		self.wait_for(lambda: len(self.runner.calls) == 1, message="the first job")
 		tum = self.runner.calls[0]["argv"]
-		self.assertIn("PLACES_LAYER=PLACES", tum)
+		self.assertIn("PLACES_LAYER=TRAVERSABILITY", tum)
 		self.assertEqual(tum[-4:], ["--atomic", "--stage", "postprocess", "/selected-result"])
 		self.assertEqual(tum[tum.index("-v") + 1], "%s:/selected-result" % self.result)
 		self.runner.processes[0].finish(1)
 		self.wait_for(lambda: len(self.runner.calls) == 2, message="the queued CODa job")
 		coda = self.runner.calls[1]["argv"]
-		self.assertNotIn("PLACES_LAYER=PLACES", coda)
+		self.assertNotIn("PLACES_LAYER=", coda)
 		self.assertEqual(coda[-4:], ["--atomic", "--stage", "all", "/selected-result"])
 		self.assertEqual(coda[coda.index("-v") + 1], "%s:/selected-result" % self.coda)
 

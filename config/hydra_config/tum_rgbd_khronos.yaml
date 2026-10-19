@@ -83,8 +83,11 @@ frontend:
     type: traversability
     estimator:
       type: HeightTraversabilityEstimator
-      height_below: 0
-      height_above: 0.5
+      # Handheld, downward-looking camera: require observed clearance below
+      # the camera, rather than an unobserved column above its optical centre.
+      # This is a local free-space slice, not a robot-footprint safety guarantee.
+      height_below: 0.3
+      height_above: 0.0
       min_confidence: 1.0
       min_traversability: 1.0
       pessimistic: true

@@ -38,7 +38,7 @@ check:
 # 运行回归测试:宿主机上的标准库测试(含回看服务及其问答)、容器里的测试(含数据包生成和场景问答 Agent;问答测试全用假模型,不请求模型服务),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
     python3 -m unittest tests.test_justfile tests.test_dev_workspace tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat -v
-    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query -v
+    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query tests.test_tum_native_places tests.test_lift_native_places tests.test_region_summary_empty -v
     @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 
 # 重新分析当前源码并生成可离线打开的 process_frame 函数调用图
@@ -67,11 +67,11 @@ tum-run frames="298" seq="fr1_desk":
 
 # 后处理指定 TUM 环境最近一次 tum-run 结果:对象句子嵌入 → 地点聚类成区域;runs 可写一个或多个 out_<时间> 目录名
 tum-post seq="fr1_desk" *runs: _coda-guard
-    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=PLACES daaam-ws bash scripts/postprocess_coda.sh {{ runs }}
+    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=TRAVERSABILITY daaam-ws bash scripts/postprocess_coda.sh {{ runs }}
 
 # 同上,再用 OpenAI(gpt-5-nano,要 .env 里的 OPENAI_API_KEY)为 TUM 区域生成摘要
 tum-summarize seq="fr1_desk" *runs: _coda-guard
-    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=PLACES daaam-ws bash scripts/postprocess_coda.sh --summaries {{ runs }}
+    docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=TRAVERSABILITY daaam-ws bash scripts/postprocess_coda.sh --summaries {{ runs }}
 
 # 预先构建(或检查)一个序列的 1 cm 参考网格:Open3D TSDF 对整段序列的重建,缓存在数据集的 .daaam/reference_mesh/,之后的
 # just tum-run 直接用它;mode 写 rebuild 强制重建。just tum-run / tum-test 默认也会自动构建,环境变量 REFERENCE_MESH=off|rebuild 和

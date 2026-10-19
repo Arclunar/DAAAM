@@ -184,6 +184,12 @@ run_postprocess() {
     return 1
   fi
   echo "=== ${run}: place clustering"
+  if [ "${PLACES_LAYER:-TRAVERSABILITY}" = TRAVERSABILITY ]; then
+    if ! run_step python scripts/adapt_cluster_places.py validate --src "${updated}" --layer TRAVERSABILITY; then
+      echo "=== ${run}: native place semantics are missing; clustering was not started" >&2
+      return 1
+    fi
+  fi
   cluster_args=(data_dir:="${dir}" interactive:=false)
   if [ "${PLACES_LAYER:-TRAVERSABILITY}" != "TRAVERSABILITY" ]; then
     cluster_input="${dir}/.cluster_places_input.json"
@@ -217,6 +223,12 @@ run_postprocess() {
   if [ ! -s "${clustered}" ]; then
     echo "=== ${run}: the clustering step produced no clustered_dsg.json" >&2
     return 1
+  fi
+  if [ "${PLACES_LAYER:-TRAVERSABILITY}" = TRAVERSABILITY ]; then
+    if ! run_step python scripts/adapt_cluster_places.py validate --src "${clustered}" --layer TRAVERSABILITY --require-rooms; then
+      echo "=== ${run}: native region clustering failed validation" >&2
+      return 1
+    fi
   fi
   if [ "${atomic}" -eq 1 ]; then
     publish_outputs "${updated}" "${dir}/dsg_updated.json" "${clustered}" "${dir}/clustered_dsg.json" || return 1

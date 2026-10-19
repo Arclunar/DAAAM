@@ -316,6 +316,13 @@ class PostprocessCodaTest(CodaScriptTest):
 			case "$1" in
 			  scripts/postprocess_scene_graph.py) [ "${FAKE_FAIL_STEP:-}" = embeddings ] && exit 1; echo '{"nodes": [], "fake": "embeddings"}' > "${out:-$dir/dsg_updated.json}" ;;
 			  scripts/adapt_cluster_places.py)
+			    if [ "$2" = validate ]; then
+			      case "${FAKE_FAIL_STEP:-}:$*" in
+			        native_labels:*) exit 1 ;;
+			        native_rooms:*--require-rooms*) exit 1 ;;
+			      esac
+			      exit 0
+			    fi
 			    dst=""; prev=""
 			    for a in "$@"; do if [ "$prev" = --dst ]; then dst="$a"; fi; prev="$a"; done
 			    echo '{"nodes": [], "fake": "adapted"}' > "$dst"
@@ -341,7 +348,18 @@ class PostprocessCodaTest(CodaScriptTest):
 		)
 
 	def _steps(self) -> list:
-		return [line.split(" ")[1] for line in self._calls().splitlines()]
+		return [line.split(" ")[1] for line in self._calls().splitlines() if "adapt_cluster_places.py validate" not in line]
+
+	def test_invalid_native_input_or_empty_native_rooms_do_not_publish(self):
+		run = self.results / "out_20260101_000001"
+		for failure in ("native_labels", "native_rooms"):
+			with self.subTest(failure=failure):
+				(run / "dsg_updated.json").write_text("old embeddings")
+				(run / "clustered_dsg.json").write_text("old rooms")
+				result = self._run("postprocess_coda.sh", "--atomic", run.name, FAKE_FAIL_STEP=failure)
+				self.assertNotEqual(result.returncode, 0)
+				self.assertEqual((run / "dsg_updated.json").read_text(), "old embeddings")
+				self.assertEqual((run / "clustered_dsg.json").read_text(), "old rooms")
 
 	def test_without_arguments_the_newest_result_is_processed(self) -> None:
 		result = self._run("postprocess_coda.sh")
@@ -398,9 +416,11 @@ class PostprocessCodaTest(CodaScriptTest):
 		lines = self._calls().splitlines()
 		self.assertIn("scripts/postprocess_scene_graph.py --data-dir " + str(self.results / "out_20260101_000001"), lines[0])
 		self.assertTrue(lines[0].endswith("HF_HOME=/data/hf_cache"), lines[0])
-		self.assertIn("cluster_places.launch.yaml data_dir:=" + str(self.results / "out_20260101_000001") + " interactive:=false", lines[1])
-		self.assertNotIn("cluster_places_config_path:=", lines[1])
-		self.assertEqual(len(lines), 2)
+		self.assertIn("adapt_cluster_places.py validate", lines[1])
+		self.assertIn("cluster_places.launch.yaml data_dir:=" + str(self.results / "out_20260101_000001") + " interactive:=false", lines[2])
+		self.assertNotIn("cluster_places_config_path:=", lines[2])
+		self.assertIn("--require-rooms", lines[3])
+		self.assertEqual(len(lines), 4)
 
 	def test_summaries_need_the_flag_and_a_key(self) -> None:
 		without_key = self._run("postprocess_coda.sh", "--summaries", OPENAI_API_KEY="")
@@ -522,8 +542,8 @@ class PostprocessCodaTest(CodaScriptTest):
 		self.assertIsNotNone(match, calls[0])
 		updated_tmp, pid = match.group(1), match.group(2)
 		clustered_tmp = "%s/.replay-job-%s-clustered_dsg.json" % (run, pid)
-		self.assertIn("data_dir:=%s interactive:=false src_dsg:=%s save_dsg:=%s" % (run, updated_tmp, clustered_tmp), calls[1])
-		self.assertEqual(len(calls), 2)
+		self.assertIn("data_dir:=%s interactive:=false src_dsg:=%s save_dsg:=%s" % (run, updated_tmp, clustered_tmp), calls[2])
+		self.assertEqual(len(calls), 4)
 		self.assertIn('"fake": "embeddings"', (run / "dsg_updated.json").read_text(encoding="utf-8"))
 		self.assertIn('"fake": "clustered"', (run / "clustered_dsg.json").read_text(encoding="utf-8"))
 		self.assertEqual(self._leftovers(run), [])

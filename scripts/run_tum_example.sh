@@ -78,6 +78,11 @@ python scripts/run_pipeline.py "${DATASET}" \
 # when the grounding worker (DAM) dropped out, which the pipeline itself does not treat as an error
 latest="$(ls -dt "output/${NAME}"/out_* 2>/dev/null | head -n 1 || true)"
 if [ -n "${latest}" ]; then
+  if [ "${rc}" -eq 0 ] && [ -f "${latest}/dsg.json" ]; then
+    # Revisit final native place geometry using actual saved fragment/depth
+    # observations, after asynchronous DAM descriptions have been persisted.
+    python scripts/lift_native_places.py --run "${latest}" --dataset "${DATASET}" || rc=$?
+  fi
   python scripts/summarize_run.py "${latest}" --max-objects 10 || true
 fi
 exit "${rc}"

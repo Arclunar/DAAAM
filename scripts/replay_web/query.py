@@ -18,7 +18,7 @@ from scripts.replay_web.artifacts import ArtifactError, load_valid_graph
 
 # The read-only scene tools of a question. Job methods are never part of an Agent's registry.
 QUERY_TOOLS = ("get_matching_subjects", "get_objects_in_radius", "get_region_information", "get_agent_trajectory_information")
-PLACES_LAYERS = {"tum": "PLACES", "coda": "TRAVERSABILITY"}
+PLACES_LAYERS = {"tum": "TRAVERSABILITY", "coda": "TRAVERSABILITY"}
 PROVENANCE_KEY = "embedding_provenance"
 PROVENANCE_SCHEMA_VERSION = 1
 
