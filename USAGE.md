@@ -24,25 +24,32 @@ dsg.json + corrections.yaml + background_objects.yaml
 
 ### 2.1 Docker（推荐用于复现环境）
 
+本机已配置好环境。日常从 WSL `~/warmoon_ws/daaam_ws/src/daaam`（或原 `~/warmoon_ws/DAAAM` 兼容入口）
+执行 `just run`、`just build [包名...]`、`just check` 即可；编辑器打开 `~/warmoon_ws/daaam_ws/src`
+可查看全部仓库。Python/ROS/GPU 操作在容器中执行，不使用 WSL20.04 的系统 Python 跑管线。
+完整路径、首次安装和挂载说明见 [DOCKER.md](DOCKER.md)。
+
 仓库提供的镜像只准备 Ubuntu 24.04、CUDA 12.8、ROS 2 Jazzy、Python 和编译
 工具，不会安装或编译项目本身。
 
 ```bash
 USER_UID=$(id -u) USER_GID=$(id -g) docker compose build
+docker volume create daaam_daaam_workspace
+# 先按 .env.example 配置完整 WSL src 路径，其中主仓库目录名为 daaam
 ./docker/check.sh
-docker compose run --rm daaam
+docker compose run --rm daaam-ws
 ```
 
 进入容器后安装项目：
 
 ```bash
-bash install/install.sh
+bash docker/setup_workspace.sh
 export DAAAM_WS=/opt/daaam_ws
 source "${DAAAM_WS}/install/setup.bash"
 ```
 
-容器中的 `/opt/daaam_ws` 使用命名卷持久化，因此手动下载的同级仓库、Python
-依赖和 colcon 构建结果在退出后仍然保留。SSH agent 转发、GUI、数据集挂载、
+容器中的 `/opt/daaam_ws/src` 绑定到完整 WSL 源码目录；Python
+依赖和 colcon 构建结果仍由原命名卷保存，退出后保留。SSH agent 转发、GUI、数据集挂载、
 镜像源切换和清理方法见 [DOCKER.md](DOCKER.md)。
 
 ### 2.2 宿主机直接安装

@@ -1,5 +1,41 @@
 # DAAAM Docker 开发环境
 
+## 日常开发入口
+
+所有源码都在 WSL 普通目录 `~/warmoon_ws/daaam_ws/src/`：`daaam`、`daaam_ros`、
+`hydra`、`hydra_ros` 等仓库可一起打开、编辑和搜索。Windows 可打开
+`\\wsl.localhost\Ubuntu-20.04\home\arclunar\warmoon_ws\daaam_ws\src`。
+主仓库现在是其中的 `daaam/`；本机原 `~/warmoon_ws/DAAAM` 是同目录的 bind 挂载兼容入口，
+保留 Windows 程序将它作为工作目录的能力，配置记录在 `/etc/fstab` 中。
+
+在主仓库内使用：
+
+```bash
+just run                  # 新开已加载 ROS、venv 和工作区的容器终端
+just exec                 # 进入本项目唯一一个运行中的 daaam-ws 容器
+just exec <container-id>  # 同项目多个容器运行时显式选择
+just build                # 增量编译整个 C++/ROS 工作区，仅扫描 src
+just build hydra_ros      # 增量编译指定包及其依赖，可传多个包
+just check                # 核对源码挂载、依赖卷、关键导入、GLPK 和 GPU 运算
+just tum-test             # 30 帧冒烟，生成回看数据
+just replay-web           # 打开回看服务
+```
+
+源码修改在 WSL/容器之间立即可见，新进程才会重新加载 Python 代码；C++ 修改需编译。
+改变 Hydra/Spark-DSG 的 Python 绑定 C++ 源码后，在 `just run` 的容器中执行
+`bash docker/setup_workspace.sh pip-ws` 重建绑定。裸 `just` 保持实时预览。
+
+`.env` 必须设置 `DAAAM_SRC_DIR` 为完整 src 绝对路径；示例见 `.env.example`。
+Compose 直接使用现有命名卷 `WORKSPACE_VOLUME`（默认 `daaam_daaam_workspace`），
+保留 `.venv`、`build`、`install` 和 `cache`。两个服务把整个 WSL src 挂载到
+`/opt/daaam_ws/src`，不再另外挂载单个主仓库。新增源码仓库也立即可见。
+路径缺失会报错，不会自动建立空源码目录。首次在全新机器使用开发环境时，先创建
+`docker volume create daaam_daaam_workspace`，按 `.env.example` 配置源码目录，
+把主仓库放在该目录的 `daaam/` 下再运行安装步骤。
+
+旧卷内 src 是切换前快照，已不用于开发，不编辑或清理它来“同步”代码。
+镜像打包脚本会从当前 Compose 指定的 WSL src 取源码，不再打包旧卷 src。
+
 该镜像只准备 DAAAM 所需的基础环境：Ubuntu 24.04、CUDA 12.8、cuDNN、
 ROS 2 Jazzy、Python 虚拟环境、C/C++ 构建工具和系统库。它不会复制、拉取、
 安装或编译 DAAAM 及其工作区依赖，也不会执行 `requirements.txt`。
@@ -34,26 +70,27 @@ USER_UID=$(id -u) USER_GID=$(id -g) docker compose build
 ## 进入环境
 
 ```bash
-docker compose run --rm daaam
+docker compose run --rm daaam-ws
 ```
 
-当前仓库会出现在 `/opt/daaam_ws/src/daaam`，并作为默认工作目录。入口脚本会
+完整 WSL 源码目录挂载到 `/opt/daaam_ws/src`，主仓库出现在其中的 `daaam`，并作为默认工作目录。入口脚本会
 自动加载 ROS 2、`/opt/daaam_ws/.venv`，以及存在时的 colcon 安装空间。
 
-`daaam_workspace` 命名卷保存虚拟环境、同级依赖仓库、`build/`、`install/`
+`daaam_workspace` 命名卷保存虚拟环境、`build/`、`install/`
 和 `log/`。因此即使使用 `--rm`，你之后手动完成的项目安装和编译仍会保留。
-仓库源码则直接绑定到宿主机，容器内的源码修改会立即反映到宿主机。
+全部仓库源码则绑定到宿主机，容器内的源码修改会立即反映到宿主机。
 
 ## 手动安装项目
 
 进入容器后，由你按项目文档执行安装。例如完整安装入口是：
 
 ```bash
-bash install/install.sh
+bash docker/setup_workspace.sh
 ```
 
-该脚本会导入其他仓库、运行 rosdep 和 colcon，并安装 Python 依赖。仓库清单
-使用 GitHub SSH 地址。若要用 SSH 克隆，需先在宿主机启动 SSH agent 并加载
+该脚本包含既有依赖兼容处理，按阶段导入仓库、运行 rosdep 和 colcon，并安装 Python 依赖。
+`daaam-ws` 已把公开仓库地址转为 HTTPS，不需要 SSH 密钥。若自行手动导入且希望使用 SSH，
+需先在宿主机启动 SSH agent 并加载
 密钥：
 
 ```bash

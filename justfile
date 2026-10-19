@@ -24,12 +24,20 @@ run:
 
 
 # 进入已经运行的 DAAAM 容器
-exec:
-    @cid=$(docker ps -q --filter label=com.docker.compose.service=daaam-ws | head -n 1); if [ -z "$cid" ]; then echo "没有正在运行的 DAAAM 容器"; exit 1; fi; docker exec -it "$cid" bash
+exec container="":
+    python3 docker/dev.py exec {{ quote(container) }}
+
+# 增量编译整个工作区或指定包及其依赖，例如 just build hydra_ros
+build *packages:
+    python3 docker/dev.py build {{ quote(packages) }}
+
+# 核对 WSL 源码挂载、原依赖卷、GPU 和 ROS/Python 环境
+check:
+    python3 docker/dev.py check
 
 # 运行回归测试:宿主机上的标准库测试(含回看服务及其问答)、容器里的测试(含数据包生成和场景问答 Agent;问答测试全用假模型,不请求模型服务),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
-    python3 -m unittest tests.test_justfile tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat -v
+    python3 -m unittest tests.test_justfile tests.test_dev_workspace tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat -v
     docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query -v
     @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 

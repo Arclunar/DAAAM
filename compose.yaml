@@ -1,3 +1,5 @@
+name: ${COMPOSE_PROJECT_NAME:-daaam}
+
 services:
   daaam:
     image: daaam:jazzy-cu128-dev
@@ -24,7 +26,11 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
     volumes:
       - daaam_workspace:/opt/daaam_ws
-      - .:/opt/daaam_ws/src/daaam
+      - type: bind
+        source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
+        target: /opt/daaam_ws/src
+        bind:
+          create_host_path: false
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /opt/daaam_ws/src/daaam
 
@@ -67,7 +73,11 @@ services:
       CODA_ROOT_DIR: /data/CODa
     volumes:
       - daaam_workspace:/opt/daaam_ws
-      - .:/opt/daaam_ws/src/daaam
+      - type: bind
+        source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
+        target: /opt/daaam_ws/src
+        bind:
+          create_host_path: false
       - ${DAAAM_DATASETS_DIR:-./datasets}:/datasets
       # CODa 数据集、FoundationStereo 和 bag 放在宿主机目录里（本机在 .env 里设成 /mnt/e/daaam-data，
       # 即 E:\daaam-data）：WSL 和 Windows 里直接能看，不占 C: 盘上的 WSL 虚拟磁盘，容器里是 /data
@@ -77,3 +87,5 @@ services:
 
 volumes:
   daaam_workspace:
+    external: true
+    name: ${WORKSPACE_VOLUME:-daaam_daaam_workspace}
