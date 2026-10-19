@@ -38,7 +38,7 @@ check:
 # 运行回归测试:宿主机上的标准库测试(含回看服务及其问答)、容器里的测试(含数据包生成和场景问答 Agent;问答测试全用假模型,不请求模型服务),以及 Windows 上带 Chrome 的真实浏览器测试
 test:
     python3 -m unittest tests.test_justfile tests.test_dev_workspace tests.test_generate_orchestrator_graph tests.test_fetch_tum tests.test_coda_just tests.test_coda_scripts tests.test_memory tests.test_output_layout tests.test_cluster_places_adapter tests.test_replay_manifest tests.test_replay_datasets tests.test_replay_web_paths tests.test_replay_web_runs tests.test_replay_web_server tests.test_replay_artifacts tests.test_replay_events tests.test_replay_jobs tests.test_replay_history tests.test_replay_agent_protocol tests.test_replay_agent_client tests.test_replay_chat -v
-    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query tests.test_tum_native_places tests.test_lift_native_places tests.test_region_summary_empty -v
+    docker compose run --rm -T daaam-ws python -m unittest tests.test_description_provenance tests.test_replay_catalog tests.test_reference_mesh tests.test_replay_reference_mesh tests.test_replay_bundle tests.test_replay_rrd tests.test_run_replay tests.test_scene_graph_utils tests.test_scene_agent_conversation tests.test_replay_query tests.test_tum_native_places tests.test_lift_native_places tests.test_region_summary_empty tests.test_gs_world_data tests.test_gs_world_model tests.test_gs_world_rosbag -v
     @if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command 'python -c "import selenium" 2>$null; if ($LASTEXITCODE -eq 0) { $env:RUN_BROWSER_TESTS="1"; python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v; exit $LASTEXITCODE }; Write-Output "browser test skipped: install Selenium in the Windows Python environment to enable the real Chrome interaction tests"'; else echo 'browser test skipped: run RUN_BROWSER_TESTS=1 python -m unittest tests.test_replay_browser tests.test_replay_workspace_browser -v on a machine with Selenium and Chrome'; fi
 
 # 重新分析当前源码并生成可离线打开的 process_frame 函数调用图
@@ -145,6 +145,39 @@ coda-ask question run: _coda-guard
 coda-view run:
     @{{ just_executable() }} rerun-web output/coda/{{ run }}/clustered_dsg_with_summaries.json
 
-# 内部:已有别的管线 / 深度估计 / 后处理 / 问答的容器在跑就不启动(显存和 WSL 内存装不下两个)
+
+# ── 3DGS 测试世界(gsplat,scripts/gs_world):把带位姿的 RGB-D 训练成 3D 高斯模型,再沿原轨迹或新轨迹渲染出 RGB-D 数据集给 DAAAM 建图;模型、渲染和 bag 转换结果在 $DAAAM_DATA_DIR/gs_world(容器里 /data/gs_world,本机 E:\daaam-data\gs_world),见 USAGE.md 9.7 ──
+# 一次性:`just gs-install`(下载 4 个包约 6.8 MB,装进工作区卷的独立目录)→ `just gs-check`(第一次为本机 GPU 编译 CUDA 扩展,约 2 分钟)
+# 日常:`just gs-train fr1_room` → `just gs-render latest` → `just gs-daaam <渲染目录>`;D455 实录:`just gs-bag <bag> --list` → `just gs-bag <bag> --extrinsic …` → `just gs-train <转换目录>`
+
+# 安装 gsplat 1.5.3 和 ninja、jaxtyping、wadler-lindig 到工作区卷的 /opt/daaam_ws/gs_site(--no-deps,不改 DAAAM 的 venv;版本与 scripts/gs_world/env.py 一致)
+gs-install:
+    docker compose run --rm -T daaam-ws pip install --no-deps --target /opt/daaam_ws/gs_site gsplat==1.5.3 ninja==1.13.2 jaxtyping==0.3.11 wadler-lindig==0.1.7
+
+# 检查 gsplat:第一次运行为本机 GPU 编译 CUDA 扩展(约 2 分钟,结果留在工作区卷里),再渲染并反传一个小场景
+gs-check:
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.check
+
+# 训练 3DGS 模型(MCMC 增密 + 抗锯齿 + 深度监督 + 逐帧曝光补偿):data 是 /datasets 下的名字(fr1_room 或 tum_fr1_room)或容器里的数据集目录,可追加 train 的参数(如 --iterations 7000、--pose-opt);fr1_room 3 万步约 25 分钟,输出 /data/gs_world/models/<数据集>/<UTC 时间>
+gs-train data *args: _coda-guard
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.train {{ data }} {{ args }}
+
+# 用模型渲染 RGB-D 数据集:model 是模型目录或 latest(最新的模型);追加 --trajectory test|轨迹文件、--offset X,Y,Z、--rotate RX,RY,RZ、--exposure nearest 等;输出 <模型>/renders/<轨迹名>,渲染原轨迹时顺带和原始帧对比
+gs-render model="latest" *args: _coda-guard
+    docker compose run --rm -T daaam-ws python -m scripts.gs_world.render {{ model }} {{ args }}
+
+# 把 D455 的 ROS1 bag(彩色 + 对齐深度 + camera_info + 里程计话题或 --trajectory 轨迹)转成带位姿的 RGB-D 数据集:bag 是 WSL 里的路径(只读挂进容器),先加 --list 看话题,外参如 --extrinsic /data/calib/chain.yaml:T_cam_livox;输出 /data/gs_world/datasets/<bag 名>
+gs-bag bag *args:
+    @bag="$(realpath {{ quote(bag) }})"; docker compose run --rm -T -v "$(dirname "$bag")":/bag_in:ro daaam-ws python -m scripts.gs_world.rosbag_to_rgbd "/bag_in/$(basename "$bag")" {{ args }}
+
+# 用 DAAAM 给 gs_world 数据集(渲染结果或转换后的 bag)建图,像 tum-run 一样生成 replay/ 回看数据包和 replay.rrd;frames 写 all 为全部帧;输出 output/gs_<数据集>_<轨迹>(name 可改)
+gs-daaam dataset frames="all" name="": _coda-guard
+    docker compose run --rm -T daaam-ws bash scripts/gs_world/run_daaam.sh {{ dataset }} {{ frames }} {{ name }}
+
+# 比较同一世界坐标系里的几个 DAAAM 结果(第一个是参照,如真实帧的 output/tum_replay_fr1_room):物体 / 地点 / 房间数、0.3 m 内一一配上的物体比例和距离、配上的物体 DAM 描述的一致程度;runs 写 output/<名字> 或其中的 out_* 目录,可追加 --radius、--json
+gs-compare +runs:
+    docker compose run --rm -T --no-deps daaam-ws python -m scripts.gs_world.compare_maps {{ runs }}
+
+# 内部:已有别的管线 / 深度估计 / 后处理 / 问答 / 3DGS 训练或渲染的容器在跑就不启动(显存和 WSL 内存装不下两个)
 _coda-guard:
-    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|demo_query|agent_worker|daaam_node' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理或问答的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它(回看页面的问答 worker 叫 daaam-replay-agent,空闲 15 分钟会自己退出)" >&2; exit 1; fi
+    @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|demo_query|agent_worker|daaam_node|scripts.gs_world.train|scripts.gs_world.render' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理、问答或 3DGS 训练 / 渲染的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它(回看页面的问答 worker 叫 daaam-replay-agent,空闲 15 分钟会自己退出)" >&2; exit 1; fi

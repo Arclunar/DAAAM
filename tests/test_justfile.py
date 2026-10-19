@@ -226,5 +226,57 @@ class JustfileTest(unittest.TestCase):
 		self.assertIn("--template scripts/orchestrator_graph_viewer.html", output)
 		self.assertIn("--output docs/orchestrator_process_frame.html", output)
 
+	def test_gs_world_recipes_run_in_the_container(self) -> None:
+		from scripts.gs_world import env
+
+		install = self._dry_run("gs-install")
+		text = install.stdout + install.stderr
+		self.assertEqual(install.returncode, 0, text)
+		self.assertIn("--no-deps --target /opt/daaam_ws/gs_site", text, "gsplat stays out of the DAAAM virtual environment")
+		for package in env.PACKAGES:
+			self.assertIn(package, text, "the recipe installs the versions gs_world checks for")
+		self.assertIn(f"gsplat=={env.GSPLAT_VERSION}", text)
+
+		train = self._dry_run("gs-train", "fr1_room", "--iterations", "7000")
+		text = train.stdout + train.stderr
+		self.assertEqual(train.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.train fr1_room --iterations 7000", text)
+		self.assertIn("agent_worker", text, "training waits for the other heavy containers")
+		render = self._dry_run("gs-render")
+		text = render.stdout + render.stderr
+		self.assertEqual(render.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.render latest", text)
+
+		bag = self._dry_run("gs-bag", "/tmp/rec.bag", "--list")
+		text = bag.stdout + bag.stderr
+		self.assertEqual(bag.returncode, 0, text)
+		self.assertIn(":/bag_in:ro", text, "the bag's folder is mounted read-only")
+		self.assertIn("python -m scripts.gs_world.rosbag_to_rgbd", text)
+		self.assertIn("--list", text)
+
+		daaam = self._dry_run("gs-daaam", "/data/gs_world/models/tum_fr1_room/t/renders/original")
+		text = daaam.stdout + daaam.stderr
+		self.assertEqual(daaam.returncode, 0, text)
+		self.assertIn("scripts/gs_world/run_daaam.sh /data/gs_world/models/tum_fr1_room/t/renders/original all", text)
+
+		comparison = self._dry_run("gs-compare", "output/tum_replay_fr1_room", "output/gs_tum_fr1_room_original")
+		text = comparison.stdout + comparison.stderr
+		self.assertEqual(comparison.returncode, 0, text)
+		self.assertIn("python -m scripts.gs_world.compare_maps output/tum_replay_fr1_room output/gs_tum_fr1_room_original", text)
+		self.assertNotEqual(self._dry_run("gs-compare").returncode, 0, "at least the reference is required")
+
+		for recipe in ("coda-post", "gs-daaam"):
+			args = ("x",) if recipe == "gs-daaam" else ()
+			result = self._dry_run(recipe, *args)
+			self.assertIn("scripts.gs_world.train", result.stdout + result.stderr,
+				recipe + ": a pipeline does not start next to a 3DGS training")
+
+	def test_test_recipe_runs_the_gs_world_suites_in_the_container(self) -> None:
+		result = self._dry_run("test")
+		output = result.stdout + result.stderr
+		container = output.split("docker compose run", 1)[1].split("powershell", 1)[0]
+		for module in ("tests.test_gs_world_data", "tests.test_gs_world_model", "tests.test_gs_world_rosbag"):
+			self.assertIn(module, container, "the gs_world suites need numpy, OpenCV and torch from the container")
+
 if __name__ == "__main__":
 	unittest.main()

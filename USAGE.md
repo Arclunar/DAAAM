@@ -1226,3 +1226,128 @@ DAAAM 不会自动回退下载 FastSAM。检查 `checkpoints/fastsam/` 中是否
 - [EVAL.md](EVAL.md)：OC-NaVQA 评测
 - [CODEBASE.md](CODEBASE.md)：代码结构和服务架构
 - [data/DATA.md](data/DATA.md)：评测数据说明
+### 9.7 3DGS 测试世界（gsplat：训练高斯模型、渲染 RGB-D、给 DAAAM 建图）
+
+把一段带位姿的 RGB-D（TUM 序列，或 D455 实录的 ROS1 bag）训练成 3D 高斯（3DGS）模型，再沿**原轨迹**或**新轨迹**（平移、转向、
+换分辨率）渲染出新的 RGB-D 序列。渲染结果的目录格式和 `datasets/tum_*` 完全一样（`rgb/`、`depth/`、`pose/poses.txt`、
+`camera_info.json`），DAAAM 直接拿来建图。这样可以在同一个场景里反复做"换一条路线 / 换相机高度 / 换视角"的语义地图测试：
+位姿是已知的，渲染出的颜色和深度彼此一致。代码在 `scripts/gs_world/`，模型和渲染结果放在 `E:\daaam-data\gs_world`
+（容器里是 `/data/gs_world`）。
+
+**算法**：gsplat 1.5.3（nerfstudio 团队维护的 3DGS CUDA 光栅化库，许多新方法以它为底座）加上下面这套训练配方：
+
+- 3DGS-MCMC 增密（Kheradmand 等，NeurIPS 2024）：高斯总数有上限（`--cap-max`，默认 100 万），用"把死掉的高斯重定位"代替
+  分裂 / 克隆的启发式，显存可预期；
+- 抗锯齿光栅化（Mip-Splatting 的 2D 滤波），换距离、换分辨率渲染时更稳；
+- RGB-D 专用：用传感器深度融合出的点云初始化（不需要 SfM），L1 深度损失（`--depth-weight 0.3`；深度跳变处的飞点和 5 m 以外的
+  深度不参与）；传感器没测到深度的像素（玻璃、阳光、超出量程）沿视线在 8 m 处放一层稀疏的点，否则那里没有高斯、渲染成黑洞；
+- 逐帧仿射颜色变换吸收自动曝光和白平衡的变化（稀疏嵌入 + SparseAdam，只更新当前帧）；渲染默认用单位变换，即场景的
+  "平均外观"，`--exposure nearest` 复现原相机在那一刻的曝光；
+- 可选的逐帧位姿微调（`--pose-opt`），给里程计位姿用（TUM 是动捕真值，默认不开）。
+
+没有选 SLAM 类方法（SplaTAM、MonoGS 等）：TUM 有动捕真值，D455 实录有 FAST-LIO 位姿，不需要再估计位姿；也没有选依赖链很重的
+nerfstudio / 3DGRUT：在这台 sm_120 + torch 2.8 的环境里，它们不如 gsplat 一个 pip 包可靠。
+
+**安装（本机已经做过）**：`just gs-install` 下载 4 个包（gsplat 1.5.3 的 wheel 6.52 MB、ninja 1.13.2、jaxtyping 0.3.11、
+wadler-lindig 0.1.7，合计约 6.8 MB），用 `pip install --no-deps --target /opt/daaam_ws/gs_site` 装进工作区卷里的独立目录（落盘
+27 MB），不改 DAAAM 的 venv；版本写死在 `scripts/gs_world/env.py`。`just gs-check` 第一次运行时为本机 GPU（sm_120）编译 CUDA 扩展
+（本机 131 秒，`MAX_JOBS=4`，产物在工作区卷的 `/opt/daaam_ws/cache/torch_extensions`），之后几秒就能加载，再渲染并反传一个小场景。
+
+```bash
+just gs-train fr1_room                     # 训练（默认 3 万步，每 8 帧留 1 帧做测试），输出 /data/gs_world/models/tum_fr1_room/<UTC 时间>
+just gs-train fr1_room --iterations 7000   # 快速版；其他参数见 python -m scripts.gs_world.train --help
+just gs-render latest                      # 沿原轨迹渲染最新的模型，顺带和原始帧逐帧对比
+just gs-render latest --offset 0,-0.2,0    # 同一条路线抬高 20 cm（相机自己的坐标系：x 右、y 下、z 前）
+just gs-render latest --rotate 0,15,0      # 每一帧都向右多转 15°
+just gs-render latest --exposure nearest   # 复现原相机的曝光变化
+just gs-daaam /data/gs_world/models/tum_fr1_room/<时间>/renders/original   # DAAAM 建图，结果在 output/gs_tum_fr1_room_original/
+```
+
+路径都是容器里的：`/data` 是 `E:\daaam-data`，`/datasets` 是仓库的 `datasets/`；`latest` 是 `/data/gs_world/models` 下最新的模型。
+
+- **模型目录**：`model.pt`（参数和元数据：相机、全部位姿、训练 / 测试帧、曝光参数）、`point_cloud.ply`（原版 3DGS 的 PLY 格式，
+  可以拖进 SuperSplat 之类的查看器）、`metrics.json`（测试帧的 PSNR / SSIM / 颜色校正后的 PSNR / 深度误差）、`train_log.csv`、
+  `config.json`、`previews/`（原图 | 渲染 | 渲染深度 | 实测深度）。
+- **渲染目录** `<模型>/renders/<轨迹名>`：`rgb/`、`depth/`（5000 单位/米；累计不透明度低于 `--min-alpha`（0.7）的像素深度写 0）、
+  `pose/poses.txt`、`timestamps.txt`、`camera_info.json`，外加 `gs_render.json`（模型摘要、轨迹参数、和原始帧的对比结果，
+  分"留出的测试帧"和"训练帧"两组）和 `preview.jpg`。轨迹还可以是 `--trajectory test`（只渲染测试帧）或轨迹文件（每行 16 个数，
+  或 TUM 格式 `时间 tx ty tz qx qy qz qw`）。
+- `just gs-daaam <数据集> [帧数] [名字]` 走和 `just tum-run` 相同的 `scripts/run_replay.sh`，帧率取数据集 `camera_info.json` 里的
+  `fps`，生成 `replay/` 回看数据包和 `replay.rrd`（`just replay-web` 打开，数据集名显示为结果名）；默认不建 1 cm 参考网格
+  （`REFERENCE_MESH=off`）。
+- `just gs-compare <参照> <结果>…` 比较同一世界坐标系里的几个 DAAAM 结果（`output/<名字>` 用其中最新的 `out_*`，也可以直接写
+  `out_*` 目录）：物体 / 地点 / 房间数，0.3 m 内一一配上的物体（`--radius`）占参照和占自己的比例、中位距离，配上的物体的 DAM
+  描述一致程度（去掉虚词后的词集合 Jaccard 指数，旁边给随机配对的值作为基线）和几个例子；`--json` 另存报告。模型渲染的轨迹
+  （包括 `--offset` / `--rotate`）都保持数据集的世界坐标系，所以可以和真实帧的结果直接比。
+
+#### 实测（TUM fr1_room，681 帧，640×480，2026-10-19）
+
+| 步骤 | 结果 |
+|---|---|
+| 训练 3 万步 | 24.6 分钟（约 20 it/s），100 万个高斯（第 4000 步到上限），显存峰值 1.4 GB；`model.pt` 236 MB、`point_cloud.ply` 248 MB |
+| 86 个留出帧 | PSNR 19.55 / SSIM 0.732（平均外观）；cc-PSNR 23.07；用相邻训练帧的曝光（`--exposure nearest`）PSNR 22.97 / SSIM 0.771；覆盖 99.6% |
+| 渲染深度 vs 实测深度 | 平均误差 3.8 cm、RMSE 10.4 cm、AbsRel 2.3%、δ<1.25 98.7%（留出帧） |
+| 渲染原轨迹 | 681 帧 53 秒；和原始帧比：训练帧 cc-PSNR 23.43，留出帧 23.07（只差 0.36 dB，没有过拟合） |
+| 渲染抬高 20 cm 的轨迹 | 681 帧 40 秒，覆盖 98.2% |
+
+深度损失的权重在 3000 步的短训练里对比过：0.1 → 深度平均误差 5.6 cm、PSNR 19.84；0.3 → 4.4 cm、19.58，所以默认 0.3（DAAAM 要用渲染的
+深度建图）。原始 PSNR 比 cc-PSNR 低约 3.5 dB，是 TUM 自动曝光造成的（渲染用的是平均外观）；fr1 序列运动模糊严重，这个画质在
+TUM 上属于正常水平。
+
+DAAAM 在三份输入上建图（都是全部 681 帧、带 DAM），用 `just gs-compare` 以真实帧的结果为参照比较：
+
+| 输入 | 物体 / 地点 / 房间 | 有描述的标签 | 0.3 m 内配上的物体（占参照 / 占自己） | 中位距离 | 描述一致度（随机配对） |
+|---|---|---|---|---|---|
+| 真实帧（`just tum-run all fr1_room`，参照） | 370 / 85 / 3 | 452 | — | — | — |
+| 真实帧，10-16 的旧结果（同一输入再跑一次） | 370 / 85 / 3 | 487 | 100% / 100% | 0.000 m | 0.550（0.043） |
+| 3DGS 渲染的原轨迹 | 317 / 70 / 1 | 396 | 68.4% / 79.8% | 0.098 m | 0.188（0.045） |
+| 3DGS 渲染、抬高 20 cm | 284 / 76 / 2 | 352 | 57.6% / 75.0% | 0.099 m | 0.153（0.043） |
+
+怎么读这张表：同一批真实帧跑两次，几何完全一样（Hydra 对相同输入是确定的），但 DAM 的描述每次都有变化，一致度 0.55 就是这个指标
+的上限。3DGS 世界里建出的地图有七八成物体能和真实地图对上，位置差约 10 cm，描述的一致度是随机水平的 4 倍，但离 0.55 还远：渲染图
+比真实图平滑（细纹理丢失、原图的运动模糊被"烤"进模型），分割和描述会跟着变。所以 3DGS 世界适合做**相对比较**（同一个世界里换
+轨迹、换高度、换参数，看语义地图怎么变），不能把它的绝对数值直接当成真实场景的表现。结果目录：`output\tum_replay_fr1_room\out_20261019_131812`、
+`output\gs_tum_fr1_room_original\out_20261019_081749`、`output\gs_tum_fr1_room_original_t+0.00-0.20+0.00\out_20261019_131015`，对比报告
+`output\gs_compare_fr1_room_20261019.json`；模型和渲染在 `E:\daaam-data\gs_world\models\tum_fr1_room\20261019T074423Z`。
+
+#### D455 实录（ROS1 bag）
+
+```bash
+just gs-bag ~/data/rec.bag --list                                               # 先看 bag 里有哪些话题、多少帧、频率
+just gs-bag ~/data/rec.bag --extrinsic /data/calib/chain.yaml:T_cam_livox       # 位姿用 bag 里的 /Odometry（FAST-LIO）
+just gs-bag ~/data/rec.bag --trajectory /data/traj/rec.txt --extrinsic …        # 位姿来自离线轨迹文件（TUM 格式，比如离线跑的 FAST-LIO）
+just gs-train /data/gs_world/datasets/rec --pose-opt                            # 训练；里程计位姿建议开位姿微调
+```
+
+- bag 的路径是 WSL 里的，配方把它所在目录只读挂进容器；外参、轨迹文件要放在容器看得见的地方（如 `E:\daaam-data\…` = `/data/…`）。
+- 读 bag 的是自己写的 ROS1 读取器（`scripts/gs_world/rosbag1.py`，标准库 + numpy + OpenCV，不需要 ROS，也不用再下载 `rosbags`）：
+  读未压缩和 bz2 的块（lz4 需要 `lz4` 模块），没有索引、录制或拷贝中断的 bag 也能读到截断处。用本机传了一半的
+  `jellyhold_data/.rsync-partial/fisheye_cali.bag` 验证过：116 帧 1280×800 `bgr8`，0.4 秒扫完，颜色正确。
+- 默认话题按 realsense-ros（`align_depth`）：彩色 `/camera/color/image_raw` 或 `.../compressed`（`camera_info/D455_rgb_cali` 的 Kalibr
+  标定记的就是 compressed），对齐深度 `/camera/aligned_depth_to_color/image_raw` 或 `.../compressedDepth`（16UC1 毫米，`--depth-unit`
+  可改；32FC1 米），`/camera/color/camera_info`；位姿话题自动找唯一的 `nav_msgs/Odometry`（其次 `PoseStamped`、
+  `PoseWithCovarianceStamped`），也可以 `--pose-topic` 指定。
+- **外参** `--extrinsic 文件:键`：键按 `p_a = T_a_b · p_b` 理解。`camera_info/D455_rgb_cali/chain.yaml` 里的 `T_cam_livox` 把 Livox
+  IMU 坐标变到相机，自动取逆，得到相机在 Livox IMU（FAST-LIO 的 body）里的位姿；其他键（`T_<body>_cam`）原样使用；也接受 JSON
+  （`T_tracking_camera`）或 16 个数的文本文件。里程计的 child_frame 就是相机光学系时可以不给外参；`--pose-is-camera` 强制把位姿
+  当作相机位姿。外参用错时，转换不会报错，但训练出的模型会糊：看 `previews/` 和 `metrics.json` 里的深度误差。
+- **时间**：RGB 和深度按 header 时间配对（`--max-dt`，默认 20 ms），位姿按 RGB 时间插值（`--max-pose-gap` 0.25 s；
+  `--time-offset` 补相机和里程计两个时钟的差）。
+- **关键帧**：每走 5 cm 或转 5° 算一段（`--min-translation`、`--min-rotation`），每段挑最清晰的一张（拉普拉斯方差），离上一张至少
+  半段，最多 1000 张；`--start` / `--duration` 只取一段时间。
+- **去畸变**：用 camera_info 的畸变模型（plumb_bob / equidistant），或 `--camchain camchain.yaml[:cam0]` 换成 Kalibr 的标定；RGB 和
+  深度用同一张映射（深度用最近邻，不混合），边缘的无效区写进 `valid_mask.png`，训练时排除。
+- 输出 `/data/gs_world/datasets/<bag 名>`（`--overwrite` 才覆盖），`conversion.json` 记录话题、帧数、外参来源、标定、RGB / 深度的
+  时间差和路径长度。合成 bag 的端到端测试覆盖了配对、外参取逆、去畸变、关键帧挑选和 compressedDepth，**还没有实机 D455 录包
+  验证**。
+
+#### 注意事项
+
+- GPU：训练 640×480、100 万高斯的显存峰值在几 GB 以内，但和 DAAAM 建图（12–15.6 GB）不能同时跑；`gs-train`、`gs-render`、`gs-daaam`
+  都先检查别的重活容器（同一个 `_coda-guard`，它现在也认得 3DGS 的训练和渲染，所以建图配方也会等训练结束）。
+- 渲染深度不是传感器真值：它是高斯的期望深度，物体边缘和漂浮物处会有误差；离训练视角越远伪影越多，新轨迹先在原轨迹附近
+  （几十厘米、十几度）试，否则测的是 3DGS 的质量而不是语义地图。
+- TUM fr1 的图像去畸变后四周有黑边，训练时自动识别并排除（`valid_mask.png` 不存在时按"多数帧纯黑且连着边界"判断）。
+- 测试：`tests/test_gs_world_data.py`（数据集读写、缩放后的内参、黑边识别、轨迹文件）、`tests/test_gs_world_model.py`（几何、
+  深度初始化和补洞、PLY 字段顺序、检查点、测试帧划分、关键帧挑选、地图对比的配对和描述一致度）、`tests/test_gs_world_rosbag.py`（合成 ROS1 bag：索引与扫描、
+  bz2、截断、各类消息解码、compressedDepth、外参约定、端到端转换）在容器里跑，`just test` 已包含；GPU 部分用 `just gs-check` 检查。

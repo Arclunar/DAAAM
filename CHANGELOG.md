@@ -7,14 +7,21 @@ All notable changes to this project are documented in this file.
 ### Added
 
 - Completed the Docker source-workspace development workflow, including incremental builds, dependency checks, source-export runbooks and migration guidance.
+- 3D Gaussian splatting test worlds (`scripts/gs_world/`, `USAGE.md` 9.7): `just gs-train <dataset>` trains a gsplat 1.5.3 model on a posed RGB-D folder (3DGS-MCMC densification with a fixed budget of Gaussians, anti-aliased rasterization, initialization from the fused sensor depth plus a sparse layer of points where the sensor measured nothing, an L1 depth loss, per-image exposure compensation, optional per-image pose refinement), holds out every 8th frame and reports PSNR, SSIM, color-corrected PSNR and depth errors, and writes `model.pt`, a standard 3DGS `point_cloud.ply`, metrics and previews under `/data/gs_world/models/`. `just gs-render <model|latest>` renders the original trajectory, the held-out frames or a trajectory file, optionally shifted or turned in each camera's frame (`--offset`, `--rotate`) and with the average or the recorded exposure (`--exposure`), as an RGB-D folder in the layout DAAAM reads, comparing every recorded pose with its recorded frame; `just gs-daaam <folder>` maps such a folder with DAAAM like `just tum-run` (replay bundle and `replay.rrd`). `just gs-install` installs gsplat and three small packages into `/opt/daaam_ws/gs_site` of the workspace volume without touching the DAAAM virtual environment, `just gs-check` compiles the CUDA extension for the local GPU and smoke-tests it.
+- ROS1 bag conversion for RealSense D455 recordings (`just gs-bag <bag>`, `scripts/gs_world/rosbag_to_rgbd.py`): a ROS1 bag reader that needs no ROS (uncompressed and bz2 chunks, bags without an index or cut off), raw or JPEG color, aligned depth including `compressedDepth`, camera info, poses from an odometry or pose topic or from a TUM trajectory file plus an extrinsic (`chain.yaml:T_cam_livox`-style keys are inverted to the camera pose in the tracked frame), color/depth pairing by stamp, pose interpolation with a clock offset, the sharpest frame of every 5 cm / 5° of motion as keyframe, undistortion with a valid-pixel mask, and `conversion.json` provenance; `--list` prints the bag's topics.
+- `just gs-compare <reference> <result>...` (`scripts/gs_world/compare_maps.py`) compares DAAAM results in one world frame: node counts, objects matched one-to-one within 0.3 m, their median distance, and the agreement of their DAM descriptions next to the chance level of random pairs.
+- Container tests `tests/test_gs_world_data.py`, `tests/test_gs_world_model.py` and `tests/test_gs_world_rosbag.py` (synthetic ROS1 bags) and justfile checks for the `gs-*` recipes.
+- First results on TUM fr1_room (681 frames, `USAGE.md` 9.7): 30k steps in 24.6 min with 1.4 GB of GPU memory; held-out frames reach 23.1 dB color-corrected PSNR (23.0 dB with the recorded exposure) and 3.8 cm mean depth error. DAAAM on the rendered trajectory finds 317 objects against 370 on the real frames, 68% of the real objects are matched within 0.3 m (median 10 cm), and description agreement is 0.19 against 0.55 between two runs on the same real frames and 0.045 for random pairs; a trajectory 20 cm higher gives 284 objects and 58% matched. `progress.md` command log entries 249–257 record the commands, measurements and the hand-corrected dataset name in the first rendered result's replay manifest.
 
 ### Changed
 
 - Cleaned the verified historical CODa sequence-0 outputs and logs from both result locations, preserving datasets, bags, model caches, and unrelated results; started a fresh four-part full-sequence run with a saved cleanup inventory and per-part logs.
+- `_coda-guard` (used by the CODa and TUM post-processing recipes and the new `gs-*` recipes) also waits for a running 3DGS training or rendering container, and `just test` runs the three gs_world suites in the container.
 
 ### Fixed
 
 - Restored native semantic-place lifting and validation for TUM post-processing, and reject region summaries when no objects are assigned to regions.
+- RGB-D test-world export refuses failed depth or valid-mask image writes before publishing the dataset, including ROS1 bag conversions.
 
 ## 2026-10-17
 
