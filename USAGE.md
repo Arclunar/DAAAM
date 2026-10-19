@@ -224,10 +224,23 @@ ros2 bag play "${CODA_ROOT_DIR}/coda_0_with_depth.bag" \
 
 ### 4.4 本机验证过的流程：CODa 序列 0（先在前 1000 帧上验证，整个序列的步骤相同）
 
-本机的 C: 盘紧张，数据放在 `E:\daaam-data`（WSL 里是 `/mnt/e/daaam-data`）。仓库根目录的
-`.env`（已被 git 忽略）里设 `DAAAM_DATA_DIR=/mnt/e/daaam-data`，`compose.yaml` 把它挂到容器的
-`/data`，容器里 `CODA_ROOT_DIR=/data/CODa`。WSL、Windows 和容器看到的是同一份文件
-（`CODa/`、`FoundationStereo/`、`output/`、`hf_cache/`、`logs/`、`previews/`）。
+本机的 C: 盘紧张，数据（数据集、bag、深度图、FoundationStereo、模型缓存）放在 `E:\daaam-data`（WSL 里是
+`/mnt/e/daaam-data`）。仓库根目录的 `.env`（已被 git 忽略）里设 `DAAAM_DATA_DIR=/mnt/e/daaam-data`，`compose.yaml`
+把它挂到容器的 `/data`，容器里 `CODA_ROOT_DIR=/data/CODa`。WSL、Windows 和容器看到的是同一份文件
+（`CODa/`、`FoundationStereo/`、`hf_cache/`、`previews/` 等）。
+
+**运行输出不放 E: 盘，直接写在仓库的 `output/` 里**（和 TUM 的结果在同一处）：结果 `output/coda/out_<时间>/`、
+一次运行的日志和 Hydra 日志 `output/coda_run/`、分段运行的 `output/coda_run_chunk<k>of<N>/` 和 `output/coda_chunks.tsv`。
+`just replay-web` 的"output/ 里的结果"直接列出它们，Windows 资源管理器也能从
+`\\wsl.localhost\Ubuntu-20.04\home\<你>\…\DAAAM\output\` 直接打开（Windows 通过这个路径跟不了 WSL 里的符号链接，所以不再让
+`output/coda` 链接到 E: 盘）。早先的版本把结果放在 `E:\daaam-data\output\`、`output/coda` 是指向那里的符号链接；那个链接还在时，
+`run_coda_example.sh` 照样往 E: 盘写，并提示一句。旧结果不会自动搬：要搬，就先把链接换成真目录再 `mv`（跨盘复制，几 GB 要几分钟）；
+不搬也行，在回看工作区里输入 `E:\daaam-data\output\coda\out_<时间>` 照样能打开。
+
+```bash
+rm output/coda && mkdir output/coda     # 只删符号链接本身，E: 盘上的文件不动
+mv /mnt/e/daaam-data/output/coda/out_* output/coda/
+```
 
 **`RUNNING.md` 写序列 0 约 15 GB，实际 `0.zip` 是 44.74 GB**：cam0 15.2 GB、cam1 16.4 GB（深度估计用）、
 LiDAR 11.6 GB 和 cam3 原始深度 1.5 GB（DAAAM 用不到）。10 Hz，全序列 8213 帧、13.7 分钟。
@@ -346,8 +359,9 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize --graph ou
    25 GB），所以脚本默认设 `DAAAM_CLIP_HALF=1`（fp16，1.3 GB，特征相同，余弦相似度 1.0000）。要用已缓存的 OpenCLIP：
    `CLIP_BACKEND=openclip CLIP_MODEL=ViT-L-14`（加在 `docker compose run -e` 后面）。
 
-   前 1000 帧：约 6.7 分钟，999 / 999 帧，每帧 153 ms（OpenCLIP 那次是 996 / 999 帧、185 ms）；结果在
-   `E:\daaam-data\output\coda\out_<UTC 时间>\`（`dsg.json`、`corrections.yaml`、`background_objects.yaml`……）。
+   前 1000 帧：约 6.7 分钟，999 / 999 帧，每帧 153 ms（OpenCLIP 那次是 996 / 999 帧、185 ms）；结果在仓库的
+   `output/coda/out_<UTC 时间>/`（`dsg.json`、`corrections.yaml`、`background_objects.yaml`……；这次实测时它还在 E: 盘
+   `E:\daaam-data\output\coda\`）。
    日志里关闭时的 `Error starting node:`、`rcl_shutdown already called` 和 Hydra 启动时的
    `No module of type 'RosMetaDataListener'` 是上游行为，结果照常保存。
    **同一时间只能跑一个流水线**：显存（峰值 15.6 GB）和 WSL 内存（可用最低 465 MB，Hydra 5.8 GB + DAAAM 节点 4.0 GB +
@@ -375,7 +389,7 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize --graph ou
    `interactive:=false`，默认会打开 RViz 和 GUI：
 
    ```bash
-   RUN=/data/output/coda/out_<时间>
+   RUN=output/coda/out_<时间>
    docker compose run --rm -T -e HF_HOME=/data/hf_cache daaam-ws python scripts/postprocess_scene_graph.py --data-dir $RUN </dev/null
    docker compose run --rm -T daaam-ws ros2 launch daaam_ros cluster_places.launch.yaml data_dir:=$RUN interactive:=false </dev/null
    docker compose run --rm -T daaam-ws python scripts/summarize_regions.py --data-dir $RUN --model-name gpt-5-nano --n-samples 20 </dev/null
@@ -409,14 +423,14 @@ docker compose run --rm -T daaam-ws python scripts/replay.py finalize --graph ou
    just coda-post <结果1> <结果2> <结果3> <结果4>
    # 即，第 k 段（帧 S .. S+L-1；k=1: S=0 L=2053　k=2: S=2053 L=2053　k=3: S=4106 L=2053　k=4: S=6159 L=2054）：
    docker compose run --rm -T daaam-ws bash scripts/make_coda_bag.sh <S> <L> coda_0_f<S>-<S+L> </dev/null
-   docker compose run --rm -T -e LABELS=1000 -e OUT=/data/output/coda_run_chunk<k>of4 daaam-ws \
+   docker compose run --rm -T -e LABELS=1000 -e OUT=output/coda_run_chunk<k>of4 daaam-ws \
      bash scripts/run_coda_example.sh coda_0_f<S>-<S+L>_<时间>.bag </dev/null
    ```
 
    本机的结果（四段都是退出码 0、3.00 fps、没丢帧；每帧 `process_frame` 均值 130–154 ms；每段内存：交换区最高 2.1–2.65 GB、
    WSL 可用内存最低 240–670 MB，显存峰值 15.8 GB，所以 2050 帧是这台机器上能放的大小，不要再放大）：
 
-   | 段 | 帧 | 处理的帧 | 物体 / 背景物体 / 地点 | 有 DAM 描述的标签 | 结果目录（`E:\daaam-data\output\coda\`） |
+   | 段 | 帧 | 处理的帧 | 物体 / 背景物体 / 地点 | 有 DAM 描述的标签 | 结果目录（早先放在 `E:\daaam-data\output\coda\`，搬法见本节开头） |
    |---|---|---|---|---|---|
    | 1 | 0–2052 | 2052 | 208 / 139 / 1096 | 346 / 493 | `out_20261016_011014` |
    | 2 | 2053–4105 | 2050 | 270 / 165 / 966 | 428 / 538 | `out_20261016_013121` |
@@ -663,7 +677,8 @@ just replay-web     # 启动回看工作区（WSL 宿主机上只监听 127.0.0.
 
 - **打开结果**：上方输入框接受 `/home/…`、`/mnt/e/…`、`E:\…`（也可以是 `E:/…`，或资源管理器"复制为路径"带引号的形式）和
   本发行版的 `\\wsl.localhost\Ubuntu-20.04\…` / `\\wsl$\Ubuntu-20.04\…`；也可以输入数据包目录 `…/replay` 或清单本身。
-  "output/ 里的结果"列出默认 `output/` 下（最多 4 层，跟随 `output/coda` 指向 E: 盘的软链接）所有有效数据包，最新的在前。
+  "output/ 里的结果"列出默认 `output/` 下（最多 4 层，也跟随指向别处的符号链接）所有有效数据包，最新的在前；CODa 的结果现在
+  就在 `output/coda/` 里，不用再经过 E: 盘的链接。
   打不开时在页面下方提示原因，例如期望的 `…/replay/manifest.json` 路径。
 - **多个结果用标签页**（不做并排对比）：同一结果再打开会切到它的标签；拖动标签换顺序；标签有焦点时 ←/→/Home/End 切换、
   Delete 关闭（关闭只释放服务里的会话，不删除任何文件）。刷新或重开浏览器后，打开的结果、顺序、当前标签和每个标签的视图

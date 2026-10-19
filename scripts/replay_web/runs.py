@@ -7,7 +7,7 @@ with `.`/`..` steps, keeps one ID. Closing forgets the ID only; no file is touch
 opens its saved paths again and gets new IDs.
 
 `discover` lists valid bundles below the default output root without opening them: a bounded walk that follows
-symlinks (output/coda points to another drive on this machine) but never loops, and skips hidden directories and the
+symlinks (a result folder may be linked from another drive) but never loops, and skips hidden directories and the
 inside of bundles and results.
 
 Listeners (`add_listener`) hear `listener("open", run)` after every open, including reopening an open result, and

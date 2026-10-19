@@ -100,7 +100,7 @@ mesh dsg="":
     @dsg="{{ dsg }}"; if [ -z "$dsg" ]; then dsg=$(find output -type f \( -name dsg_updated.json -o -name dsg.json \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-); fi; if [ -z "$dsg" ] || [ ! -f "$dsg" ]; then echo "找不到 DSG 文件，请先运行 just tum-run 或指定 DSG 路径" >&2; exit 1; fi; echo "物体 Mesh 数据: $dsg"; {{ just_executable() }} rerun-web "$dsg" 1
 
 
-# ── CODa 数据集(RUNNING.md 的流程):数据放在 $DAAAM_DATA_DIR/CODa(容器里是 /data/CODa);步骤和本机实测的结果见 USAGE.md 4.4 ──
+# ── CODa 数据集(RUNNING.md 的流程):数据放在 $DAAAM_DATA_DIR/CODa(容器里是 /data/CODa),运行输出直接写在仓库的 output/ 里(output/coda、output/coda_run*);步骤和本机实测的结果见 USAGE.md 4.4 ──
 # 一次性准备:`just coda-download` → `just coda-depth`(要几个小时,可断点续传)
 # 日常:`just coda-bag` → `just coda-run`;整段序列(8213 帧)内存装不下,用 `just coda-chunks` 分段跑
 # 结果:`just coda-list` 看有哪些 → `just coda-post` → `just coda-summarize`(OpenAI)→ `just coda-view <结果>` / `just coda-ask "问题" <结果>`

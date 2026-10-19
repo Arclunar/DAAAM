@@ -199,7 +199,7 @@ class RunCodaChunksTest(CodaScriptTest):
 			exit "${FAKE_RUN_RC:-0}"
 			""",
 		)
-		self.out_root = self.root / "data" / "output"
+		self.out_root = self.root / "output"
 
 	def test_frames_are_split_evenly_and_the_last_chunk_takes_the_remainder(self) -> None:
 		result = self._run("run_coda_chunks.sh", "3")
@@ -235,6 +235,12 @@ class RunCodaChunksTest(CodaScriptTest):
 		rows = (self.out_root / "coda_chunks.tsv").read_text(encoding="utf-8").splitlines()
 		self.assertEqual(rows[0].split("\t")[:6], ["1", "2", "0", "5", "0", "5"])
 		self.assertEqual(rows[1].split("\t")[:6], ["2", "2", "5", "10", "0", "5"])
+
+	def test_logs_and_the_table_go_into_the_repository_output_not_next_to_the_dataset(self) -> None:
+		self._run("run_coda_chunks.sh", "2")
+		self.assertTrue((self.out_root / "coda_chunks.tsv").is_file())
+		self.assertTrue((self.out_root / "coda_run_chunk1of2" / "console.log").is_file())
+		self.assertFalse((self.root / "data" / "output").exists(), "nothing is redirected to the data drive")
 
 	def test_an_existing_complete_bag_is_reused(self) -> None:
 		bag = self.coda / "coda_0_f0-5_20250101_000000.bag"
@@ -282,7 +288,7 @@ class RunCodaChunksTest(CodaScriptTest):
 class PostprocessCodaTest(CodaScriptTest):
 	def setUp(self) -> None:
 		super().setUp()
-		self.results = self.root / "data" / "output" / "coda"
+		self.results = self.root / "output" / "coda"
 		self.results.mkdir(parents=True)
 		for name, mtime in (("out_20260101_000001", 1000), ("out_20260101_000002", 2000)):
 			run = self.results / name
@@ -344,6 +350,13 @@ class PostprocessCodaTest(CodaScriptTest):
 		self.assertIn(f"--data-dir {self.results / 'out_20260101_000002'}", calls)
 		self.assertNotIn("out_20260101_000001", calls)
 		self.assertEqual(self._steps(), ["scripts/postprocess_scene_graph.py", "launch"])
+
+	def test_the_default_result_root_is_the_repository_output_and_needs_no_dataset_root(self) -> None:
+		for env in ({}, {"CODA_ROOT_DIR": ""}):
+			result = self._run("postprocess_coda.sh", "--list", **env)
+			self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+			self.assertIn(f"Results in {self.results} (newest first):", result.stdout)
+			self.assertIn("out_20260101_000002", result.stdout)
 
 	def test_result_root_can_select_tum_outputs_without_a_coda_root(self) -> None:
 		tum_results = self.root / "output" / "tum_replay_fr1_room"
@@ -767,7 +780,7 @@ class RunCodaExampleReplayTest(CodaScriptTest):
 			exit 0
 			""",
 		)
-		self.older = self.root / "data" / "output" / "coda" / "out_20261016_000000"
+		self.older = self.root / "output" / "coda" / "out_20261016_000000"
 		self.older.mkdir(parents=True)
 		(self.older / "dsg.json").write_text("{}", encoding="utf-8")
 		os.utime(self.older, (1000, 1000))
@@ -802,6 +815,40 @@ class RunCodaExampleReplayTest(CodaScriptTest):
 		self.assertFalse((self.older / "replay").exists(), "an older result never gets the bundle")
 		self.assertIn(f"Results: {self.NEW}", result.stdout)
 		self.assertIn("just replay-web", result.stdout)
+
+	def test_results_and_logs_stay_in_the_repository_output(self) -> None:
+		self._sidecar()
+		shutil.rmtree(self.root / "output")   # a fresh checkout: no output/coda yet
+		result = self._run_example()
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		output = self.root / "output"
+		self.assertTrue((output / "coda").is_dir() and not (output / "coda").is_symlink(), "output/coda is a real directory")
+		self.assertTrue((output / "coda" / "out_20261017_000001" / "dsg.json").is_file())
+		self.assertTrue((output / "coda_run" / "launch.log").is_file())
+		self.assertIn(f"log_path:={output / 'coda_run' / 'hydra'} ", self._calls())
+		self.assertFalse((self.root / "data" / "output").exists(), "nothing is redirected to the data drive")
+		self.assertNotIn("symlink", result.stderr)
+
+	def test_an_old_link_to_another_drive_is_followed_and_reported(self) -> None:
+		self._sidecar()
+		shutil.rmtree(self.root / "output")
+		elsewhere = self.root / "elsewhere" / "coda"
+		elsewhere.mkdir(parents=True)
+		(self.root / "output").mkdir()
+		(self.root / "output" / "coda").symlink_to(elsewhere)
+		result = self._run_example()
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertTrue((elsewhere / "out_20261017_000001" / "dsg.json").is_file())
+		self.assertIn("output/coda is a symlink", result.stderr)
+		self.assertIn(str(elsewhere), result.stderr)
+
+	def test_an_explicit_log_directory_is_used_as_an_absolute_path(self) -> None:
+		self._sidecar()
+		result = self._run_example(OUT="logs/mine")
+		self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+		self.assertTrue((self.root / "logs" / "mine" / "launch.log").is_file())
+		self.assertIn(f"log_path:={self.root / 'logs' / 'mine' / 'hydra'} ", self._calls())
+		self.assertFalse((self.root / "output" / "coda_run").exists())
 
 	def test_a_bag_without_a_sidecar_keeps_the_result_and_fails_the_artifact(self) -> None:
 		result = self._run_example()

@@ -21,19 +21,14 @@
 #            rename only when all of them were written: a failure, a Ctrl+C or a termination leaves the existing outputs
 #            exactly as they were and removes only this process's temporary files (the replay workspace runs jobs this way)
 #   --list   list the results (newest first) and which of the steps are done, then stop
-# Environment: RESULT_ROOT (optional result root; default: CODa output), HF_HOME (default /data/hf_cache:
+# Environment: RESULT_ROOT (optional result root; default: output/coda of the repository), HF_HOME (default /data/hf_cache:
 #   sentence-t5-xl, 2.5 GB, is downloaded there once and every step that loads it must look in the same place),
 #   CLUSTER_PLACES_CONFIG (optional dataset-specific cluster config), PLACES_LAYER (default TRAVERSABILITY),
 #   SUMMARY_MODEL (default gpt-5-nano).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 export HF_HOME="${HF_HOME:-/data/hf_cache}"
-if [ -n "${RESULT_ROOT:-}" ]; then
-  ROOT="$(realpath -m "${RESULT_ROOT}")"
-else
-  : "${CODA_ROOT_DIR:?set CODA_ROOT_DIR (the compose file sets it to /data/CODa), or set RESULT_ROOT}"
-  ROOT="$(realpath -m "${CODA_ROOT_DIR}/../output/coda")"
-fi
+ROOT="$(realpath -m "${RESULT_ROOT:-output/coda}")"
 
 stage=""
 stage_given=0
