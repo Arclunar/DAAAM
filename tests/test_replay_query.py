@@ -460,6 +460,8 @@ class LoadQueryGraphTest(unittest.TestCase):
 		graph.add_node("BACKGROUND_OBJECTS", sdsg.NodeSymbol("B", 1), self.node(3, first, first + 2.0))
 		for index, seconds in enumerate((1.0, 3.0)):
 			agent = sdsg.AgentNodeAttributes()
+			agent.world_R_body = sdsg.Quaternion(1.0, 0.0, 0.0, 0.0)
+			agent.external_key = index
 			agent.position = np.array([float(index), 0.0, 0.0])
 			agent.timestamp = datetime.timedelta(seconds=base + seconds)
 			graph.add_node(2, sdsg.NodeSymbol("a", index), agent, ord("a"))
@@ -477,6 +479,13 @@ class LoadQueryGraphTest(unittest.TestCase):
 	@staticmethod
 	def agent_times(graph):
 		return sorted(node.attributes.metadata.get()["timestamp"] for node in graph.get_layer(2, 97).nodes)
+
+	def test_fixture_agent_poses_have_valid_identity_orientation_and_stable_keys(self):
+		graph = sdsg.DynamicSceneGraph.load(str(self.write_graph(0.0)))
+		for node in graph.get_layer(2, ord("a")).nodes:
+			rotation = node.attributes.world_R_body
+			np.testing.assert_allclose([rotation.w, rotation.x, rotation.y, rotation.z], [1.0, 0.0, 0.0, 0.0])
+			self.assertEqual(node.attributes.external_key, node.id.category_id)
 
 	def test_tum_keeps_its_relative_timestamps(self):
 		path = self.write_graph(0.0)

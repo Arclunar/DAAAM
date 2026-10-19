@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-10-20
+
+### Fixed
+
+- Initialize synthetic query-graph agent orientations and keys explicitly so fixture JSON never contains uninitialized quaternion values and intermittent graph-load failures.
+
 ## 2026-10-19
 
 ### Added
