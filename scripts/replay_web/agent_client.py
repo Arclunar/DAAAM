@@ -30,6 +30,7 @@ from scripts.replay_web.agent_protocol import (
 	CACHE_DIR, MAX_EVENT_BYTES, MAX_LINE_BYTES, MODELS_ENV, PROTOCOL_VERSION, Request, allowed_models, parse_event, parse_request, redact,
 )
 from scripts.replay_web.jobs import CONTAINER_PREFIX
+from scripts.replay_web.locations import algorithm_root
 
 AGENT_CONTAINER = CONTAINER_PREFIX + "agent"   # fixed: a stale one is removed before a start, and only this one is ever stopped
 _CONTAINER_NAME = re.compile(r"daaam-replay-[a-z0-9-]{1,40}")
@@ -133,7 +134,7 @@ class AgentClient:
 			stop_container: Optional[Callable[[str], None]] = None, remove_container: Optional[Callable[[str], None]] = None,
 			log: Optional[Callable[[str], None]] = None):
 		self.models = tuple(models) if models is not None else allowed_models()
-		self.repo_root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+		self.repo_root = Path(repo_root) if repo_root is not None else algorithm_root()
 		if argv is None:
 			argv, container_name = default_argv(self.models), AGENT_CONTAINER
 		self.argv = list(argv)

@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import traceback
 import urllib.parse
 from dataclasses import dataclass
@@ -51,8 +52,14 @@ from scripts.replay_web.jobs import JobError, JobManager, JobRecord, JobSpec, Jo
 from scripts.replay_web.manifest import SCHEMA_VERSION, ManifestError, resolve_bundle_member
 from scripts.replay_web.paths import PathError
 from scripts.replay_web.runs import OpenRun, RunRegistry
+from scripts.replay_web.standalone import write_standalone
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from scripts.replay_web.locations import algorithm_root
+
+REPO_ROOT = algorithm_root()
+_MODULE_ROOT = Path(__file__).resolve().parents[2]
+REPLAY_ROOT = (_MODULE_ROOT if (_MODULE_ROOT / "tools/replay.py").is_file()
+               else (REPO_ROOT / "scripts/replay.py").resolve().parents[1])
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOOPBACK_HOSTS = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1"}
 JSON_BODY_LIMIT = 64 * 1024
@@ -433,7 +440,7 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 			self.end_headers()
 			return None
 		if segments == ["replay.html"]:
-			page = self.service.config.repo_root / "replay.html"
+			page = REPLAY_ROOT / "tools/replay.html"
 			return self.send_file(page, "text/html; charset=utf-8", "no-cache", self.static_etag(page), {
 				"Content-Security-Policy": CONTENT_SECURITY_POLICY,
 				"Referrer-Policy": "no-referrer",
@@ -494,6 +501,8 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 				raise HttpError(405, "method not allowed", "method")
 			if method != "GET":
 				raise HttpError(405, "method not allowed", "method")
+			if rest == ["export.html"]:
+				return self.send_export(run_id, query)
 			if rest == ["manifest"]:
 				return self.send_json(200, service.run(run_id).manifest)
 			if rest == ["graph"]:
@@ -592,6 +601,20 @@ class ReplayRequestHandler(BaseHTTPRequestHandler):
 		except ManifestError as error:
 			raise HttpError(404, str(error), "missing") from error
 
+	def send_export(self, run_id: str, query: Dict[str, List[str]]) -> None:
+		assets = self.service.assets(run_id)
+		self.bundle_member(assets, "manifest.json", query)
+		with tempfile.TemporaryDirectory(prefix="replay-export-") as directory:
+			path = Path(directory) / "replay.html"
+			try:
+				write_standalone(assets.run.canonical_path, path, expected_manifest=assets.run.manifest)
+			except (OSError, ValueError) as error:
+				raise HttpError(422, "export failed: " + str(error), "export") from error
+			name = urllib.parse.quote(assets.run.canonical_path.name + ".html", safe="")
+			self.send_file(path, "text/html; charset=utf-8", "no-store", headers={
+				"Content-Disposition": "attachment; filename=\"replay.html\"; filename*=UTF-8''" + name,
+			})
+
 	def send_chunk(self, run_id: str, raw_index: str, query: Dict[str, List[str]]) -> None:
 		assets = self.service.assets(run_id)
 		chunks = assets.run.manifest["chunks"]
@@ -669,8 +692,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description="Serve the DAAAM replay workspace (replay.html) on a loopback port")
 	parser.add_argument("--host", default="127.0.0.1", help="127.0.0.1 (default) or localhost; other addresses are refused")
 	parser.add_argument("--port", type=int, default=8765)
-	parser.add_argument("--output-root", default=str(REPO_ROOT / "output"), help="results listed by default (searched a few levels deep)")
-	parser.add_argument("--state-root", default=str(REPO_ROOT / ".replay-web"), help="local service state (jobs, chat history, cache)")
+	parser.add_argument("--output-root", default=str(REPLAY_ROOT / "results"), help="results listed by default (searched a few levels deep)")
+	parser.add_argument("--state-root", default=str(REPLAY_ROOT / ".state"), help="local service state (jobs, chat history, cache)")
 	parser.add_argument("--scan-depth", type=int, default=4)
 	parser.add_argument("--graph-interval", type=float, default=2.0, help="seconds between looks at the scene graph files of the open results")
 	parser.add_argument("--max-jobs", type=int, default=1, help="processing jobs that may run at once (default 1: the others wait)")

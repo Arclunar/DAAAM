@@ -53,6 +53,7 @@ export class WorkspaceApp {
     this.mountViewer = options.mountViewer === undefined ? mountReplayViewer : options.mountViewer;
     this.persistTimer = 0;
     this.el = {
+      export: document.getElementById('export-html'),
       form: document.getElementById('open-form'),
       path: document.getElementById('result-path'),
       open: document.getElementById('open-result'),
@@ -86,6 +87,7 @@ export class WorkspaceApp {
   }
 
   bindShell() {
+    this.el.export?.addEventListener('click', () => this.exportActive());
     this.el.form.addEventListener('submit', (event) => {
       event.preventDefault();
       const path = this.el.path.value.trim();
@@ -95,6 +97,36 @@ export class WorkspaceApp {
     this.el.browser.addEventListener('toggle', () => { if (this.el.browser.open) this.refreshResults(); });
     this.el.tabs.addEventListener('keydown', (event) => this.onTabKey(event));
     window.addEventListener('resize', () => this.activeTab()?.viewer?.resize?.());
+  }
+
+  async exportActive() {
+    const tab = this.activeTab();
+    if (!tab || this.exporting) return;
+    this.exporting = true;
+    if (this.el.export) { this.el.export.disabled = true; this.el.export.textContent = '正在导出…'; }
+    const notice = this.notify('正在打包地图、时间轴和图片，大结果可能需要一些时间…', 'info', 0);
+    try {
+      const response = await fetch(this.api.exportUrl(tab.runId, tab.bundleVersion));
+      if (!response.ok) {
+        const failure = await response.json();
+        throw new Error(failure.error || `HTTP ${response.status}`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = basename(tab.canonicalPath) + '.html';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      this.notify('独立 HTML 已生成并开始下载，可直接发送给其他人浏览。', 'info');
+    } catch (error) {
+      this.notify('导出失败:' + error.message, 'error', 0);
+    } finally {
+      notice?.remove();
+      this.exporting = false;
+      if (this.el.export) { this.el.export.textContent = '导出独立 HTML'; this.el.export.disabled = !this.activeTab(); }
+    }
   }
 
   async openFromUser(path) {
@@ -400,6 +432,7 @@ export class WorkspaceApp {
   }
 
   renderLabels() {
+    if (this.el.export) this.el.export.disabled = !!this.exporting || !this.activeTab();
     const counts = new Map();
     for (const tab of this.tabs.values()) counts.set(tab.title, (counts.get(tab.title) || 0) + 1);
     for (const tab of this.tabs.values()) {
@@ -427,6 +460,7 @@ export class WorkspaceApp {
       current.item.classList.remove('active');
     }
     this.activeTabId = tabId;
+    if (this.el.export) this.el.export.disabled = !!this.exporting || !this.activeTab();
     if (!next.active) {
       next.pane.dispatchEvent(new CustomEvent('replay-tab-activated', { detail: { tabId } }));
       next.active = true;

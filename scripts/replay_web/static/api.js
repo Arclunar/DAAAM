@@ -224,6 +224,8 @@ export class ReplayApi {
     return this.hub.subscribe(runId, handlers);
   }
 
+  exportUrl(runId, version) { return withVersion(`${run(runId)}/export.html`, version); }
+
   chunkUrl(runId, index, version) { return withVersion(`${run(runId)}/timeline/${index}`, version); }
   imageUrl(runId, asset, version) { return withVersion(`${run(runId)}/images/${encodeURIComponent(asset)}`, version); }
   referenceUrl(runId, version) { return withVersion(`${run(runId)}/reference`, version); }

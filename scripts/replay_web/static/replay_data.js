@@ -102,14 +102,18 @@ export class ReplayDataSource {
     return -1;
   }
 
+  async fetchJson(url) {
+    const response = await fetch(url, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
   loadChunk(chunkIndex) {
     let pending = this.chunks.get(chunkIndex);
     if (!pending) {
       const chunk = this.manifest.chunks[chunkIndex];
-      pending = fetch(this.api.chunkUrl(this.runId, chunkIndex, this.version), { credentials: 'same-origin' })
-        .then(async (response) => {
-          if (!response.ok) throw new ChunkError(chunk, `HTTP ${response.status}`);
-          const data = await response.json();
+      pending = this.fetchJson(this.api.chunkUrl(this.runId, chunkIndex, this.version))
+        .then((data) => {
           if (!data || !Array.isArray(data.snapshots) || data.snapshots.length !== chunk.snapshot_count) throw new ChunkError(chunk, '内容与清单不符');
           return data.snapshots;
         })
@@ -185,11 +189,7 @@ export class ReplayDataSource {
   referenceMesh() {
     if (!this.manifest.reference_mesh) return Promise.resolve(null);
     if (!this.reference) {
-      this.reference = fetch(this.api.referenceUrl(this.runId, this.version), { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return response.json();
-        })
+      this.reference = this.fetchJson(this.api.referenceUrl(this.runId, this.version))
         .then(async (ref) => {
           const a = unpack(await inflateBase64(ref.chunk));
           const pos = dequantize(a.mesh_pos, ref.quant), nv = pos.length / 3;
