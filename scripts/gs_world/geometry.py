@@ -5,7 +5,7 @@ Conventions: quaternions are [qx, qy, qz, qw] (ROS/TUM order); a pose T_a_b maps
 (x right, y down, z forward).
 """
 
-from typing import Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -157,3 +157,93 @@ def scene_extent(poses: np.ndarray, minimum: Optional[float] = 0.5) -> float:
 	centres = np.asarray(poses)[:, :3, 3]
 	extent = 1.1 * float(np.max(np.linalg.norm(centres - centres.mean(axis=0), axis=1))) if len(centres) else 0.0
 	return max(extent, minimum or 0.0)
+
+
+# ---- viewer cameras: an orbit camera that looks at a target point and never rolls
+
+MAX_PITCH = np.radians(89.0)
+
+
+def up_basis(up: Sequence[float]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+	"""(e1, e2, u): u is the unit up vector, e1 and e2 span the plane perpendicular to it with e1 x e2 = u."""
+	u = np.asarray(up, dtype=np.float64)
+	norm = float(np.linalg.norm(u))
+	if not np.isfinite(norm) or norm < 1e-9:
+		raise ValueError("the up vector must be finite and not zero")
+	u = u / norm
+	axis = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+	e1 = axis - np.dot(axis, u) * u
+	e1 /= np.linalg.norm(e1)
+	return e1, np.cross(u, e1), u
+
+
+def orbit_pose(target: Sequence[float], yaw: float, pitch: float, dist: float,
+		up: Sequence[float] = (0.0, 0.0, 1.0)) -> np.ndarray:
+	"""T_world_camera (optical axes) of a camera that looks at target from dist metres away.
+
+	yaw is the azimuth of the camera around the up axis (0 = along e1 of up_basis, counter-clockwise seen from above),
+	pitch its elevation over the horizontal plane (clamped to +-89 degrees). The camera does not roll: the image 'down'
+	direction never points against up.
+	"""
+	e1, e2, u = up_basis(up)
+	pitch = float(np.clip(pitch, -MAX_PITCH, MAX_PITCH))
+	away = np.cos(pitch) * (np.cos(yaw) * e1 + np.sin(yaw) * e2) + np.sin(pitch) * u  # from the target to the camera
+	forward = -away
+	right = np.cross(forward, u)
+	right /= np.linalg.norm(right)
+	down = np.cross(forward, right)
+	T = np.eye(4)
+	T[:3, 0], T[:3, 1], T[:3, 2] = right, down, forward
+	T[:3, 3] = np.asarray(target, dtype=np.float64) + dist * away
+	return T
+
+
+def orbit_from_eye_target(eye: Sequence[float], target: Sequence[float],
+		up: Sequence[float] = (0.0, 0.0, 1.0)) -> Dict[str, object]:
+	"""Orbit parameters {target, yaw, pitch, dist} of a camera at eye that looks at target."""
+	e1, e2, u = up_basis(up)
+	away = np.asarray(eye, dtype=np.float64) - np.asarray(target, dtype=np.float64)
+	dist = float(np.linalg.norm(away))
+	if dist < 1e-9:
+		raise ValueError("the eye and the target coincide")
+	away = away / dist
+	return {"target": [float(v) for v in target], "yaw": float(np.arctan2(away @ e2, away @ e1)),
+		"pitch": float(np.arcsin(np.clip(away @ u, -1.0, 1.0))), "dist": dist}
+
+
+def pose_to_orbit(T: np.ndarray, dist: float, up: Sequence[float] = (0.0, 0.0, 1.0)) -> Dict[str, object]:
+	"""Orbit parameters of the camera pose T with its target dist metres in front of it (a roll of T is dropped)."""
+	T = np.asarray(T, dtype=np.float64)
+	eye, forward = T[:3, 3], T[:3, 2]
+	return orbit_from_eye_target(eye, eye + dist * forward, up)
+
+
+def view_intrinsics(width: int, height: int, vfov_deg: float) -> np.ndarray:
+	"""Pinhole K (gsplat convention: principal point at the image centre) with the given vertical field of view."""
+	f = 0.5 * height / np.tan(np.radians(vfov_deg) / 2.0)
+	return np.array([[f, 0.0, width / 2.0], [0.0, f, height / 2.0], [0.0, 0.0, 1.0]])
+
+
+def vertical_fov_deg(K: np.ndarray, height: int) -> float:
+	"""Vertical field of view in degrees of a pinhole camera with image height `height`."""
+	return float(np.degrees(2.0 * np.arctan(0.5 * height / np.asarray(K)[1, 1])))
+
+
+def nearest_pose(poses: np.ndarray, T: np.ndarray, angle_weight: float = 0.5) -> Tuple[int, float, float]:
+	"""(index, distance in metres, viewing-direction angle in degrees) of the recorded camera closest to T.
+
+	Closest means the smallest distance + angle_weight x angle in radians: half a metre of travel counts like one radian.
+	"""
+	poses = np.asarray(poses, dtype=np.float64)
+	T = np.asarray(T, dtype=np.float64)
+	dist = np.linalg.norm(poses[:, :3, 3] - T[:3, 3], axis=1)
+	angle = np.arccos(np.clip(poses[:, :3, 2] @ T[:3, 2], -1.0, 1.0))
+	i = int(np.argmin(dist + angle_weight * angle))
+	return i, float(dist[i]), float(np.degrees(angle[i]))
+
+
+def estimate_up(poses: np.ndarray) -> np.ndarray:
+	"""World up as the mean image-up direction (-y of the optical frame) of the cameras, for worlds that are not z-up."""
+	up = -np.asarray(poses, dtype=np.float64)[:, :3, 1].mean(axis=0)
+	norm = float(np.linalg.norm(up))
+	return up / norm if norm > 1e-6 else np.array([0.0, 0.0, 1.0])

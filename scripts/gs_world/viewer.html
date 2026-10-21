@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3DGS 查看器</title>
+<style>
+	:root { color-scheme: dark; --side: 282px; }  /* the width the docked right column takes; the picture is to the left of it */
+	body.noside { --side: 0px; }
+	* { box-sizing: border-box; }
+	html, body { margin: 0; height: 100%; overflow: hidden; background: #17171c; color: #e4e4ea;
+		font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+	#view { position: fixed; left: 0; top: 0; width: calc(100% - var(--side)); height: 100%; display: block; cursor: grab; touch-action: none; outline: none; }
+	#view.drag { cursor: grabbing; }
+	.box { background: rgba(24, 24, 30, .8); border: 1px solid rgba(255, 255, 255, .09); border-radius: 8px; padding: 8px 11px; }
+	.dim { color: #a9a9b4; }
+	.err { color: #e06c75; }
+	#hud { position: fixed; left: 10px; top: 10px; max-width: min(480px, calc(100% - var(--side) - 20px)); pointer-events: none; }
+	#hud .title { font-weight: 600; overflow-wrap: anywhere; }
+	#sideToggle { position: fixed; right: 10px; top: 10px; width: 30px; height: 28px; padding: 0; color: inherit; font: inherit; cursor: pointer;
+		background: rgba(24, 24, 30, .8); border: 1px solid rgba(255, 255, 255, .15); border-radius: 6px; }
+	#sideToggle:hover { background: #373743; }
+	#side { position: fixed; right: 10px; top: 46px; width: 262px; max-height: calc(100% - 56px); overflow-y: auto;
+		display: flex; flex-direction: column; gap: 8px; }
+	body.noside #side { display: none; }
+	#panel label { display: block; margin-top: 7px; }
+	#panel label:first-child { margin-top: 0; }
+	#panel input[type=range] { width: 100%; margin: 3px 0 0; }
+	.row { display: flex; gap: 6px; margin-top: 8px; }
+	#side button { padding: 4px 6px; color: inherit; background: #2b2b34; border: 1px solid #44444f; border-radius: 5px; cursor: pointer; font: inherit; }
+	#side button:hover:not(:disabled) { background: #373743; }
+	#side button:disabled { opacity: .45; cursor: default; }
+	.row button { flex: 1; }
+	#apply { flex: 3; }
+	#scenes summary { cursor: pointer; font-weight: 600; }
+	#scenes .hint { margin-top: 6px; font-size: 12px; }
+	.scene { padding: 6px 0; border-top: 1px solid rgba(255, 255, 255, .07); }
+	.scene:first-child { border-top: 0; }
+	.scene label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+	.scene .order { flex: none; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px; background: #3d6fb4; color: #fff; font-size: 11px; line-height: 17px; text-align: center; }
+	.scene .order:empty { display: none; }
+	.scene .name { font-weight: 600; overflow-wrap: anywhere; }
+	.scene.on .name { color: #8fc1ff; }
+	.scene .detail { margin-left: 22px; font-size: 12px; overflow-wrap: anywhere; }
+	#side .scene button { margin-left: 6px; padding: 0 7px; font-size: 12px; }
+	#sceneStatus { margin-top: 6px; font-size: 12px; overflow-wrap: anywhere; }
+	#help { position: fixed; left: 10px; bottom: 10px; max-width: calc(100% - var(--side) - 20px); color: #b4b4be; pointer-events: none; }
+	#banner { position: fixed; left: calc((100% - var(--side)) / 2); top: 14px; transform: translateX(-50%); display: none; background: rgba(150, 40, 40, .92); border-color: rgba(255, 255, 255, .2); max-width: calc(80% - var(--side)); }
+</style>
+</head>
+<body>
+<canvas id="view" tabindex="0"></canvas>
+<div id="hud" class="box">
+	<div><span class="title" id="title">3DGS 查看器</span> <span class="dim" id="sub"></span></div>
+	<div class="dim" id="perf">连接中…</div>
+	<div id="near"></div>
+</div>
+<button id="sideToggle" title="隐藏 / 显示右侧面板 (H)">☰</button>
+<div id="side">
+	<div id="panel" class="box">
+		<label>训练视角 <span id="camLabel" class="dim">自由视角</span>
+			<input id="cam" type="range" min="0" max="0" value="0"></label>
+		<div class="row"><button id="prev" title="上一个训练视角 ([)">‹</button><button id="next" title="下一个训练视角 (])">›</button><button id="free">自由视角</button></div>
+		<label>视场角 <span id="fovLabel" class="dim"></span>
+			<input id="fov" type="range" min="20" max="110" step="1" value="50"></label>
+		<label><input id="path" type="checkbox" checked> 显示训练相机轨迹与场景名</label>
+		<div class="row"><button id="overview" title="从上方看所有场景 (O)">总览</button><button id="reset" title="回到第一个录制视角 (R)">第一帧</button><button id="shot">截图</button></div>
+	</div>
+	<details id="scenes" class="box" hidden>
+		<summary id="scenesTitle">场景</summary>
+		<div id="sceneList"></div>
+		<div class="hint dim" id="sceneHint"></div>
+		<div class="row"><button id="apply">显示所选场景</button><button id="refresh" title="重新读取磁盘上的模型列表">刷新</button></div>
+		<div id="sceneStatus" class="dim"></div>
+	</details>
+</div>
+<div id="help" class="box">左键拖动:旋转 · 右键 / Shift+左键拖动:平移 · 滚轮:缩放 · 双击:对焦到该点 · W A S D Q E:飞行(按住 Shift 加速) · [ ]:上一个 / 下一个训练视角 · P:训练相机轨迹 · O:总览 · R:第一个录制视角 · H:隐藏 / 显示右侧面板</div>
+<div id="banner" class="box"></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const canvas = $('view');
+const ctx = canvas.getContext('2d');
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const copy = o => JSON.parse(JSON.stringify(o));
+
+let info = null;      // /info: the scenes on screen and their recorded cameras
+let view = null;      // the free orbit camera {target, yaw, pitch, dist}
+let snap = null;      // index of the recorded camera that is shown exactly, or null in free view
+let cam = null;       // what the server said about the last frame (camera basis, nearest recorded camera)
+let vfov = 50;
+let world = 0;        // counts the worlds shown so far: a frame that was asked for in an earlier one is dropped
+let inflight = false, dirty = false, retryTimer = 0, flying = false, flyClock = 0, drag = null;
+let catalog = null;   // /scenes: the models on disk and which of them are on screen
+let picked = [];      // ids ticked in the list, in the order they were ticked (= left to right in the world)
+let swapping = false;
+const keys = new Set();    // flying keys that are held
+const tapped = new Set();  // flying keys pressed since the last frame
+const stats = {frames: 0, fps: 0, windowStart: performance.now(), windowFrames: 0, renderMs: 0, roundTripMs: 0, size: ''};
+
+function banner(text) {
+	const el = $('banner');
+	el.textContent = text;
+	el.style.display = text ? 'block' : 'none';
+}
+
+const several = () => !!info && info.scenes.length > 1;
+
+// a new world (first load or another set of scenes): everything that depends on it starts again
+function useInfo(next) {
+	info = next;
+	world++;
+	cam = null;
+	snap = null;
+	view = copy(info.overview);  // open with everything in view; R goes to the first recorded camera
+	vfov = info.vfov;
+	document.title = '3DGS 查看器 · ' + info.title;
+	$('title').textContent = info.title;
+	const gaussians = info.gaussians.toLocaleString() + ' 个高斯 · ' + info.cameras + ' 个录制视角(其中 ' + info.held_out.length + ' 个没参与训练)';
+	$('sub').textContent = '· ' + (several() ? info.scenes.length + ' 个场景并排 · ' : '') + gaussians;
+	$('cam').max = info.cameras - 1;
+	$('cam').value = 0;
+	$('camLabel').textContent = '自由视角';
+	$('fov').value = Math.round(vfov);
+	$('fovLabel').textContent = vfov.toFixed(0) + '°';
+	invalidate();
+}
+
+async function start() {
+	try {
+		const res = await fetch('/info', {cache: 'no-store'});
+		if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+		useInfo(await res.json());
+	} catch (e) {
+		banner('无法连接查看器(' + e.message + ')。空闲超时后它会自动退出:重新运行 just gs-view 即可。');
+		return;
+	}
+	loadCatalog(true);
+}
+
+function frameQuery() {
+	const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+	let w = Math.max(16, Math.round(canvas.clientWidth * dpr));
+	let h = Math.max(16, Math.round(canvas.clientHeight * dpr));
+	if (w > info.max_width) { h = Math.max(16, Math.round(h * info.max_width / w)); w = info.max_width; }
+	const q = new URLSearchParams({w, h, vfov: vfov.toFixed(2), path: $('path').checked ? '1' : '0'});
+	if (snap !== null) {
+		q.set('cam', snap);
+	} else {
+		q.set('tx', view.target[0]); q.set('ty', view.target[1]); q.set('tz', view.target[2]);
+		q.set('yaw', view.yaw); q.set('pitch', view.pitch); q.set('dist', view.dist);
+	}
+	return {q, w, h};
+}
+
+function invalidate() { dirty = true; pump(); }
+
+// one request at a time; whatever changed meanwhile is fetched right after (the latest view wins)
+async function pump() {
+	if (inflight || !dirty || !info) return;
+	inflight = true;
+	dirty = false;
+	const mine = world;
+	const {q, w, h} = frameQuery();
+	const t0 = performance.now();
+	try {
+		const res = await fetch('/frame?' + q, {cache: 'no-store'});
+		if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+		const meta = JSON.parse(res.headers.get('X-GS-Info'));
+		const bitmap = await createImageBitmap(await res.blob());
+		if (mine !== world) {  // the scenes were swapped while this frame was on its way
+			bitmap.close();
+			inflight = false;
+			dirty = true;
+			pump();
+			return;
+		}
+		if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+		ctx.drawImage(bitmap, 0, 0);
+		bitmap.close();
+		cam = meta;
+		if (snap !== null) view = copy(meta.orbit);  // so that the next drag continues from the recorded view
+		const now = performance.now();
+		stats.frames++; stats.windowFrames++;
+		stats.renderMs = meta.ms.render + meta.ms.encode; stats.roundTripMs = now - t0; stats.size = w + '×' + h;
+		if (now - stats.windowStart >= 500) {
+			stats.fps = stats.windowFrames * 1000 / (now - stats.windowStart);
+			stats.windowStart = now; stats.windowFrames = 0;
+		}
+		banner('');
+		showMeta(meta);
+	} catch (e) {
+		banner('画面请求失败:' + e.message);
+		inflight = false;
+		clearTimeout(retryTimer);
+		retryTimer = setTimeout(() => { dirty = true; pump(); }, 1500);
+		return;
+	}
+	inflight = false;
+	if (dirty) pump();
+}
+
+function quality(n) {
+	if (n.distance < 0.3 && n.angle < 15) return ['接近训练视角', '#7bd88f'];
+	if (n.distance < 0.6 && n.angle < 30) return ['已偏离训练视角,边缘可能有伪影', '#e5c07b'];
+	return ['远离训练视角,画面不可靠', '#e06c75'];
+}
+
+// '#12' for one scene, 'name #12' (the number within that scene) when several are shown
+const cameraName = (scene, local) => (several() ? scene + ' ' : '') + '#' + local;
+
+function showMeta(meta) {
+	$('perf').textContent = '渲染 ' + stats.renderMs.toFixed(0) + ' ms · ' + stats.fps.toFixed(0) + ' 帧/秒 · ' + stats.size;
+	const n = meta.nearest;
+	const [text, color] = quality(n);
+	const el = $('near');
+	el.textContent = '最近的训练视角 ' + cameraName(n.scene, n.local) + ':' + n.distance.toFixed(2) + ' m / ' + n.angle.toFixed(0) + '° — ' + text;
+	el.style.color = color;
+	$('camLabel').textContent = snap === null ? '自由视角' : cameraName(meta.camera_scene, meta.camera_local) + (meta.camera_held_out ? '(没参与训练)' : '');
+	if (snap !== null) $('cam').value = snap;
+	$('fovLabel').textContent = vfov.toFixed(0) + '°';
+}
+
+function leaveSnap() {
+	if (snap !== null) { snap = null; $('camLabel').textContent = '自由视角'; }
+}
+
+function stepCamera(d) {
+	if (!info) return;
+	const from = snap !== null ? snap : (cam ? cam.nearest.index : 0);
+	snap = (from + d + info.cameras) % info.cameras;
+	invalidate();
+}
+
+function reset() {
+	snap = null;
+	view = copy(info.initial);
+	vfov = info.vfov;
+	$('fov').value = Math.round(vfov);
+	$('fovLabel').textContent = vfov.toFixed(0) + '°';
+	$('camLabel').textContent = '自由视角';
+	invalidate();
+}
+
+function showOverview() {
+	if (!info) return;
+	snap = null;
+	view = copy(info.overview);
+	invalidate();
+}
+
+function panBy(dx, dy) {
+	if (!cam) return;
+	const perPixel = 2 * view.dist * Math.tan(vfov * Math.PI / 360) / Math.max(1, canvas.clientHeight);
+	for (let i = 0; i < 3; i++) view.target[i] -= (cam.right[i] * dx + cam.down[i] * dy) * perPixel;
+}
+
+canvas.addEventListener('pointerdown', e => {
+	if (!info) return;
+	try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* a pointer that is already gone: the drag still works */ }
+	drag = {x: e.clientX, y: e.clientY, pan: e.button !== 0 || e.shiftKey};
+	canvas.classList.add('drag');
+	canvas.focus();
+});
+canvas.addEventListener('pointermove', e => {
+	if (!drag) return;
+	const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+	drag.x = e.clientX; drag.y = e.clientY;
+	if (!dx && !dy) return;
+	leaveSnap();
+	if (drag.pan) {
+		panBy(dx, dy);
+	} else {
+		view.yaw -= dx * 0.006;
+		view.pitch = clamp(view.pitch + dy * 0.006, -1.5, 1.5);
+	}
+	invalidate();
+});
+const endDrag = () => { drag = null; canvas.classList.remove('drag'); };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+	e.preventDefault();
+	if (!info) return;
+	leaveSnap();
+	const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+	view.dist = clamp(view.dist * Math.exp(dy * 0.0012), 0.02, 500);
+	invalidate();
+}, {passive: false});
+
+// double click: the camera stays where it is, looks at the clicked surface point and pivots around it from now on
+canvas.addEventListener('dblclick', async e => {
+	if (!info) return;
+	const mine = world;
+	const {q, w, h} = frameQuery();
+	const rect = canvas.getBoundingClientRect();
+	q.set('px', (e.clientX - rect.left) * w / rect.width);
+	q.set('py', (e.clientY - rect.top) * h / rect.height);
+	try {
+		const res = await fetch('/pick?' + q, {cache: 'no-store'});
+		const j = await res.json();
+		if (!res.ok) throw new Error(j.error || res.status);
+		if (j.ok && mine === world) { snap = null; view = j.orbit; invalidate(); }
+	} catch (err) {
+		banner('对焦失败:' + err.message);
+	}
+});
+
+function fly(t) {
+	const dt = Math.min(0.1, Math.max(1 / 120, (t - flyClock) / 1000));
+	flyClock = t;
+	const active = new Set([...keys, ...tapped]);  // a tap that is over before this frame still moves one step
+	tapped.clear();
+	if (active.size && cam && info) {
+		leaveSnap();
+		const speed = view.dist * 0.9 * dt * (active.has('shift') ? 3 : 1);
+		const move = [0, 0, 0];
+		const add = (v, k) => { for (let i = 0; i < 3; i++) move[i] += v[i] * k; };
+		if (active.has('w')) add(cam.fwd, speed);
+		if (active.has('s')) add(cam.fwd, -speed);
+		if (active.has('d')) add(cam.right, speed);
+		if (active.has('a')) add(cam.right, -speed);
+		if (active.has('e')) add(info.up, speed);
+		if (active.has('q')) add(info.up, -speed);
+		for (let i = 0; i < 3; i++) view.target[i] += move[i];
+		invalidate();
+	}
+	if ([...keys].some(k => k !== 'shift')) { requestAnimationFrame(fly); } else { flying = false; }
+}
+window.addEventListener('keydown', e => {
+	if (!info || e.ctrlKey || e.metaKey || e.altKey) return;
+	const k = e.key.toLowerCase();
+	if (k === 'shift') { keys.add('shift'); return; }
+	if (k.length === 1 && 'wasdqe'.includes(k)) {
+		keys.add(k); tapped.add(k);
+		if (!flying) { flying = true; flyClock = performance.now(); requestAnimationFrame(fly); }
+		e.preventDefault();
+	} else if (k === 'r') { reset(); }
+	else if (k === 'o') { showOverview(); }
+	else if (k === 'h') { toggleSide(); }
+	else if (k === 'p') { $('path').checked = !$('path').checked; invalidate(); }
+	else if (k === '[') { stepCamera(-1); }
+	else if (k === ']') { stepCamera(1); }
+});
+window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+window.addEventListener('blur', () => { keys.clear(); tapped.clear(); });
+// the first frame can be asked for before the window has its size (or the pane is resized without a resize event):
+// render again whenever the size of the canvas changes
+new ResizeObserver(() => { if (info) invalidate(); }).observe(canvas);
+window.addEventListener('resize', () => { if (info) invalidate(); });
+
+// the right column is docked beside the picture, so that it never hides part of the scene; the picture takes the whole window without it
+function toggleSide() { document.body.classList.toggle('noside'); }
+$('sideToggle').addEventListener('click', toggleSide);
+
+$('cam').addEventListener('input', e => { snap = +e.target.value; invalidate(); });
+$('prev').addEventListener('click', () => stepCamera(-1));
+$('next').addEventListener('click', () => stepCamera(1));
+$('free').addEventListener('click', () => { leaveSnap(); invalidate(); });
+$('fov').addEventListener('input', e => { vfov = +e.target.value; $('fovLabel').textContent = vfov.toFixed(0) + '°'; invalidate(); });
+$('path').addEventListener('change', invalidate);
+$('reset').addEventListener('click', () => { if (info) reset(); });
+$('overview').addEventListener('click', showOverview);
+$('shot').addEventListener('click', () => {
+	canvas.toBlob(blob => {
+		const link = document.createElement('a');
+		link.href = URL.createObjectURL(blob);
+		link.download = 'gs_view.png';
+		link.click();
+		setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+	}, 'image/png');
+});
+
+// ---- the scenes: which trained models are shown together
+
+// 20261020T031500Z (the time the training started, UTC) -> '10-20 11:15' in local time
+function trainedAt(stamp) {
+	const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/.exec(stamp);
+	if (!m) return stamp;
+	const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+	const two = n => String(n).padStart(2, '0');
+	return two(d.getMonth() + 1) + '-' + two(d.getDate()) + ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+}
+
+function countOf(n) { return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : Math.round(n / 1e3) + 'k'; }
+
+function describe(m) {
+	const parts = [trainedAt(m.time)];
+	if (m.gaussians !== null) parts.push(countOf(m.gaussians) + ' 高斯');
+	if (m.steps !== null) parts.push(m.steps.toLocaleString() + ' 步');
+	if (m.psnr !== null) parts.push('PSNR ' + m.psnr.toFixed(1));
+	return parts.join(' · ');
+}
+
+async function loadCatalog(adopt) {
+	try {
+		const res = await fetch('/scenes', {cache: 'no-store'});
+		if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+		const next = await res.json();
+		const first = catalog === null;
+		catalog = next;
+		// ticks survive a refresh as long as the models are still there; after a change of scenes they follow the server
+		const known = new Set(catalog.models.map(m => m.id));
+		picked = adopt ? catalog.selected.slice() : picked.filter(id => known.has(id));
+		if (first) $('scenes').open = catalog.models.length > 1;
+		$('sceneStatus').textContent = '';
+	} catch (e) {
+		$('sceneStatus').textContent = '读取场景列表失败:' + e.message;
+		$('sceneStatus').className = 'err';
+		return;
+	}
+	renderScenes();
+}
+
+function renderScenes() {
+	const section = $('scenes');
+	if (!catalog || !catalog.selectable) { section.hidden = true; return; }
+	section.hidden = false;
+	$('scenesTitle').textContent = '场景(磁盘上有 ' + catalog.models.length + ' 个模型)';
+	const shown = new Map(info.scenes.map((s, i) => [s.id, i]));
+	const full = picked.length >= catalog.max_scenes;
+	const list = $('sceneList');
+	list.textContent = '';
+	for (const m of catalog.models) {
+		const ticked = picked.includes(m.id);
+		const row = document.createElement('div');
+		row.className = 'scene' + (shown.has(m.id) ? ' on' : '');
+		const label = document.createElement('label');
+		const box = document.createElement('input');
+		box.type = 'checkbox';
+		box.checked = ticked;
+		box.disabled = swapping || (!ticked && full);
+		box.addEventListener('change', () => {
+			picked = box.checked ? [...picked, m.id] : picked.filter(id => id !== m.id);
+			renderScenes();
+		});
+		const order = document.createElement('span');
+		order.className = 'order';
+		order.textContent = ticked ? String(picked.indexOf(m.id) + 1) : '';
+		const name = document.createElement('span');
+		name.className = 'name';
+		name.textContent = m.dataset;
+		label.append(box, order, name);
+		const detail = document.createElement('div');
+		detail.className = 'detail dim';
+		detail.append(describe(m));
+		if (shown.has(m.id)) {
+			const go = document.createElement('button');
+			go.textContent = '查看';
+			go.title = '跳到这个场景的第一个录制视角';
+			go.addEventListener('click', () => goScene(shown.get(m.id)));
+			detail.append(go);
+		}
+		row.append(label, detail);
+		list.append(row);
+	}
+	$('sceneHint').textContent = catalog.models.length < 2
+		? '磁盘上只有 ' + catalog.models.length + ' 个训练好的模型。用 just gs-train 训练更多场景后点「刷新」。'
+		: '勾选要一起显示的模型(数字 = 从左到右的顺序,最多 ' + catalog.max_scenes + ' 个),再点「显示所选场景」。';
+	const same = picked.length === catalog.selected.length && picked.every((id, i) => id === catalog.selected[i]);
+	$('apply').disabled = swapping || picked.length === 0 || same;
+	$('apply').textContent = '显示所选场景(' + picked.length + ')';
+	$('refresh').disabled = swapping;
+}
+
+function goScene(i) {
+	if (!info || !info.scenes[i]) return;
+	snap = info.scenes[i].start;
+	invalidate();
+}
+
+async function applySelection() {
+	if (swapping || !catalog || !picked.length) return;
+	swapping = true;
+	$('sceneStatus').className = 'dim';
+	$('sceneStatus').textContent = '正在加载 ' + picked.length + ' 个场景…(要读模型、排布并渲染总览,几秒到几十秒)';
+	renderScenes();
+	try {
+		const res = await fetch('/select?ids=' + encodeURIComponent(picked.join(',')), {cache: 'no-store'});
+		const j = await res.json().catch(() => ({}));
+		if (!res.ok) throw new Error(j.error || 'HTTP ' + res.status);
+		catalog.selected = j.selected;
+		picked = j.selected.slice();
+		swapping = false;
+		$('sceneStatus').textContent = '';
+		useInfo(j.info);
+	} catch (e) {
+		swapping = false;
+		$('sceneStatus').className = 'err';
+		$('sceneStatus').textContent = '加载失败:' + e.message + '(原来的场景仍在显示)';
+	}
+	renderScenes();
+}
+
+$('apply').addEventListener('click', applySelection);
+$('refresh').addEventListener('click', () => loadCatalog(false));
+
+// for tests and debugging in the browser console
+window.gsViewerDebug = {
+	get info() { return info; }, get view() { return view; }, get snap() { return snap; }, get cam() { return cam; },
+	get stats() { return stats; }, get catalog() { return catalog; }, get picked() { return picked; },
+	invalidate, reset, applySelection,
+	set picked(ids) { picked = ids.slice(); renderScenes(); },
+	set view(v) { view = v; snap = null; invalidate(); },
+};
+start();
+</script>
+</body>
+</html>

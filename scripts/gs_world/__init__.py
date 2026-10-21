@@ -7,5 +7,6 @@ like any TUM sequence. ROS1 bags of a RealSense D455 are converted into that lay
 
 gsplat is installed into its own directory of the workspace volume (`just gs-install`), not into the DAAAM virtual
 environment; every entry point calls env.activate() before importing it. Run the entry points in the daaam-ws
-container from the repository root, e.g. `python -m scripts.gs_world.train tum_fr1_room` (see USAGE.md 9.7).
+container from the repository root, e.g. `python -m scripts.gs_world.train tum_fr1_room` (see USAGE.md 9.7). `view` shows a
+trained model in the browser (`just gs-view`).
 """
