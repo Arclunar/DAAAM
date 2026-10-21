@@ -20,7 +20,7 @@ KEEP_VIEWER="${KEEP_VIEWER:-1}"
 ulimit -c 0
 
 if [ -z "${DISPLAY:-}" ] || [ ! -d /tmp/.X11-unix ]; then
-  echo "No X display in the container (DISPLAY='${DISPLAY:-}'): the RViz window cannot open. See DOCKER.md for the X11 setup." >&2
+  echo "No X display in the container (DISPLAY='${DISPLAY:-}'): the RViz window cannot open. See README.md for the X11 setup." >&2
   exit 1
 fi
 

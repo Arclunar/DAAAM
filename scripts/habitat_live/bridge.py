@@ -138,7 +138,7 @@ def run(args):
 			data = Path(os.environ.get("HABITAT_DATA", str(DEFAULT_DATA))).expanduser()
 			dataset = Path(args.scene_dataset).expanduser() if args.scene_dataset else data / "replica_cad" / "replicaCAD.scene_dataset_config.json"
 			if not dataset.is_file() and not Path(args.scene).is_file():
-				raise SystemExit(f"scene dataset not found: {dataset}\nSet HABITAT_DATA to the folder that holds replica_cad/ or pass --scene-dataset (see USAGE.md 9.8).")
+				raise SystemExit(f"scene dataset not found: {dataset}\nSet HABITAT_DATA to the folder that holds replica_cad/ or pass --scene-dataset (see README.md).")
 			t0 = time.perf_counter()
 			sim_cfg = habitat_sim.SimulatorConfiguration()
 			if dataset.is_file():

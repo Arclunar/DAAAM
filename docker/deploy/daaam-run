@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run DAAAM from the deployed image. deploy.sh installs this script as $DAAAM_HOME/bin/daaam-run (see DEPLOY.md).
+# Run DAAAM from the deployed image. deploy.sh installs this script as $DAAAM_HOME/bin/daaam-run (see README.md).
 #
 #   daaam-run check [--quick]                 GPU, Python packages, model files, and loading DAM-3B
 #                                             (--quick skips loading it)

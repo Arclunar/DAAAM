@@ -27,12 +27,30 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
+        source: ${REPLAY_WS_DIR:-/home/arclunar/warmoon_ws/replay_ws}
+        target: /home/arclunar/warmoon_ws/replay_ws
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATASETS_WS_DIR:-/home/arclunar/warmoon_ws/datasets_ws}
+        target: /home/arclunar/warmoon_ws/datasets_ws
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
         source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
         target: /opt/daaam_ws/src
         bind:
           create_host_path: false
+      - type: bind
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/warmoon_ws/reviewer_ws}
+        target: /home/arclunar/warmoon_ws/reviewer_ws
+        read_only: true
+        bind:
+          create_host_path: false
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /opt/daaam_ws/src/daaam
+    # 本地维护的测试实体统一在 reviewer_ws；原 tests 文件路径保留兼容链接。
 
   # 日常使用的服务：在 daaam 镜像之上追加了 rosdep 解析出的系统包（docker/apt-deps.txt）。
   # 工作区卷里编译好的产物依赖这些库，而在容器里用 rosdep 装的包会在 `run --rm` 之后丢失，
@@ -69,16 +87,33 @@ services:
       # 代理偶尔会让 git 传输停滞：低于 1 KB/s 持续 2 分钟就报错，而不是无限等待
       GIT_HTTP_LOW_SPEED_LIMIT: "1000"
       GIT_HTTP_LOW_SPEED_TIME: "120"
-      # RUNNING.md 的 CODa 流程：数据集根目录（宿主机上是 DAAAM_DATA_DIR/CODa）
+      # README.md 的 CODa 流程：数据集根目录（宿主机上是 DAAAM_DATA_DIR/CODa）
       CODA_ROOT_DIR: /data/CODa
     volumes:
       - daaam_workspace:/opt/daaam_ws
+      - type: bind
+        source: ${REPLAY_WS_DIR:-/home/arclunar/warmoon_ws/replay_ws}
+        target: /home/arclunar/warmoon_ws/replay_ws
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${DATASETS_WS_DIR:-/home/arclunar/warmoon_ws/datasets_ws}
+        target: /home/arclunar/warmoon_ws/datasets_ws
+        read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
         target: /opt/daaam_ws/src
         bind:
           create_host_path: false
-      - ${DAAAM_DATASETS_DIR:-./datasets}:/datasets
+      - ${DAAAM_DATASETS_DIR:-/home/arclunar/warmoon_ws/datasets_ws/processed/tum}:/datasets
+      - type: bind
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/warmoon_ws/reviewer_ws}
+        target: /home/arclunar/warmoon_ws/reviewer_ws
+        read_only: true
+        bind:
+          create_host_path: false
       # CODa 数据集、FoundationStereo 和 bag 放在宿主机目录里（本机在 .env 里设成 /mnt/e/daaam-data，
       # 即 E:\daaam-data）：WSL 和 Windows 里直接能看，不占 C: 盘上的 WSL 虚拟磁盘，容器里是 /data
       - ${DAAAM_DATA_DIR:-./datasets}:/data

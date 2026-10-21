@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run DAAAM + Hydra on a CODa rosbag the way RUNNING.md section 4 does (launch the pipeline, play the bag, wait for
+# Run DAAAM + Hydra on a CODa rosbag the way README.md section 4 does (launch the pipeline, play the bag, wait for
 # the end), with the settings validated on an RTX 5060 Ti (16 GB) / 15 GB RAM.
 #
 # Inside the daaam-ws container:
@@ -24,7 +24,7 @@
 #
 # Notes
 #   * The launch file's default engines (FastSAM-x-640x480.engine, clip_general.engine) are built with
-#     scripts/export_fastsam_trt.py and scripts/export_vanilla_clip_engine.py (INSTALL.md). The Perception Encoder
+#     scripts/export_fastsam_trt.py and scripts/export_vanilla_clip_engine.py (README.md). The Perception Encoder
 #     checkpoint (facebook/PE-Core-L14-336, 2.7 GB) is downloaded by huggingface_hub into the Hugging Face cache;
 #     here it sits in $DAAAM_DATA_DIR/hf_cache and is linked into the workspace cache so that no HF_HOME is needed.
 #   * The results go to output/coda/ and the logs to $OUT (Hydra's own log directory is $OUT/hydra), all inside the
@@ -54,7 +54,7 @@ if [ ! -d "${BAG}" ] && [ -d "${CODA_ROOT_DIR}/${BAG}" ]; then BAG="${CODA_ROOT_
 # 3599 (the kernel killed Hydra), chunks of about 2050 frames fit. Say so before spending an hour on it.
 BAG_FRAMES="$(awk '/name: \/cam0\/rgb_image/ {found = 1} found && /message_count:/ {print $2; exit}' "${BAG}/metadata.yaml" 2>/dev/null || true)"
 if [ -n "${BAG_FRAMES}" ] && [ "${BAG_FRAMES}" -gt "${LONG_BAG_FRAMES:-2600}" ]; then
-  echo "WARNING: ${BAG} has ${BAG_FRAMES} frames: on 15.9 GB RAM + 4 GB swap a run this long is killed for lack of memory (USAGE.md 4.4); run it in chunks (just coda-chunks) or set LONG_BAG_FRAMES to silence this" >&2
+  echo "WARNING: ${BAG} has ${BAG_FRAMES} frames: on 15.9 GB RAM + 4 GB swap a run this long is killed for lack of memory (README.md); run it in chunks (just coda-chunks) or set LONG_BAG_FRAMES to silence this" >&2
 fi
 
 # no core dumps: on WSL2 every crash of a large process writes a multi-GB dump file to the Windows drive
@@ -68,7 +68,7 @@ export DAAAM_CLIP_HALF="${DAAAM_CLIP_HALF:-1}"
 # glibc keeps what Python/PyTorch/numpy freed inside the process. malloc_trim() returns those pages
 # (daaam.utils.memory): about 0.5 GB in the grounding worker (once, after loading its models) and 70-80 MB per call in
 # the DAAAM node (every DAAAM_TRIM_INTERVAL_FRAMES frames). It does not make a whole 8213-frame CODa sequence fit in
-# 15.9 GB RAM + 4 GB swap: run such a sequence in chunks of about 2050 frames (USAGE.md 4.4).
+# 15.9 GB RAM + 4 GB swap: run such a sequence in chunks of about 2050 frames (README.md).
 export DAAAM_TRIM_INTERVAL_FRAMES="${DAAAM_TRIM_INTERVAL_FRAMES:-300}"
 
 if [ -L output/coda ]; then

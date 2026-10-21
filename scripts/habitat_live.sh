@@ -31,11 +31,11 @@ if [ "${1:-}" = "--bridge-only" ]; then
 fi
 
 if [ ! -x "${HABITAT_PYTHON}" ]; then
-  echo "No Habitat environment at ${HABITAT_PYTHON} (set HABITAT_PYTHON to the python of a conda environment with habitat-sim, see USAGE.md 9.8)." >&2
+  echo "No Habitat environment at ${HABITAT_PYTHON} (set HABITAT_PYTHON to the python of a conda environment with habitat-sim, see README.md)." >&2
   exit 1
 fi
 if [ "${SCENE}" = apt_1 ] && [ ! -f "${HABITAT_DATA}/replica_cad/replicaCAD.scene_dataset_config.json" ]; then
-  echo "No ReplicaCAD at ${HABITAT_DATA}/replica_cad (set HABITAT_DATA, or SCENE and BRIDGE_ARGS=--scene-dataset ... for another scene, see USAGE.md 9.8)." >&2
+  echo "No ReplicaCAD at ${HABITAT_DATA}/replica_cad (set HABITAT_DATA, or SCENE and BRIDGE_ARGS=--scene-dataset ... for another scene, see README.md)." >&2
   exit 1
 fi
 if [ -z "${DISPLAY:-}" ]; then

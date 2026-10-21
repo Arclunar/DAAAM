@@ -16,7 +16,7 @@
 #   1. 额外安装 hydra_python。Hydra 的 colcon 构建类型是纯 cmake，不含 Python 绑定，上游脚本漏了这一步。
 #   2. 先单独编译 gtsam（占编译量的大头，可以放心用更高并行度）；其余包限制并行度，避免 15 GB 内存 OOM。
 #   3. CMAKE_BUILD_PARALLEL 之外，编译用 Release，并关闭 gtsam examples 与各包 tests，缩短编译时间（不影响安装产物）。
-#   4. TensorRT 固定到 INSTALL.md 里验证过的版本。
+#   4. TensorRT 固定到 README.md 里验证过的版本。
 #
 # 可调环境变量：GTSAM_JOBS(默认 6)、OTHER_JOBS(默认 2)、COLCON_WORKERS(默认 2)、TENSORRT_PIN(默认 10.13.3.9)
 
@@ -26,7 +26,7 @@ export PYTHONUNBUFFERED=1
 
 WS="${DAAAM_WS:-/opt/daaam_ws}"
 REPO="${WS}/src/daaam"
-LOG_DIR="${REPO}/logs"
+LOG_DIR="${REPO}/output/logs/setup"
 GTSAM_JOBS="${GTSAM_JOBS:-6}"
 OTHER_JOBS="${OTHER_JOBS:-2}"
 COLCON_WORKERS="${COLCON_WORKERS:-2}"
@@ -173,7 +173,7 @@ step_pip_deps() {
   cd "${REPO}"
   disk
 
-  # 约束：① INSTALL.md 里验证过的 TensorRT 版本（requirements.txt 里没有固定）；
+  # 约束：① README.md 里验证过的 TensorRT 版本（requirements.txt 里没有固定）；
   # ② pyarrow 24 起要求 NumPy 2，而 DAAAM 固定 numpy<2.0.0，rerun-sdk 会因此 import 失败。
   printf 'tensorrt-cu12==%s\npyarrow<24\n' "${TENSORRT_PIN}" > "${WS}/constraints.txt"
 
@@ -242,7 +242,7 @@ PY
     pydub python-multipart safehttpx semantic-version tomlkit typer shellingham rich markdown-it-py mdurl annotated-doc brotli
   pip install opentelemetry-api
 
-  # INSTALL.md 的可选项：cvxopt 提供 GLPK_MI 求解器。min_frames_max_size 分配 worker 用 CVXPY 解混合整数规划，
+  # README.md 的可选项：cvxopt 提供 GLPK_MI 求解器。min_frames_max_size 分配 worker 用 CVXPY 解混合整数规划，
   # 没有 GLPK 会退回 SciPy/HiGHS（scipy>=1.15 上慢 5~7 倍）。系统包 glpk-utils / libglpk-dev 已在基础镜像里。
   log "pip-deps: cvxopt（GLPK_MI）"
   pip install cvxopt

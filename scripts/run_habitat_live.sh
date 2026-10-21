@@ -53,7 +53,7 @@ EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 ulimit -c 0
 
 if [ "${VIEWER}" = 1 ] && { [ -z "${DISPLAY:-}" ] || [ ! -d /tmp/.X11-unix ]; }; then
-  echo "No X display in the container (DISPLAY='${DISPLAY:-}'): the RViz window cannot open (VIEWER=0 maps without it). See DOCKER.md for the X11 setup." >&2
+  echo "No X display in the container (DISPLAY='${DISPLAY:-}'): the RViz window cannot open (VIEWER=0 maps without it). See README.md for the X11 setup." >&2
   exit 1
 fi
 if [ ! -f "${HYDRA_CONFIG}" ]; then
@@ -169,7 +169,7 @@ if [ -n "${latest}" ]; then
     python scripts/lift_native_places.py --run "${latest}" --dataset "${SESSION}" || rc=$?
   fi
   python scripts/summarize_run.py "${latest}" --max-objects 10 || true
-  [ ! -d "${SESSION}" ] || echo "Recorded session: ${SESSION} (map it again offline: DATASET=/data... see USAGE.md 9.8)"
+  [ ! -d "${SESSION}" ] || echo "Recorded session: ${SESSION} (map it again offline: DATASET=/data... see README.md)"
 fi
 
 if [ -n "${viewer}" ] && [ "${KEEP_VIEWER}" = 1 ]; then

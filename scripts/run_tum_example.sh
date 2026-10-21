@@ -11,12 +11,13 @@
 #     列出名称，just tum-fetch <名称> 下载）；MAX_FRAMES 写 all 表示该序列的全部帧。
 #   DATASET：数据集路径，默认 /datasets/tum_<SEQ>；NAME：输出子目录名称，默认 tum_<SEQ>。
 #   LABELS：伪标签空间大小，默认 5000；FPS：数据集帧率，默认 15。
+#   DEPTH_SCALE：每米深度单位数，默认 5000；通用 RGB-D 入口从 camera_info.json 读取。
 #   HYDRA_CONFIG：Hydra 配置文件，默认 config/hydra_config/tum_rgbd_khronos.yaml。
 #   EXTRA_OVERRIDES：以空格分隔的 key=value 流水线配置覆盖项，例如
 #     "workers.num_grounding_workers=0" 可在不加载 DAM 的情况下测试 Hydra 部分。
 #   ZMQ_URL：向实时查看器发布场景图的地址，默认 "none"；
 #     scripts/run_live_preview.sh 会将其设为 tcp://127.0.0.1:8001。
-#   DEPTH_LB / DEPTH_UB：深度范围（米），默认 0.3 / 4.0；用同样的范围重跑 Habitat 实时会话的录制（USAGE.md 9.8）时要和实时运行的一致。
+#   DEPTH_LB / DEPTH_UB：深度范围（米），默认 0.3 / 4.0；用同样的范围重跑 Habitat 实时会话的录制（README.md）时要和实时运行的一致。
 #
 # 注意事项：
 #   * TARGET_FPS 控制输入帧的处理速率。DAM 异步返回回答，而流水线结束时不会等待尚未返回的回答。
@@ -39,6 +40,7 @@ DATASET="${DATASET:-/datasets/tum_${SEQ}}"
 NAME="${NAME:-tum_${SEQ}}"
 LABELS="${LABELS:-5000}"
 FPS="${FPS:-15}"
+DEPTH_SCALE="${DEPTH_SCALE:-5000}"
 HYDRA_CONFIG="${HYDRA_CONFIG:-config/hydra_config/tum_rgbd_khronos.yaml}"
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 ZMQ_URL="${ZMQ_URL:-none}"
@@ -71,7 +73,7 @@ python scripts/run_pipeline.py "${DATASET}" \
   --sam-model fastsam/FastSAM-x.pt \
   --semantic-config "${LABELS_BASE}.yaml" \
   --labelspace-colors "${LABELS_BASE}.csv" \
-  --depth-scale 5000 --fps "${FPS}" --depth-lb "${DEPTH_LB}" --depth-ub "${DEPTH_UB}" \
+  --depth-scale "${DEPTH_SCALE}" --fps "${FPS}" --depth-lb "${DEPTH_LB}" --depth-ub "${DEPTH_UB}" \
   --zmq-url "${ZMQ_URL}" --dataset-name "${NAME}" \
   "${max_frames_args[@]}" --target-fps "${TARGET_FPS}" \
   --save-images --save-interval 30 --verbose \

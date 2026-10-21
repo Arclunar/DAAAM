@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a self-contained DAAAM image from the development workspace volume and export a deployment bundle
-# that can be copied to another GPU server (see DEPLOY.md). Run it on the machine where the workspace was set up
+# that can be copied to another GPU server (see README.md). Run it on the machine where the workspace was set up
 # (docker compose run --rm daaam-ws bash docker/setup_workspace.sh).
 #
 #   bash docker/build_full_image.sh image             workspace volume + this checkout -> daaam:jazzy-cu128-full
@@ -19,7 +19,7 @@
 # Disk: `image` briefly needs about twice the size of the workspace (~15 GB each) in Docker's storage, the container
 # is removed afterwards; an existing image of the same name is kept until the new one is committed, so remove it first
 # (docker rmi) when the disk is tight. `export` writes about 20 GB into OUT_DIR; on WSL2 choose a directory on a Windows
-# drive that does not hold the WSL virtual disk. A server needs about 60 GB free to `docker load` the image (see DEPLOY.md).
+# drive that does not hold the WSL virtual disk. A server needs about 60 GB free to `docker load` the image (see README.md).
 # Environment: BASE_IMAGE, FULL_IMAGE, WORKSPACE_VOLUME (default: the Compose volume daaam_daaam_workspace).
 set -euo pipefail
 
@@ -151,7 +151,7 @@ step_export() {
 
   log "deploy scripts and checksums"
   install -m 755 docker/deploy/deploy.sh docker/deploy/daaam-run "${out}/"
-  [ ! -f DEPLOY.md ] || install -m 644 DEPLOY.md "${out}/"
+  [ ! -f README.md ] || install -m 644 README.md "${out}/"
   # checksums of the large archives only (they guard the transfer; the scripts and the guide are plain text).
   # Archives that were not exported now keep the hash recorded earlier, which saves minutes on a partial export.
   (
