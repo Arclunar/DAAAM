@@ -1,6 +1,6 @@
 # DAAAM 本地工作区
 
-> 在 WSL Ubuntu-20.04 的 `~/warmoon_ws` 使用根 justfile；算法源码位于 `daaam_ws/src/daaam`。
+> 在 WSL Ubuntu-20.04 的 `~/jellymap_dev` 使用根 justfile；算法源码位于 `daaam_ws/src/daaam`。
 
 ## 职责与目录
 
@@ -16,7 +16,7 @@
 ## 建图
 
 ```bash
-cd ~/warmoon_ws
+cd ~/jellymap_dev
 just daaam run <转换目录>             # 统一 RGB-D → DAAAM；默认全段
 just daaam run <转换目录> 50          # 连续前 50 帧
 just daaam run <转换目录> 50 --dry-run # 只校验输入并预览启动命令
@@ -32,7 +32,7 @@ just gs-daaam <容器内RGB-D目录> 30     # 高斯渲染或实录转换后的�
 
 `run` 消费 datasets_ws 已处理的统一 RGB-D，不读取 ROS1 bag、标定或 Jellyhold 转换报告。输入是逐帧同名 `rgb/*.png`（8 位彩色）、`depth/*.png`（16 位、0 无效）、`pose/poses.txt`（每行 16 个数的行优先 RGB 光学 `T_world_camera`）与 `camera_info.json`（width、height、零畸变 intrinsics、depth_scale、fps）；不要混入 JPG/NPY 等另一套帧文件。同一目录可交给 GS 训练。路径相对于调用命令时的目录，也支持绝对路径和含空格路径。默认处理上限 3 FPS，可加 `--target-fps`；建图深度范围默认 0.3–8 m，可加 `--depth-lb/--depth-ub`。
 
-运行读取元信息的深度比例和帧率，不猜测传感器单位；原始 `timestamps.txt` 若存在会校验数量与递增性，但当前 DAAAM 时间轴仍按帧号/fps。输入只读，每次生成新 `rgbd_*` 结果目录并保存 `rgbd_launch.json` 和 `rgbd_run.log`。旧 `gs-daaam` 兼容入口保留，新数据使用通用 `run`。本地测试实体统一在 reviewer_ws；从 warmoon_ws 执行 `python3 reviewer_ws/scripts/run_tests.py --agent <codex或claude/会话ID/执行agent> --dataset <转换目录>`，由运行器执行入口测试与实际 GS/DAAAM 读取器对比。完整运行结束后再用 `reviewer_ws/scripts/verify_full_rgbd.py <转换目录> <运行父目录>` 验收。
+运行读取元信息的深度比例和帧率，不猜测传感器单位；原始 `timestamps.txt` 若存在会校验数量与递增性，但当前 DAAAM 时间轴仍按帧号/fps。输入只读，每次生成新 `rgbd_*` 结果目录并保存 `rgbd_launch.json` 和 `rgbd_run.log`。旧 `gs-daaam` 兼容入口保留，新数据使用通用 `run`。本地测试实体统一在 reviewer_ws；从 jellymap_dev 执行 `python3 reviewer_ws/scripts/run_tests.py --agent <codex或claude/会话ID/执行agent> --dataset <转换目录>`，由运行器执行入口测试与实际 GS/DAAAM 读取器对比。完整运行结束后再用 `reviewer_ws/scripts/verify_full_rgbd.py <转换目录> <运行父目录>` 验收。
 
 结果统一位于 replay_ws/results/daaam/ 下的独立 out_* 目录；旧 output/ 入口仍有效。独立 habitat_ws 适配器的结果保留原位，replay_ws/results/ 提供对应入口。
 
@@ -71,7 +71,7 @@ replay 可选择或输入已有结果绝对路径。问答/摘要需相应模型
 复用本机已有镜像、`daaam_daaam_workspace` 卷和模型缓存。容器源码在 `/opt/daaam_ws/src`；Compose 同时挂载 datasets_ws 与 replay_ws。更换机器需同步调整 `.env`、挂载清单和文件链接；全新安装与部署包尚未重新验收。
 
 ```bash
-cd ~/warmoon_ws/daaam_ws/src/daaam
+cd ~/jellymap_dev/daaam_ws/src/daaam
 just shell                  # 新容器终端（原 just run）
 just exec                   # 进入运行中的容器
 just build                  # 增量编译

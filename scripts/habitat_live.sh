@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a Habitat agent with the keyboard and watch DAAAM build the scene graph live (WSL host side of `just habitat-live`).
 #
-# Starts the Habitat bridge here on the host (the habitat-sim conda environment of ~/warmoon_ws/habitat_ws, nothing is
+# Starts the Habitat bridge here on the host (the habitat-sim conda environment of ~/jellymap_dev/habitat_ws, nothing is
 # installed into it: a window with the agent's first-person view, W/S walk, A/D strafe, arrows or Q/E turn and look, Shift
 # faster, R back to the start, P autopilot, Esc quit), waits until it serves frames, then runs the mapper in the daaam-ws
 # container (scripts/run_habitat_live.sh: RViz2 with the growing scene graph, DAAAM, Hydra). When one side ends the other
@@ -11,7 +11,7 @@
 #   bash scripts/habitat_live.sh --bridge-only [ARGS]    # only the Habitat window and frame server (ARGS: scripts/habitat_live/bridge.py)
 #
 # Environment: HABITAT_PYTHON (default ~/miniforge3/envs/habitat-smallroom/bin/python), HABITAT_DATA (default
-# ~/warmoon_ws/habitat_ws/data: replica_cad/ lives there), BRIDGE_PORT (8002), SCENE (apt_1), AUTOPILOT=1 (start with the
+# ~/jellymap_dev/habitat_ws/data: replica_cad/ lives there), BRIDGE_PORT (8002), SCENE (apt_1), AUTOPILOT=1 (start with the
 # autopilot walking to unseen places), RUN_SECONDS=N (close the stream N seconds after the first mapped frame), BRIDGE_ARGS
 # (more arguments of bridge.py), and the variables of scripts/run_habitat_live.sh (FPS, NAME, DAM, HYDRA_CONFIG, VIEWER,
 # KEEP_VIEWER, REPLAY, RECORD, ...), which are passed on to the container.
@@ -19,7 +19,7 @@ set -eo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 HABITAT_PYTHON="${HABITAT_PYTHON:-$HOME/miniforge3/envs/habitat-smallroom/bin/python}"
-export HABITAT_DATA="${HABITAT_DATA:-$HOME/warmoon_ws/habitat_ws/data}"
+export HABITAT_DATA="${HABITAT_DATA:-$HOME/jellymap_dev/habitat_ws/data}"
 BRIDGE_PORT="${BRIDGE_PORT:-8002}"
 NAME="${NAME:-habitat_live}"
 SCENE="${SCENE:-apt_1}"

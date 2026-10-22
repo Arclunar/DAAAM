@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Habitat bridge: steer a habitat-sim agent with the keyboard while DAAAM maps what it sees.
 
-Runs in an environment that has habitat-sim (the `habitat-smallroom` conda environment of ~/warmoon_ws/habitat_ws on
+Runs in an environment that has habitat-sim (the `habitat-smallroom` conda environment of ~/jellymap_dev/habitat_ws on
 this machine; nothing is installed into it), not in the DAAAM container. It opens a window with the agent's first-person
 view, moves the agent with the keys that are held down, and serves the newest RGB-D frame, pose and intrinsics over a
 local TCP socket (src/daaam/datasets/live_protocol.py) to `scripts/run_pipeline.py --dataset-type LiveDataset`.
@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-DEFAULT_DATA = Path.home() / "warmoon_ws" / "habitat_ws" / "data"
+DEFAULT_DATA = Path.home() / "jellymap_dev" / "habitat_ws" / "data"
 START = {"apt_1": (2.1, 0.11937291920185089, 2.2)}  # the living room of ReplicaCAD apt_1, looking at the kitchen
 FONT = "ProggyClean.ttf"
 # LiveDataset's runner reads frame 0 once to set up the camera (1st capture), again as the first frame of the loop after the

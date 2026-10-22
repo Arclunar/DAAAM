@@ -1,6 +1,6 @@
 # DAAAM 工作约定
 
-- 先读 warmoon_ws/AGENTS.md 与本仓库 README.md；这是上游 fork，保留必要改动，不做无关格式化或翻译。
+- 先读 jellymap_dev/AGENTS.md 与本仓库 README.md；这是上游 fork，保留必要改动，不做无关格式化或翻译。
 - 本仓库负责算法、输入适配、建图运行与地图后处理。数据/GS 实现在 datasets_ws；回放工具、测试和结果在 replay_ws。
 - scripts/、tests/、data/、datasets/、output/ 中的旧目录为绑定挂载、部分文件为兼容链接；编辑前确认实际位置，不能把它们当作重复副本删除。
 - justfile 仅保留运行所需入口，不添加测试、冒烟或检查配方；开发验证直接运行原脚本。逻辑写脚本，justfile 只编排和转发。

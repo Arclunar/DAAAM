@@ -1,0 +1,16 @@
+services:
+  daaam:
+    image: daaam:jazzy-cu128-full
+  daaam-ws:
+    image: daaam:jazzy-cu128-full
+    environment:
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    volumes:
+      - type: bind
+        source: /home/arclunar/daaam-runtime/assets/hf
+        target: /opt/daaam_ws/cache/huggingface
+      - type: bind
+        source: /home/arclunar/daaam-runtime/assets/checkpoints
+        target: /opt/daaam_ws/src/daaam/checkpoints
+        read_only: true

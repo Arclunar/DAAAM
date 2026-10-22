@@ -1,1 +1,1 @@
-/home/arclunar/warmoon_ws/replay_ws/tools/rerun_web.sh
+/home/arclunar/jellymap_dev/replay_ws/tools/rerun_web.sh

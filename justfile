@@ -74,7 +74,7 @@ mesh dsg="":
 
 # ── Habitat 实时建图:在模拟器里用键盘走动,DAAAM 同时建图,RViz 里看场景图长出来(按键、实测和限制见 README.md)──
 # 分步启动(两个终端,按顺序):1. `just habitat-bridge`(Habitat 窗口,先点一下它再按键)→ 2. `just habitat-mapper`(建图 + RViz);一条命令全开:`just habitat-live`
-# 用 ~/warmoon_ws/habitat_ws 里已有的 habitat-sim 环境和 ReplicaCAD 场景(只读);位置不同就设 HABITAT_PYTHON / HABITAT_DATA
+# 用 ~/jellymap_dev/habitat_ws 里已有的 habitat-sim 环境和 ReplicaCAD 场景(只读);位置不同就设 HABITAT_PYTHON / HABITAT_DATA
 
 # 第 1 步:Habitat 窗口和帧服务(W/S/A/D 走,方向键或 Q/E 转,Shift 加速,R 回起点,P 自动走,Esc 退出);后面可加 bridge.py 的参数
 habitat-bridge *args:

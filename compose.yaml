@@ -27,13 +27,13 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
-        source: ${REPLAY_WS_DIR:-/home/arclunar/warmoon_ws/replay_ws}
-        target: /home/arclunar/warmoon_ws/replay_ws
+        source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
+        target: /home/arclunar/jellymap_dev/replay_ws
         bind:
           create_host_path: false
       - type: bind
-        source: ${DATASETS_WS_DIR:-/home/arclunar/warmoon_ws/datasets_ws}
-        target: /home/arclunar/warmoon_ws/datasets_ws
+        source: ${DATASETS_WS_DIR:-/home/arclunar/jellymap_dev/datasets_ws}
+        target: /home/arclunar/jellymap_dev/datasets_ws
         read_only: true
         bind:
           create_host_path: false
@@ -43,8 +43,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/warmoon_ws/reviewer_ws}
-        target: /home/arclunar/warmoon_ws/reviewer_ws
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/reviewer_ws}
+        target: /home/arclunar/jellymap_dev/reviewer_ws
         read_only: true
         bind:
           create_host_path: false
@@ -92,13 +92,13 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
-        source: ${REPLAY_WS_DIR:-/home/arclunar/warmoon_ws/replay_ws}
-        target: /home/arclunar/warmoon_ws/replay_ws
+        source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
+        target: /home/arclunar/jellymap_dev/replay_ws
         bind:
           create_host_path: false
       - type: bind
-        source: ${DATASETS_WS_DIR:-/home/arclunar/warmoon_ws/datasets_ws}
-        target: /home/arclunar/warmoon_ws/datasets_ws
+        source: ${DATASETS_WS_DIR:-/home/arclunar/jellymap_dev/datasets_ws}
+        target: /home/arclunar/jellymap_dev/datasets_ws
         read_only: true
         bind:
           create_host_path: false
@@ -107,10 +107,10 @@ services:
         target: /opt/daaam_ws/src
         bind:
           create_host_path: false
-      - ${DAAAM_DATASETS_DIR:-/home/arclunar/warmoon_ws/datasets_ws/processed/tum}:/datasets
+      - ${DAAAM_DATASETS_DIR:-/home/arclunar/jellymap_dev/datasets_ws/processed/tum}:/datasets
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/warmoon_ws/reviewer_ws}
-        target: /home/arclunar/warmoon_ws/reviewer_ws
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/reviewer_ws}
+        target: /home/arclunar/jellymap_dev/reviewer_ws
         read_only: true
         bind:
           create_host_path: false

@@ -73,7 +73,7 @@ def main(argv=None):
     }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     print(f"GS training input: {out}")
-    print(f"From warmoon_ws: just datasets gs-train {out}")
+    print(f"From jellymap_dev: just datasets gs-train {out}")
     return 0
 
 
