@@ -20,6 +20,8 @@ services:
     tty: true
     gpus: all
     environment:
+      JELLYMAP_ROOT: /home/arclunar/jellymap_dev
+      PYTHONPATH: /home/arclunar/jellymap_dev/jellymap
       DISPLAY: "${DISPLAY:-:0}"
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
@@ -47,6 +49,21 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/sm-lab/datasets
+        target: /home/arclunar/jellymap_dev/sm-lab/datasets
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/data
+        target: /home/arclunar/jellymap_dev/data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/jellymap
+        target: /home/arclunar/jellymap_dev/jellymap
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
         target: /opt/daaam_ws/src
@@ -79,6 +96,8 @@ services:
     tty: true
     gpus: all
     environment:
+      JELLYMAP_ROOT: /home/arclunar/jellymap_dev
+      PYTHONPATH: /home/arclunar/jellymap_dev/jellymap
       DISPLAY: "${DISPLAY:-:0}"
       QT_X11_NO_MITSHM: "1"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
@@ -123,11 +142,26 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/sm-lab/datasets
+        target: /home/arclunar/jellymap_dev/sm-lab/datasets
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/data
+        target: /home/arclunar/jellymap_dev/data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/jellymap
+        target: /home/arclunar/jellymap_dev/jellymap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: ${DAAAM_SRC_DIR:?Set DAAAM_SRC_DIR to the complete WSL source directory}
         target: /opt/daaam_ws/src
         bind:
           create_host_path: false
-      - ${DAAAM_DATASETS_DIR:-/home/arclunar/jellymap_dev/datasets_ws/processed/tum}:/datasets
+      - ${DAAAM_DATASETS_DIR:-/home/arclunar/jellymap_dev/data/processed/tum}:/datasets
       - type: bind
         source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/reviewer_ws}
         target: /home/arclunar/jellymap_dev/reviewer_ws

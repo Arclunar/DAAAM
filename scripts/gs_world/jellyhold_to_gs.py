@@ -7,7 +7,15 @@ import shutil
 
 from . import rosbag_to_rgbd
 
-WORKSPACE = Path(__file__).resolve().parents[2]
+# Source execution also works before an editable jellymap installation.
+import sys as _sys
+for _parent in Path(__file__).resolve().parents:
+    if (_parent / "jellymap/jellymap/paths.py").is_file():
+        _sys.path.insert(0, str(_parent / "jellymap"))
+        break
+from jellymap.paths import workspace_root, data_root, runs_root, datasets_code_root, envs_root, third_party_root, algorithm_root
+
+WORKSPACE = data_root()
 DEFAULT_CALIB = WORKSPACE / "raw/jellyhold/calib_results/jellyhold_cali"
 
 
@@ -15,7 +23,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--caller-dir", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
     parser.add_argument("bag", type=Path, help="ROS1 .bag file, or a session directory containing exactly one .bag")
-    parser.add_argument("out", type=Path, nargs="?", help="default: datasets_ws/processed/jellyhold/<bag stem>")
+    parser.add_argument("out", type=Path, nargs="?", help="default: data/processed/jellyhold/<bag stem>")
     parser.add_argument("--calib", type=Path, default=DEFAULT_CALIB, help="directory containing camchain.yaml and chain.yaml")
     parser.add_argument("--pose-topic", default="/lidar_slam/odom", help="FAST-LIO poses of Livox IMU; imu_propagate can be selected explicitly")
     parser.add_argument("--time-offset", type=float, default=0.0, help="seconds added to RGB header time for pose lookup; calibration time shifts are not guessed")
