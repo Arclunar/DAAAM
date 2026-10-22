@@ -27,6 +27,16 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
+        source: ${REPLAY_CANONICAL_DIR:-/home/arclunar/jellymap_dev/sm-lab/viewers/replay}
+        target: /home/arclunar/jellymap_dev/sm-lab/viewers/replay
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RUNS_DIR:-/home/arclunar/jellymap_dev/runs}
+        target: /home/arclunar/jellymap_dev/runs
+        bind:
+          create_host_path: false
+      - type: bind
         source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
         target: /home/arclunar/jellymap_dev/replay_ws
         bind:
@@ -91,6 +101,16 @@ services:
       CODA_ROOT_DIR: /data/CODa
     volumes:
       - daaam_workspace:/opt/daaam_ws
+      - type: bind
+        source: ${REPLAY_CANONICAL_DIR:-/home/arclunar/jellymap_dev/sm-lab/viewers/replay}
+        target: /home/arclunar/jellymap_dev/sm-lab/viewers/replay
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RUNS_DIR:-/home/arclunar/jellymap_dev/runs}
+        target: /home/arclunar/jellymap_dev/runs
+        bind:
+          create_host_path: false
       - type: bind
         source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
         target: /home/arclunar/jellymap_dev/replay_ws

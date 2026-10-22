@@ -54,12 +54,15 @@ from scripts.replay_web.paths import PathError
 from scripts.replay_web.runs import OpenRun, RunRegistry
 from scripts.replay_web.standalone import write_standalone
 
-from scripts.replay_web.locations import algorithm_root
+from scripts.replay_web.locations import algorithm_root, workspace_root
 
 REPO_ROOT = algorithm_root()
 _MODULE_ROOT = Path(__file__).resolve().parents[2]
-REPLAY_ROOT = (_MODULE_ROOT if (_MODULE_ROOT / "tools/replay.py").is_file()
+_CANONICAL_REPLAY = workspace_root() / "sm-lab/viewers/replay"
+REPLAY_ROOT = (_CANONICAL_REPLAY if (_CANONICAL_REPLAY / "tools/replay.py").is_file()
+               else _MODULE_ROOT if (_MODULE_ROOT / "tools/replay.py").is_file()
                else (REPO_ROOT / "scripts/replay.py").resolve().parents[1])
+RUNS_ROOT = workspace_root() / "runs"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOOPBACK_HOSTS = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1"}
 JSON_BODY_LIMIT = 64 * 1024
@@ -692,8 +695,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 	parser = argparse.ArgumentParser(description="Serve the DAAAM replay workspace (replay.html) on a loopback port")
 	parser.add_argument("--host", default="127.0.0.1", help="127.0.0.1 (default) or localhost; other addresses are refused")
 	parser.add_argument("--port", type=int, default=8765)
-	parser.add_argument("--output-root", default=str(REPLAY_ROOT / "results"), help="results listed by default (searched a few levels deep)")
-	parser.add_argument("--state-root", default=str(REPLAY_ROOT / ".state"), help="local service state (jobs, chat history, cache)")
+	parser.add_argument("--output-root", default=str(RUNS_ROOT), help="results listed by default (searched a few levels deep)")
+	parser.add_argument("--state-root", default=str(RUNS_ROOT / ".state"), help="local service state (jobs, chat history, cache)")
 	parser.add_argument("--scan-depth", type=int, default=4)
 	parser.add_argument("--graph-interval", type=float, default=2.0, help="seconds between looks at the scene graph files of the open results")
 	parser.add_argument("--max-jobs", type=int, default=1, help="processing jobs that may run at once (default 1: the others wait)")
