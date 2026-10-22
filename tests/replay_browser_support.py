@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/replay_ws/tests/replay_browser_support.py
+/home/arclunar/jellymap_dev/tests/tests/replay/replay_browser_support.py

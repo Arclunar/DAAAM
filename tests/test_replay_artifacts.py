@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/replay_ws/tests/test_replay_artifacts.py
+/home/arclunar/jellymap_dev/tests/tests/replay/test_replay_artifacts.py

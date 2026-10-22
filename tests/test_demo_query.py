@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/reviewer_ws/tests/daaam/test_demo_query.py
+/home/arclunar/jellymap_dev/tests/tests/daaam/test_demo_query.py

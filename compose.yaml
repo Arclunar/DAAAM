@@ -70,14 +70,14 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/reviewer_ws}
-        target: /home/arclunar/jellymap_dev/reviewer_ws
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/tests}
+        target: /home/arclunar/jellymap_dev/tests
         read_only: true
         bind:
           create_host_path: false
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /opt/daaam_ws/src/daaam
-    # 本地维护的测试实体统一在 reviewer_ws；原 tests 文件路径保留兼容链接。
+    # 本地维护的测试实体统一在 tests；原 tests 文件路径保留兼容链接。
 
   # 日常使用的服务：在 daaam 镜像之上追加了 rosdep 解析出的系统包（docker/apt-deps.txt）。
   # 工作区卷里编译好的产物依赖这些库，而在容器里用 rosdep 装的包会在 `run --rm` 之后丢失，
@@ -163,8 +163,8 @@ services:
           create_host_path: false
       - ${DAAAM_DATASETS_DIR:-/home/arclunar/jellymap_dev/data/processed/tum}:/datasets
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/reviewer_ws}
-        target: /home/arclunar/jellymap_dev/reviewer_ws
+        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/tests}
+        target: /home/arclunar/jellymap_dev/tests
         read_only: true
         bind:
           create_host_path: false
