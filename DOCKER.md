@@ -1,3 +1,5 @@
+> **2026-10-23 起 Dockerfile、compose.yaml、compose.override.yaml、.env.example 及其配套文件（apt-deps.txt、colcon_defaults.yaml、entrypoint.sh）不在本仓库，位于 JellyMap 根仓库的 `sm-lab/systems/daaam/docker/`。** 在本目录运行 `docker compose` 靠 `.env` 里的 `COMPOSE_FILE`（`setup.sh` 写入，`just daaam` 也会导出）；下文提到的 `docker/Dockerfile` 等路径请按此理解。
+
 # DAAAM Docker 开发环境
 
 ## 日常开发入口
