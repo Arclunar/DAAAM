@@ -70,9 +70,11 @@ JUDGE_PROMPT: str = (
 	"Reply with exactly one word: yes or no."
 )
 
-QUESTIONS_DIR: Path = ROOT_DIR / "data" / "oc-navqa" / "questions"
+# OC-NavQA inputs: DAAAM_NAVQA_DIR (holds oc-navqa/ and oc-navqa_data.csv); default data/ of this repository.
+NAVQA_DIR: Path = Path(os.environ.get("DAAAM_NAVQA_DIR") or ROOT_DIR / "data")
+QUESTIONS_DIR: Path = NAVQA_DIR / "oc-navqa" / "questions"
 QUESTION_FILE: str = "human_qa_fullseq_v2_seconds.json"
-CORRECTED_CSV: Path = ROOT_DIR / "data" / "oc-navqa_data.csv"
+CORRECTED_CSV: Path = NAVQA_DIR / "oc-navqa_data.csv"
 OUTPUT_DIR: Path = ROOT_DIR / "output" / "oc_navqa"
 
 RESPONSE_TYPES: Dict[str, type] = {

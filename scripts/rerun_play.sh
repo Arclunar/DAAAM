@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/replay_ws/tools/rerun_play.sh
+/home/arclunar/jellymap_dev/sm-lab/viewers/replay/tools/rerun_play.sh

@@ -143,9 +143,10 @@ step_export() {
     fresh+=(daaam-assets-hf.tar.zst)
   fi
 
-  if wanted sample && [ -d datasets/tum_fr1_desk ]; then
+  sample_root="${DAAAM_DATASETS_DIR:-${REPO}/datasets}"
+  if wanted sample && [ -d "${sample_root}/tum_fr1_desk" ]; then
     log "sample dataset -> ${out}/daaam-sample-tum_fr1_desk.tar.zst"
-    tar -C "${REPO}/datasets" -cf - tum_fr1_desk | pack "${out}/daaam-sample-tum_fr1_desk.tar.zst" 3
+    tar -C "${sample_root}" -cf - tum_fr1_desk | pack "${out}/daaam-sample-tum_fr1_desk.tar.zst" 3
     fresh+=(daaam-sample-tum_fr1_desk.tar.zst)
   fi
 

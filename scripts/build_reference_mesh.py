@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/datasets_ws/scripts/build_reference_mesh.py
+/home/arclunar/jellymap_dev/sm-lab/datasets/scripts/build_reference_mesh.py

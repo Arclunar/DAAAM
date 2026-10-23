@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import fcntl
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shlex
@@ -14,6 +15,11 @@ import uuid
 REPO = Path(__file__).resolve().parents[1]
 
 
+def output_root():
+    """Result root: DAAAM_OUTPUT_DIR (absolute; JellyMap uses runs/daaam), which compose mounts at output/ in the container."""
+    return REPO/(os.environ.get('DAAAM_OUTPUT_DIR') or 'output')
+
+
 def arguments(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--caller-dir', type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
@@ -22,6 +28,7 @@ def arguments(argv=None):
     p.add_argument('--target-fps', type=float, default=3.)
     p.add_argument('--depth-lb', type=float, default=.3)
     p.add_argument('--depth-ub', type=float, default=8.)
+    p.add_argument('--viztracer', action='store_true', help='record Python calls in the run directory (requires profile-install)')
     p.add_argument('--dry-run', action='store_true', help='validate and print command without launching Docker')
     a = p.parse_args(argv)
     path = a.dataset.expanduser()
@@ -115,19 +122,22 @@ def command(a):
         '-e', 'DEPTH_SCALE='+str(float(info['depth_scale'])), '-e', 'REFERENCE_MESH=off',
         '-e', 'DEPTH_LB='+str(a.depth_lb), '-e', 'DEPTH_UB='+str(a.depth_ub),
         'daaam-ws', 'bash', 'scripts/run_replay.sh', a.frames, str(a.target_fps)]
+    if a.viztracer:
+        cmd[cmd.index('daaam-ws'):cmd.index('daaam-ws')] = ['-e', 'VIZTRACER=1']
     return cmd, name
 
 
 def main(argv=None):
     a = arguments(argv)
     cmd, name = command(a)
-    result = REPO/'output'/name
+    out = output_root()
+    result = out/name
     print('DAAAM results: '+str(result), flush=True)
     print(shlex.join(cmd), flush=True)
     if a.dry_run:
         return 0
     result.parent.mkdir(parents=True, exist_ok=True)
-    with (REPO/'output/.rgbd-run.lock').open('a') as lock:
+    with (out/'.rgbd-run.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

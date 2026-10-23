@@ -1,1 +1,1 @@
-/home/arclunar/jellymap_dev/datasets_ws/scripts/download_coda_subset.py
+/home/arclunar/jellymap_dev/sm-lab/datasets/scripts/download_coda_subset.py

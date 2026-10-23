@@ -21,6 +21,7 @@ services:
     gpus: all
     environment:
       JELLYMAP_ROOT: /home/arclunar/jellymap_dev
+      DAAAM_NAVQA_DIR: "${DAAAM_NAVQA_DIR:-}"
       PYTHONPATH: /home/arclunar/jellymap_dev/jellymap
       DISPLAY: "${DISPLAY:-:0}"
       QT_X11_NO_MITSHM: "1"
@@ -36,17 +37,6 @@ services:
       - type: bind
         source: ${RUNS_DIR:-/home/arclunar/jellymap_dev/runs}
         target: /home/arclunar/jellymap_dev/runs
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
-        target: /home/arclunar/jellymap_dev/replay_ws
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${DATASETS_WS_DIR:-/home/arclunar/jellymap_dev/datasets_ws}
-        target: /home/arclunar/jellymap_dev/datasets_ws
-        read_only: true
         bind:
           create_host_path: false
       - type: bind
@@ -75,6 +65,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # 结果目录：DAAAM_OUTPUT_DIR（JellyMap 为 runs/daaam）挂到容器里的 output/；不设时就是仓库内的 output/
+      - type: bind
+        source: ${DAAAM_OUTPUT_DIR:-./output}
+        target: /opt/daaam_ws/src/daaam/output
+        bind:
+          create_host_path: true
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /opt/daaam_ws/src/daaam
     # 本地维护的测试实体统一在 tests；原 tests 文件路径保留兼容链接。
@@ -97,6 +93,7 @@ services:
     gpus: all
     environment:
       JELLYMAP_ROOT: /home/arclunar/jellymap_dev
+      DAAAM_NAVQA_DIR: "${DAAAM_NAVQA_DIR:-}"
       PYTHONPATH: /home/arclunar/jellymap_dev/jellymap
       DISPLAY: "${DISPLAY:-:0}"
       QT_X11_NO_MITSHM: "1"
@@ -131,17 +128,6 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${REPLAY_WS_DIR:-/home/arclunar/jellymap_dev/replay_ws}
-        target: /home/arclunar/jellymap_dev/replay_ws
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${DATASETS_WS_DIR:-/home/arclunar/jellymap_dev/datasets_ws}
-        target: /home/arclunar/jellymap_dev/datasets_ws
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
         source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/sm-lab/datasets
         target: /home/arclunar/jellymap_dev/sm-lab/datasets
         read_only: true
@@ -171,6 +157,12 @@ services:
       # CODa 数据集、FoundationStereo 和 bag 放在宿主机目录里（本机在 .env 里设成 /mnt/e/daaam-data，
       # 即 E:\daaam-data）：WSL 和 Windows 里直接能看，不占 C: 盘上的 WSL 虚拟磁盘，容器里是 /data
       - ${DAAAM_DATA_DIR:-./datasets}:/data
+      # 结果目录：DAAAM_OUTPUT_DIR（JellyMap 为 runs/daaam）挂到容器里的 output/；不设时就是仓库内的 output/
+      - type: bind
+        source: ${DAAAM_OUTPUT_DIR:-./output}
+        target: /opt/daaam_ws/src/daaam/output
+        bind:
+          create_host_path: true
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /opt/daaam_ws/src/daaam
 

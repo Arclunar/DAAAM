@@ -2,6 +2,9 @@ export PATH := parent_directory(just_executable()) + ":" + env_var("PATH")
 # DAAAM 算法运行、数据准备与结果查看。
 set dotenv-load := true
 proxy := env_var_or_default("HTTPS_PROXY", "")
+# 结果目录与 JellyMap 工作区（可选，见 .env.example）：不设时结果在仓库内 output/，scripts/gs_world 用仓库里的副本
+output_dir := env_var_or_default("DAAAM_OUTPUT_DIR", "output")
+gs_world_dir := if env_var_or_default("JELLYMAP_ROOT", "") == "" { "scripts/gs_world" } else { env_var("JELLYMAP_ROOT") / "sm-lab/datasets/scripts/gs_world" }
 
 default:
     @{{just_executable()}} --list
@@ -74,7 +77,7 @@ mesh dsg="":
 
 # ── Habitat 实时建图:在模拟器里用键盘走动,DAAAM 同时建图,RViz 里看场景图长出来(按键、实测和限制见 README.md)──
 # 分步启动(两个终端,按顺序):1. `just habitat-bridge`(Habitat 窗口,先点一下它再按键)→ 2. `just habitat-mapper`(建图 + RViz);一条命令全开:`just habitat-live`
-# 用 ~/jellymap_dev/habitat_ws 里已有的 habitat-sim 环境和 ReplicaCAD 场景(只读);位置不同就设 HABITAT_PYTHON / HABITAT_DATA
+# 用 ~/jellymap_dev/sm-lab/sim/habitat 里已有的 habitat-sim 环境和 ReplicaCAD 场景(只读);位置不同就设 HABITAT_PYTHON / HABITAT_DATA
 
 # 第 1 步:Habitat 窗口和帧服务(W/S/A/D 走,方向键或 Q/E 转,Shift 加速,R 回起点,P 自动走,Esc 退出);后面可加 bridge.py 的参数
 habitat-bridge *args:
@@ -132,7 +135,7 @@ coda-ask question run: _coda-guard
 
 # 在浏览器版 Rerun 里看一个做完 `coda-summarize` 的结果(保持运行,Ctrl+C 停止);run 是 output/coda 下的目录名
 coda-view run:
-    @{{ just_executable() }} rerun-web output/coda/{{ run }}/clustered_dsg_with_summaries.json
+    @{{ just_executable() }} rerun-web {{ output_dir }}/coda/{{ run }}/clustered_dsg_with_summaries.json
 
 
 # ── 3DGS 测试世界(gsplat,scripts/gs_world):把带位姿的 RGB-D 训练成 3D 高斯模型,再沿原轨迹或新轨迹渲染出 RGB-D 数据集给 DAAAM 建图;模型、渲染和 bag 转换结果在 $DAAAM_DATA_DIR/gs_world(容器里 /data/gs_world,本机 E:\daaam-data\gs_world),见 README.md ──
@@ -157,7 +160,7 @@ gs-bag bag *args:
 
 # 用 DAAAM 给 gs_world 数据集(渲染结果或转换后的 bag)建图,像 tum-run 一样生成 replay/ 回看数据包和 replay.rrd;frames 写 all 为全部帧;输出 output/gs_<数据集>_<轨迹>(name 可改)
 gs-daaam dataset frames="all" name="": _coda-guard
-    docker compose run --rm -T daaam-ws bash scripts/gs_world/run_daaam.sh {{ dataset }} {{ frames }} {{ name }}
+    docker compose run --rm -T daaam-ws bash {{ gs_world_dir }}/run_daaam.sh {{ dataset }} {{ frames }} {{ name }}
 
 # 比较同一世界坐标系里的几个 DAAAM 结果(第一个是参照,如真实帧的 output/tum_replay_fr1_room):物体 / 地点 / 房间数、0.3 m 内一一配上的物体比例和距离、配上的物体 DAM 描述的一致程度;runs 写 output/<名字> 或其中的 out_* 目录,可追加 --radius、--json
 gs-compare +runs:
