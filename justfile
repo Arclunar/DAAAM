@@ -26,7 +26,7 @@ exec container="":
 build *packages:
     python3 docker/dev.py build {{ quote(packages) }}
 
-# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay/ 回看数据包(用 just replay-web 打开)和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
+# 在 TUM 数据集上运行建图(不开 RViz、带 DAM,298 帧约 4 分钟),跑完生成 replay/ 回看数据包(用 just replay 打开)和可在 Rerun 播放的 replay.rrd；seq 选序列,输出在 output/tum_replay_<seq>
 tum-run frames="298" seq="fr1_desk":
     bash scripts/run_tum_replay.sh {{quote(frames)}} {{quote(seq)}}
 
@@ -37,13 +37,6 @@ tum-post seq="fr1_desk" *runs: _coda-guard
 # 同上,再用 OpenAI(gpt-5-nano,要 .env 里的 OPENAI_API_KEY)为 TUM 区域生成摘要
 tum-summarize seq="fr1_desk" *runs: _coda-guard
     docker compose run --rm -T -e RESULT_ROOT=output/tum_replay{{ if seq == "fr1_desk" { "" } else { "_" + seq } }} -e CLUSTER_PLACES_CONFIG=config/cluster_places_config_tum.yaml -e PLACES_LAYER=TRAVERSABILITY daaam-ws bash scripts/postprocess_coda.sh --summaries {{ runs }}
-
-# 回看工作区:在 WSL 里启动只监听本机(127.0.0.1)的服务,用浏览器打开打印的地址;页面列出 output/ 里的结果,也能输入任意
-# WSL 可见的结果目录(/home/…、/mnt/e/…、E:\…、\\wsl.localhost\…),多个结果用标签页切换;场景图文件一出现就自动换上,页面里的
-# Postprocess / Summarize / 全部运行 在 daaam-ws 容器里跑(需要 Docker);Ctrl+C 停止。见 README.md
-replay-web host="127.0.0.1" port="8765":
-    @echo "回看工作区: http://{{ host }}:{{ port }}/replay.html"
-    python3 -m scripts.replay_web.server --host {{ host }} --port {{ port }}
 
 # ── CODa 数据集(README.md 的流程):数据放在 $DAAAM_DATA_DIR/CODa(容器里是 /data/CODa),运行输出直接写在仓库的 output/ 里(output/coda、output/coda_run*);步骤和本机实测的结果见 README.md ──
 # 一次性准备:`just coda-download` → `just coda-depth`(要几个小时,可断点续传)

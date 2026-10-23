@@ -34,7 +34,7 @@
 #   * Replay bundle: the result written by this run (never an older one) gets RESULT/replay/, one snapshot of its final
 #     dsg.json placed in time by the bag's daaam_replay.json (scripts/make_coda_bag.sh writes it; dataset kind, sequence,
 #     first frame, frame count, frame rate and time origin are read from it, not from the bag's name). Open it with
-#     `just replay-web`. A bag recorded before the sidecar existed keeps its mapping result but exits with 3 and says how
+#     `just replay`. A bag recorded before the sidecar existed keeps its mapping result but exits with 3 and says how
 #     to record a new bag.
 set -eo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -131,7 +131,7 @@ EOF
     echo "Failed to finalize the replay bundle of ${result} (the mapping result is kept)" >&2
     return 3
   fi
-  echo "Replay bundle: ${result}/replay (open it with: just replay-web)"
+  echo "Replay bundle: ${result}/replay (open it with: just replay)"
 }
 
 run_marker="$(mktemp)"   # a result newer than this was written by this run

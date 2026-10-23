@@ -20,7 +20,7 @@ just build                # 增量编译整个 C++/ROS 工作区，仅扫描 src
 just build hydra_ros      # 增量编译指定包及其依赖，可传多个包
 just check                # 核对源码挂载、依赖卷、关键导入、GLPK 和 GPU 运算
 just tum-test             # 30 帧冒烟，生成回看数据
-just replay-web           # 打开回看服务
+just replay           # 打开回看服务
 ```
 
 源码修改在 WSL/容器之间立即可见，新进程才会重新加载 Python 代码；C++ 修改需编译。
@@ -169,7 +169,7 @@ docker compose run --rm -v /宿主机/数据路径:/datasets:ro daaam
 
 ## 回看工作区（宿主机上的本地服务）
 
-`just replay-web` 不在容器里运行：它是 WSL 宿主机上的 `python3 -m scripts.replay_web.server`，只用 Python 3.8
+回看服务由 JellyMap 根目录的 `just replay` 启动（本 fork 不再提供该命令）；它不在容器里运行：是 WSL 宿主机上的 Python 3.8
 标准库，只监听 `127.0.0.1`，这样任何 WSL 能看到的结果目录（包括 `/mnt/e/...`）都能打开，而不用把整个 WSL
 挂进容器。回看数据包本身（`replay/`）由容器里的 `scripts/replay.py finalize` 生成，`just tum-run`、`just tum-test`
 和 `just coda-run` 会自动调用它。服务的本地状态放在仓库的 `.replay-web/`（已被 git 忽略），停掉服务后可以直接删除。
