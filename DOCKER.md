@@ -1,0 +1,209 @@
+# DAAAM Docker 开发环境
+
+## 日常开发入口
+
+所有源码都在 WSL 普通目录 `~/warmoon_ws/daaam_ws/src/`：`daaam`、`daaam_ros`、
+`hydra`、`hydra_ros` 等仓库可一起打开、编辑和搜索。Windows 可打开
+`\\wsl.localhost\Ubuntu-20.04\home\arclunar\warmoon_ws\daaam_ws\src`。
+主仓库现在是其中的 `daaam/`；本机原 `~/warmoon_ws/DAAAM` 是同目录的 bind 挂载兼容入口，
+保留 Windows 程序将它作为工作目录的能力，配置记录在 `/etc/fstab` 中。
+
+在主仓库内使用：
+
+```bash
+just run                  # 新开已加载 ROS、venv 和工作区的容器终端
+just exec                 # 进入本项目唯一一个运行中的 daaam-ws 容器
+just exec <container-id>  # 同项目多个容器运行时显式选择
+just build                # 增量编译整个 C++/ROS 工作区，仅扫描 src
+just build hydra_ros      # 增量编译指定包及其依赖，可传多个包
+just check                # 核对源码挂载、依赖卷、关键导入、GLPK 和 GPU 运算
+just tum-test             # 30 帧冒烟，生成回看数据
+just replay-web           # 打开回看服务
+```
+
+源码修改在 WSL/容器之间立即可见，新进程才会重新加载 Python 代码；C++ 修改需编译。
+改变 Hydra/Spark-DSG 的 Python 绑定 C++ 源码后，在 `just run` 的容器中执行
+`bash docker/setup_workspace.sh pip-ws` 重建绑定。裸 `just` 保持实时预览。
+
+`.env` 必须设置 `DAAAM_SRC_DIR` 为完整 src 绝对路径；示例见 `.env.example`。
+Compose 直接使用现有命名卷 `WORKSPACE_VOLUME`（默认 `daaam_daaam_workspace`），
+保留 `.venv`、`build`、`install` 和 `cache`。两个服务把整个 WSL src 挂载到
+`/opt/daaam_ws/src`，不再另外挂载单个主仓库。新增源码仓库也立即可见。
+路径缺失会报错，不会自动建立空源码目录。首次在全新机器使用开发环境时，先创建
+`docker volume create daaam_daaam_workspace`，按 `.env.example` 配置源码目录，
+把主仓库放在该目录的 `daaam/` 下再运行安装步骤。
+
+旧卷内 src 是切换前快照，已不用于开发，不编辑或清理它来“同步”代码。
+镜像打包脚本会从当前 Compose 指定的 WSL src 取源码，不再打包旧卷 src。
+
+该镜像只准备 DAAAM 所需的基础环境：Ubuntu 24.04、CUDA 12.8、cuDNN、
+ROS 2 Jazzy、Python 虚拟环境、C/C++ 构建工具和系统库。它不会复制、拉取、
+安装或编译 DAAAM 及其工作区依赖，也不会执行 `requirements.txt`。
+
+## 宿主机要求
+
+- Linux 和 NVIDIA GPU 驱动（宿主机不需要安装 CUDA Toolkit）
+- Docker、Docker Compose v2 和 NVIDIA Container Toolkit
+- 建议至少 24 GB GPU 显存；显存较小时需使用较小模型或输入尺寸
+
+## 构建
+
+在仓库根目录执行：
+
+```bash
+USER_UID=$(id -u) USER_GID=$(id -g) docker compose build
+```
+
+首次构建会下载 CUDA 基础镜像、ROS 2 和系统开发包。镜像本身不含项目
+Python 依赖和其他工作区源码，所以项目代码变动不会触发镜像重建。
+默认使用 USTC 的 Ubuntu、ROS 2 和 rosdep 镜像以改善国内网络下的构建速度。
+如果需要官方源，可显式覆盖：
+
+```bash
+UBUNTU_MIRROR=http://archive.ubuntu.com/ubuntu \
+UBUNTU_SECURITY_MIRROR=http://security.ubuntu.com/ubuntu \
+ROS_MIRROR=https://packages.ros.org/ros2/ubuntu \
+ROSDISTRO_INDEX_URL=https://raw.githubusercontent.com/ros/rosdistro/master/index-v4.yaml \
+USER_UID=$(id -u) USER_GID=$(id -g) docker compose build
+```
+
+## 进入环境
+
+```bash
+docker compose run --rm daaam-ws
+```
+
+完整 WSL 源码目录挂载到 `/opt/daaam_ws/src`，主仓库出现在其中的 `daaam`，并作为默认工作目录。入口脚本会
+自动加载 ROS 2、`/opt/daaam_ws/.venv`，以及存在时的 colcon 安装空间。
+
+`daaam_workspace` 命名卷保存虚拟环境、`build/`、`install/`
+和 `log/`。因此即使使用 `--rm`，你之后手动完成的项目安装和编译仍会保留。
+全部仓库源码则绑定到宿主机，容器内的源码修改会立即反映到宿主机。
+
+## 手动安装项目
+
+进入容器后，由你按项目文档执行安装。例如完整安装入口是：
+
+```bash
+bash docker/setup_workspace.sh
+```
+
+该脚本包含既有依赖兼容处理，按阶段导入仓库、运行 rosdep 和 colcon，并安装 Python 依赖。
+`daaam-ws` 已把公开仓库地址转为 HTTPS，不需要 SSH 密钥。若自行手动导入且希望使用 SSH，
+需先在宿主机启动 SSH agent 并加载
+密钥：
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_rsa    # 换成你自己的私钥路径
+```
+
+agent 与当前终端会话绑定，新开的终端需重新执行上面的命令。之后
+`$SSH_AUTH_SOCK` 会指向 agent 的 socket；若该变量为空，下面的挂载会报
+`invalid mount path` 错误。然后可用下面的命令进入容器并转发 agent：
+
+```bash
+docker compose run --rm \
+  -e SSH_AUTH_SOCK="$SSH_AUTH_SOCK" \
+  -v "$SSH_AUTH_SOCK:$SSH_AUTH_SOCK" \
+  daaam
+```
+
+首次连接 GitHub 时会询问 host key 是否可信，直接回答 `yes` 即可。
+
+也可以自行把清单中的地址换成 HTTPS。上述项目安装步骤特意没有放进
+Dockerfile。
+
+## 自动化安装与跨服务器部署
+
+除了 `install/install.sh`，仓库还带了一套可断点续跑的自动化安装，以及把安装结果搬到
+其他服务器的打包流程：
+
+- `daaam-ws` 服务（`docker/Dockerfile.deps`）：在开发镜像之上固化 rosdep 解析出的系统包。
+  工作区卷里编译好的产物依赖这些库，而在 `run --rm` 容器里用 rosdep 装的包会随容器消失。
+- `docker/setup_workspace.sh`：导入仓库（HTTPS，不需要 SSH 密钥）、编译 C++ 工作区、
+  安装 Python 依赖（含 `install.sh` 漏装的 `hydra_python`）并做导入自检：
+
+```bash
+docker compose build daaam-ws
+docker compose run --rm -T daaam-ws bash docker/setup_workspace.sh
+docker compose run --rm -T daaam-ws python scripts/download_models.py
+```
+
+- `docker/build_full_image.sh` 与 `docker/deploy/`：把装好的环境打成自包含镜像和部署包，
+  在另一台服务器上一键部署，不需要重新编译或下载。详见 [DEPLOY.md](DEPLOY.md)。
+
+## 环境检查
+
+镜像构建完成后执行：
+
+```bash
+./docker/check.sh
+```
+
+检查脚本只验证 GPU、ROS 2、colcon、Python、CMake、虚拟环境和挂载目录，
+不会要求 DAAAM 已经安装。
+
+## GUI、ROS 2 网络与数据
+
+Compose 使用 host 网络方便 DDS 发现，并挂载 X11 socket。需要 GUI 时可在
+宿主机执行：
+
+```bash
+xhost +si:localuser:$(id -un)
+```
+
+使用其他 ROS domain：
+
+```bash
+ROS_DOMAIN_ID=42 docker compose run --rm daaam
+```
+
+大型数据集建议按需额外挂载，避免复制进仓库或镜像：
+
+```bash
+docker compose run --rm -v /宿主机/数据路径:/datasets:ro daaam
+```
+
+## 回看工作区（宿主机上的本地服务）
+
+`just replay-web` 不在容器里运行：它是 WSL 宿主机上的 `python3 -m scripts.replay_web.server`，只用 Python 3.8
+标准库，只监听 `127.0.0.1`，这样任何 WSL 能看到的结果目录（包括 `/mnt/e/...`）都能打开，而不用把整个 WSL
+挂进容器。回看数据包本身（`replay/`）由容器里的 `scripts/replay.py finalize` 生成，`just tum-run`、`just tum-test`
+和 `just coda-run` 会自动调用它。服务的本地状态放在仓库的 `.replay-web/`（已被 git 忽略），停掉服务后可以直接删除。
+用法见 [USAGE.md](USAGE.md) 9.0.1 节。
+
+页面里的 Postprocess / Summarize 任务是服务在宿主机上启动的 `docker compose run`：容器名 `daaam-replay-job-<编号>`，只把打开的那一个
+结果目录挂到 `/selected-result`，命令是固定的 `bash scripts/postprocess_coda.sh --atomic --stage …`。取消或服务停止时服务会
+`docker stop` 这个容器。如果服务被强行杀掉（`kill -9`、断电），下次启动会把没做完的任务记录改成"已中断"并按名字停掉可能还在跑的
+容器；也可以手动检查和清理：
+
+```bash
+docker ps --filter name=daaam-replay-job-     # 还有没有任务容器
+docker stop daaam-replay-job-<编号>            # 脚本会先清掉自己的临时文件
+ls -a output/…/out_…/ | grep replay-job         # 强杀后可能留下的 .replay-job-* 临时文件，可以直接删除
+```
+
+页面里的问答由一个共享的 Agent worker 回答：服务在宿主机上启动 `docker compose run --rm -T --name daaam-replay-agent -e REPLAY_AGENT_MODELS=… daaam-ws python -m scripts.replay_web.agent_worker`，
+第一次提问时才启动，所有标签页和结果共用这一个容器（模型只加载一次）。它只读服务放在 `.replay-web/cache/` 里的场景图快照，没有 shell 或文件读取入口，
+API key 由容器自己从仓库的 `.env` 读（或由服务按变量名从它的环境里复制，值不出现在命令行上）。空闲 15 分钟（`--agent-idle-seconds`）、
+启动页面里的后处理任务、或服务停止时它会退出；服务被强行杀掉时它在标准输入关闭后自己退出。容器名固定，启动前服务会先 `docker rm -f` 同名的残留容器，
+所以同一台机器上只开一个回看服务（第二个会把第一个的 worker 当残留删掉）。页面里的任务不把它算作另一条管线（启动任务时服务先让空闲的 worker 退出），
+而 `just tum-post`、`coda-run` 等经过 `_coda-guard` 的命令行重活会把在跑的 worker 当作"问答的容器"，拒绝启动直到它退出。可以手动检查和清理：
+
+```bash
+docker ps --filter name=daaam-replay-agent     # worker 还在不在
+docker stop daaam-replay-agent                 # 手动停掉（下一个问题会重新启动它）
+```
+
+## 清理
+
+普通的 `docker compose down` 不会删除工作区。只有确定不再需要容器内手动
+安装的依赖和编译结果时，才执行以下命令：
+
+```bash
+docker compose down --volumes
+```
+
+该命令会删除 `daaam_workspace` 卷，其中的虚拟环境、依赖源码和编译结果无法
+从容器恢复；绑定挂载的当前 DAAAM 仓库不会被删除。
