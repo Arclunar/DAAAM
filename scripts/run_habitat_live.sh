@@ -116,7 +116,7 @@ RECORDING="output/${NAME}/.replay-recording"
 if [ "${REPLAY}" = 1 ]; then
   rm -rf "${RECORDING}"
   mkdir -p "${RECORDING}"
-  python scripts/replay.py record --zmq-url "${ZMQ_URL}" --out "${RECORDING}" --every "${REPLAY_EVERY}" &
+  python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" record --zmq-url "${ZMQ_URL}" --out "${RECORDING}" --every "${REPLAY_EVERY}" &
   recorder=$!
   pids+=("${recorder}")
   sleep 2  # the recorder subscribes to the publisher that the pipeline creates
@@ -146,11 +146,11 @@ if [ -n "${recorder}" ]; then
   recorder_rc=0
   wait "${recorder}" || recorder_rc=$?  # writes the final snapshot on SIGTERM
   if [ -n "${latest}" ] && [ -d "${SESSION}/rgb" ]; then
-    if python scripts/replay.py finalize "${RECORDING}" \
+    if python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" finalize "${RECORDING}" \
         --run "${latest}" --dataset-kind tum --sequence "${NAME}" \
         --title "${NAME} / $(basename "${latest}")" \
         --dataset "${SESSION}" --fps "${FPS}" --out "${latest}/replay" \
-      && python scripts/replay.py rrd "${RECORDING}" --run "${latest}" --fps "${FPS}" --out "${latest}/replay.rrd"; then
+      && python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" rrd "${RECORDING}" --run "${latest}" --fps "${FPS}" --out "${latest}/replay.rrd"; then
       echo "Replay bundle: ${latest}/replay (open it with: just replay-web)"
       echo "Rerun recording: ${latest}/replay.rrd"
       [ "${recorder_rc}" -ne 0 ] || rm -rf "${RECORDING}"
@@ -168,7 +168,7 @@ if [ -n "${latest}" ]; then
     # Revisit the final native place geometry with the saved frames of the session (as run_tum_example.sh does)
     python scripts/lift_native_places.py --run "${latest}" --dataset "${SESSION}" || rc=$?
   fi
-  python scripts/summarize_run.py "${latest}" --max-objects 10 || true
+  python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/summarize_run.py" "${latest}" --max-objects 10 || true
   [ ! -d "${SESSION}" ] || echo "Recorded session: ${SESSION} (map it again offline: DATASET=/data... see README.md)"
 fi
 

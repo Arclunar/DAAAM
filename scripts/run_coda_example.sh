@@ -125,7 +125,7 @@ EOF
     return 3
   fi
   read -r kind seq start count fps origin <<< "${fields}"
-  if ! python scripts/replay.py finalize --graph "${result}/dsg.json" --run "${result}" --dataset-kind "${kind}" --sequence "${seq}" \
+  if ! python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" finalize --graph "${result}/dsg.json" --run "${result}" --dataset-kind "${kind}" --sequence "${seq}" \
       --dataset "${CODA_ROOT_DIR}" --fps "${fps}" --time-origin "${origin}" --start-frame "${start}" --frame-count "${count}" \
       --title "CODa ${seq} / $(basename "${result}")" --out "${result}/replay"; then
     echo "Failed to finalize the replay bundle of ${result} (the mapping result is kept)" >&2

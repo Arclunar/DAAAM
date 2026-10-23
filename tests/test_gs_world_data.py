@@ -1,1 +1,0 @@
-/home/arclunar/jellymap_dev/tests/tests/datasets/test_gs_world_data.py

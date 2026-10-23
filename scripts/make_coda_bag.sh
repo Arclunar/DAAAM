@@ -1,1 +1,0 @@
-/home/arclunar/jellymap_dev/sm-lab/datasets/scripts/make_coda_bag.sh

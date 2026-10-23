@@ -11,7 +11,7 @@
 # scripts/run_tum_example.sh). The arguments and the environment overrides are those of scripts/run_tum_example.sh.
 # Environment: ZMQ_URL (default tcp://127.0.0.1:8001), REPLAY_EVERY (keep every n-th scene graph, default 5; about one is
 # published per frame), REPLAY_KEEP=1 (keep the raw recording in output/<NAME>/.replay-recording, to finalize the bundle
-# again with `python scripts/replay.py finalize`).
+# again with `python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" finalize`).
 #
 # 1 cm reference mesh: after the mapping run (so it costs the run no speed) the bundle gets a static Open3D TSDF mesh of the
 # whole dataset (scripts/build_reference_mesh.py; cached in <DATASET>/.daaam/reference_mesh/, built once, reused by every later
@@ -40,7 +40,7 @@ ulimit -c 0
 RECORDING="output/${NAME}/.replay-recording"
 rm -rf "${RECORDING}"
 mkdir -p "${RECORDING}"
-python scripts/replay.py record --zmq-url "${ZMQ_URL}" --out "${RECORDING}" --every "${REPLAY_EVERY}" &
+python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" record --zmq-url "${ZMQ_URL}" --out "${RECORDING}" --every "${REPLAY_EVERY}" &
 recorder=$!
 run_marker="$(mktemp)"
 trap 'kill "${recorder}" 2>/dev/null || true; rm -f "${run_marker}"' EXIT
@@ -72,7 +72,7 @@ if [ -n "${run_dir}" ]; then
     [ -z "${REFERENCE_MESH_CACHE:-}" ] || build_args+=(--cache-dir "${REFERENCE_MESH_CACHE}")
     [ "${REFERENCE_MESH}" != rebuild ] || build_args+=(--force)
     # the builder prints only the path of the cache on stdout (progress and warnings go to stderr)
-    if reference_path="$(python scripts/build_reference_mesh.py "${build_args[@]}")" && [ -n "${reference_path}" ]; then
+    if reference_path="$(python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/datasets/scripts/build_reference_mesh.py" "${build_args[@]}")" && [ -n "${reference_path}" ]; then
       reference_args=(--reference-mesh "${reference_path}")
     elif [ "${REFERENCE_MESH}" = rebuild ]; then
       echo "REFERENCE_MESH=rebuild: the 1 cm reference mesh could not be built" >&2
@@ -81,11 +81,11 @@ if [ -n "${run_dir}" ]; then
       echo "1 cm reference mesh unavailable; finalizing the dynamic-only replay (REFERENCE_MESH=off silences this)" >&2
     fi
   fi
-  if python scripts/replay.py finalize "${RECORDING}" \
+  if python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" finalize "${RECORDING}" \
       --run "${run_dir}" --dataset-kind tum --sequence "${SEQ}" \
       --title "${NAME} / $(basename "${run_dir}")" \
       "${dataset_args[@]}" "${reference_args[@]}" --out "${run_dir}/replay" \
-    && python scripts/replay.py rrd "${RECORDING}" --run "${run_dir}" --fps "${FPS}" --out "${run_dir}/replay.rrd"; then
+    && python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/replay.py" rrd "${RECORDING}" --run "${run_dir}" --fps "${FPS}" --out "${run_dir}/replay.rrd"; then
     echo "Result: ${run_dir}"
     echo "Replay bundle: ${run_dir}/replay (open it with: just replay-web)"
     echo "Rerun recording: ${run_dir}/replay.rrd"

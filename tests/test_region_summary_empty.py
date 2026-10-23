@@ -1,1 +1,0 @@
-/home/arclunar/jellymap_dev/tests/tests/daaam/test_region_summary_empty.py

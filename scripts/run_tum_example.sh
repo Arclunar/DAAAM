@@ -118,6 +118,6 @@ if [ -n "${latest}" ]; then
     # observations, after asynchronous DAM descriptions have been persisted.
     python scripts/lift_native_places.py --run "${latest}" --dataset "${DATASET}" || rc=$?
   fi
-  python scripts/summarize_run.py "${latest}" --max-objects 10 || true
+  python "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/viewers/replay/tools/summarize_run.py" "${latest}" --max-objects 10 || true
 fi
 exit "${rc}"

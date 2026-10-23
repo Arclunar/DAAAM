@@ -1,1 +1,0 @@
-/home/arclunar/jellymap_dev/tests/tests/daaam/test_cluster_places_adapter.py

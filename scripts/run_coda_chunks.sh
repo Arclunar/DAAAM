@@ -66,7 +66,7 @@ for ((k = 1; k <= N; k++)); do
   bag="$(newest_complete_bag "${name}")"
   if [ -z "${bag}" ]; then
     echo "=== chunk ${k}/${N}: recording the bag of frames ${first}..$((first + length - 1)) (log: ${out}/bag.log)"
-    bash scripts/make_coda_bag.sh "${first}" "${length}" "${name}" > "${out}/bag.log" 2>&1
+    bash "${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set}/sm-lab/datasets/scripts/make_coda_bag.sh" "${first}" "${length}" "${name}" > "${out}/bag.log" 2>&1
     bag="$(newest_complete_bag "${name}")"
   fi
   if [ -z "${bag}" ]; then
