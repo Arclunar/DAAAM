@@ -30,27 +30,27 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
-        source: ${REPLAY_CANONICAL_DIR:-/home/arclunar/jellymap_dev/sm-lab/viewers/replay}
+        source: ${REPLAY_CANONICAL_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/sm-lab/viewers/replay}
         target: /home/arclunar/jellymap_dev/sm-lab/viewers/replay
         bind:
           create_host_path: false
       - type: bind
-        source: ${RUNS_DIR:-/home/arclunar/jellymap_dev/runs}
+        source: ${RUNS_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/runs}
         target: /home/arclunar/jellymap_dev/runs
         bind:
           create_host_path: false
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/sm-lab/datasets
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/sm-lab/datasets
         target: /home/arclunar/jellymap_dev/sm-lab/datasets
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/data
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/data
         target: /home/arclunar/jellymap_dev/data
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/jellymap
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/jellymap
         target: /home/arclunar/jellymap_dev/jellymap
         read_only: true
         bind: {create_host_path: false}
@@ -60,7 +60,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/tests}
+        source: ${REVIEWER_WS_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/tests}
         target: /home/arclunar/jellymap_dev/tests
         read_only: true
         bind:
@@ -118,27 +118,27 @@ services:
     volumes:
       - daaam_workspace:/opt/daaam_ws
       - type: bind
-        source: ${REPLAY_CANONICAL_DIR:-/home/arclunar/jellymap_dev/sm-lab/viewers/replay}
+        source: ${REPLAY_CANONICAL_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/sm-lab/viewers/replay}
         target: /home/arclunar/jellymap_dev/sm-lab/viewers/replay
         bind:
           create_host_path: false
       - type: bind
-        source: ${RUNS_DIR:-/home/arclunar/jellymap_dev/runs}
+        source: ${RUNS_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/runs}
         target: /home/arclunar/jellymap_dev/runs
         bind:
           create_host_path: false
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/sm-lab/datasets
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/sm-lab/datasets
         target: /home/arclunar/jellymap_dev/sm-lab/datasets
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/data
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/data
         target: /home/arclunar/jellymap_dev/data
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ${JELLYMAP_ROOT:-/home/arclunar/jellymap_dev}/jellymap
+        source: ${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/jellymap
         target: /home/arclunar/jellymap_dev/jellymap
         read_only: true
         bind: {create_host_path: false}
@@ -147,9 +147,9 @@ services:
         target: /opt/daaam_ws/src
         bind:
           create_host_path: false
-      - ${DAAAM_DATASETS_DIR:-/home/arclunar/jellymap_dev/data/processed/tum}:/datasets
+      - ${DAAAM_DATASETS_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/data/processed/tum}:/datasets
       - type: bind
-        source: ${REVIEWER_WS_DIR:-/home/arclunar/jellymap_dev/tests}
+        source: ${REVIEWER_WS_DIR:-${JELLYMAP_ROOT:?JELLYMAP_ROOT is not set (just/run.sh and setup.sh set it; see .env.example)}/tests}
         target: /home/arclunar/jellymap_dev/tests
         read_only: true
         bind:
