@@ -1,6 +1,6 @@
 """Export a finalized result as one offline HTML. Standard library only, Python 3.8.
 
-Run in replay_ws: python3 -m scripts.replay_web.standalone RESULT OUTPUT.html
+Run in sm-lab/viewers/replay: python3 -m scripts.replay_web.standalone RESULT OUTPUT.html
 Only manifest-declared replay assets and the normalized active graph are shared.
 """
 import argparse

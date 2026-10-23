@@ -99,6 +99,7 @@ class ServerConfig:
 	agent_enabled: bool = True   # False: no question is accepted and no worker is ever started
 	agent_idle_seconds: Optional[float] = None   # the Agent worker ends after this long without a question (default: its own 15 minutes)
 	stage_root: Optional[Path] = None   # the repository root as the worker sees it, where graph snapshots are staged (default: repo_root; tests)
+	stage_cache: Optional[Path] = None   # staged snapshots, mounted into the worker (main: <state_root>/cache; default: <stage_root>/.replay-web/cache)
 	sse_heartbeat: float = 15.0   # an idle event stream sends a comment this often, which also reveals closed connections
 
 
@@ -146,9 +147,9 @@ class ReplayService:
 		self.jobs.on_finished = self._job_finished
 		models = config.agent_models or allowed_models()
 		self.agent = agent if agent is not None else AgentClient(
-			argv=default_argv(models, idle_seconds=config.agent_idle_seconds), models=models, repo_root=config.repo_root)
+			argv=default_argv(models, idle_seconds=config.agent_idle_seconds, cache_root=config.stage_cache), models=models, repo_root=config.repo_root)
 		self.chat = ChatManager(config.repo_root, config.state_root, self.registry, self.monitor, self.agent, models=models,
-			publish=self.broker.publish, enabled=config.agent_enabled, stage_root=config.stage_root)
+			publish=self.broker.publish, enabled=config.agent_enabled, stage_root=config.stage_root, stage_cache=config.stage_cache)
 
 	def _path_of_run(self, run_id: str) -> Optional[Path]:
 		try:
@@ -708,6 +709,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 	args = parser.parse_args(argv)
 	config = ServerConfig(
 		repo_root=REPO_ROOT, output_root=Path(args.output_root), state_root=Path(args.state_root),
+		stage_cache=Path(args.state_root) / "cache",
 		distro=os.environ.get("WSL_DISTRO_NAME", ""), host=args.host, port=args.port, scan_depth=args.scan_depth,
 		graph_interval=max(0.2, args.graph_interval), max_jobs=max(1, args.max_jobs),
 		agent_models=allowed_models({"REPLAY_AGENT_MODELS": args.agent_models}) if args.agent_models else None,

@@ -109,3 +109,34 @@ Nicolas Gorlo, Lukas Schmid, and Luca Carlone, "**Describe Anything, Anywhere, a
 > This work was supported by the ARL DCIST program and the ONR RAPID program.
 
 测试脚本保留在各自工作空间，justfile 仅提供运行入口。参考网格的可选 Open3D 依赖见 sm-lab/datasets/requirements-reference-mesh.txt。
+
+## VizTracer
+Python 工具安装在持久工作区卷的 /opt/daaam_ws/.venv；--rm 不会删除它，无需重建镜像。
+在 jellymap_dev 根目录运行：
+```bash
+just daaam profile-install
+just daaam profile ./data/processed/tum/tum_fr1_desk 30 --depth-ub 4.0
+# 等价于 just daaam run <Dataset> 30 --viztracer
+just daaam profile-view ./runs/daaam/<本次运行>/profile/<trace文件>.json
+```
+浏览器打开 http://localhost:9001；Ctrl+C 关闭查看器。Windows/WSL 宿主机无需安装 VizTracer。
+TUM 旧入口也可使用 VIZTRACER=1 just daaam tum-run 30 fr1_desk。
+默认记录建图主进程及其线程中 DAAAM Python 源码与 run_pipeline.py 的函数调用（不含导入初始化和独立 DAM/assignment 子进程），报告保存在每次运行的 profile/。
+这是 Python 调用时间线，不是 CUDA kernel 性能分析；长运行可能耗尽默认事件缓冲区，需检查 VizTracer 的溢出警告。
+普通 run 默认关闭记录。ROS/CODa 和 Habitat 实时入口尚未接入记录；GS 或 Habitat 导出的统一 RGB-D 可直接使用 profile。
+新环境安装脚本 pip-deps 会安装同一版本；镜像文件本身没有因此更新。
+
+### Perfetto 与 Pyinstrument
+```bash
+# 原有 JSON 使用本地 Perfetto 界面，不需要重跑算法。
+just daaam profile-view <trace.json> 9001
+# 独立运行采样分析；等价于 run <Dataset> 30 --pyinstrument。
+just daaam profile-sample ./data/processed/tum/tum_fr1_desk 30 --depth-ub 4.0
+# 新运行 profile/ 下有 pyinstrument_*.html/.txt/.json；打开 HTML，而非采样 JSON。
+just daaam profile-view <pyinstrument报告.html> 9002
+```
+JSON trace 的 profile-view 使用 VizTracer 自带 Perfetto；旧 VizTracer HTML 仍是旧式查看器。
+Pyinstrument HTML 是交互式调用树/时间线，TXT 为文本摘要，JSON 为采样数据（不是 Perfetto trace）。
+Pyinstrument 只采样启动它的主线程，包含等待时间；独立 Worker、其他线程和 CUDA kernel 不在覆盖范围。
+两个采集器互斥运行；都在 os._exit 前显式保存。现有 trace 不会因更换查看器增加 Worker 数据。
+打开浏览器中的 localhost 地址即可，无需在 Windows 或 WSL 宿主机再安装包。

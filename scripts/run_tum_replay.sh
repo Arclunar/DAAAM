@@ -9,7 +9,7 @@ marker=$(mktemp)
 trap 'rm -f -- "$marker"' EXIT
 rc=0
 docker compose run --rm -T -e "SEQ=$seq" -e "NAME=$name" -e REPLAY_EVERY=5 \
-  -e REFERENCE_MESH -e REFERENCE_MESH_CACHE -e VIZTRACER daaam-ws bash scripts/run_replay.sh "$frames" || rc=$?
+  -e REFERENCE_MESH -e REFERENCE_MESH_CACHE -e VIZTRACER -e PYINSTRUMENT daaam-ws bash scripts/run_replay.sh "$frames" || rc=$?
 out="${DAAAM_OUTPUT_DIR:-output}"   # results on the host; compose mounts it at output/ in the container
 result=$(find "$out/$name" -mindepth 1 -maxdepth 1 -type d -name 'out_*' -newer "$marker" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)
 if [ -n "$result" ]; then

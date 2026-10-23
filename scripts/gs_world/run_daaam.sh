@@ -10,7 +10,13 @@
 # dataset's frame rate comes from its camera_info.json. Other environment overrides are those of
 # scripts/run_tum_example.sh; REFERENCE_MESH defaults to off here (the 1 cm TSDF reference mesh is for real sensor data).
 set -eo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# The DAAAM checkout: DAAAM_REPO_DIR, else the container layout, else the repository holding this copy.
+repo="${DAAAM_REPO_DIR:-}"
+if [ -z "${repo}" ]; then
+  repo=/opt/daaam_ws/src/daaam
+  [ -f "${repo}/scripts/run_replay.sh" ] || repo="$(dirname "${BASH_SOURCE[0]}")/../.."
+fi
+cd "${repo}"
 
 DATASET="${1:?usage: run_daaam.sh DATASET [MAX_FRAMES] [NAME]}"
 MAX_FRAMES="${2:-all}"

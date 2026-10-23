@@ -24,3 +24,12 @@
 
 ## 2026-10-21 · 回放结果分享
 - codex/01a15c69-be2b-76d3-8599-6741d6110620/root：回看页面增加“导出独立 HTML”，完整资源打包后可离线浏览；入口与限制见 ../replay_ws/README.md。新增 8 项导出测试、回放宿主机与容器回归通过，实测 75/138 快照离线加载；验证详情见 warmoon_ws 根 CHANGELOG。
+
+
+## 2026-10-23 — DAAAM VizTracer
+- Agent: codex/01a16749-4c50-7f51-bf2d-27dc42addc15/root
+- 根/fork AGENTS.md 记录持久卷 Python 环境与 --rm；安装 VizTracer 1.1.1，无镜像重建。
+- fork 安装要求/安装脚本、justfile、run_rgbd.py、run_tum_example.sh、run_tum_replay.sh、run_pipeline.py 和 README 接入可选主进程追踪及退出前保存；根系统 README 与任务归档同步。
+- 验证：新 --rm 容器导入、布局/语法/diff、21 项 CLI/replay 测试通过；TUM 30 帧、8 快照、11514 trace 事件且无溢出，HTML 导出及 Windows HTTP 200。
+- 全量回归 1116 项、55 skipped，daaam_cli/phonegs/gs_view_portal 三个 suite 未通过；未宣称全绿。未验证全段语义质量和其他数据链路新实跑。
+- 证据：runs/reports/viztracer_01a16749/；任务 docs/completed/2026-10-23-daaam-viztracer-01a16749.md。

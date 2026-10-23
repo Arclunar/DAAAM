@@ -1,5 +1,5 @@
 """Locate the algorithm checkout while replay tools live in a sibling workspace."""
-import os
+import sys
 from pathlib import Path
 
 def workspace_root():
@@ -12,15 +12,9 @@ def workspace_root():
 
 
 def algorithm_root():
-    configured = os.environ.get("DAAAM_REPO_DIR")
-    if configured:
-        candidate = Path(configured)
-        if not (candidate / "compose.yaml").is_file():
-            raise RuntimeError("DAAAM_REPO_DIR must name the algorithm checkout")
-        return candidate
-    candidates = [Path.cwd(), Path("/opt/daaam_ws/src/daaam"),
-                  workspace_root() / "daaam_ws/src/daaam"]
-    for candidate in candidates:
-        if (candidate / "compose.yaml").is_file() and (candidate / "scripts/run_pipeline.py").is_file():
-            return candidate
-    raise RuntimeError("Cannot locate DAAAM; set DAAAM_REPO_DIR")
+    """Use the shared canonical host/container source lookup."""
+    package_root = str(workspace_root() / "jellymap")
+    if package_root not in sys.path:
+        sys.path.insert(0, package_root)
+    from jellymap.paths import algorithm_root as shared_algorithm_root
+    return shared_algorithm_root()

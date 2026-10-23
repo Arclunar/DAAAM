@@ -28,7 +28,9 @@ def arguments(argv=None):
     p.add_argument('--target-fps', type=float, default=3.)
     p.add_argument('--depth-lb', type=float, default=.3)
     p.add_argument('--depth-ub', type=float, default=8.)
-    p.add_argument('--viztracer', action='store_true', help='record Python calls in the run directory (requires profile-install)')
+    profiling = p.add_mutually_exclusive_group()
+    profiling.add_argument('--pyinstrument', action='store_true', help='sample main-thread calls and save an interactive HTML report')
+    profiling.add_argument('--viztracer', action='store_true', help='record Python calls in the run directory (requires profile-install)')
     p.add_argument('--dry-run', action='store_true', help='validate and print command without launching Docker')
     a = p.parse_args(argv)
     path = a.dataset.expanduser()
@@ -124,6 +126,8 @@ def command(a):
         'daaam-ws', 'bash', 'scripts/run_replay.sh', a.frames, str(a.target_fps)]
     if a.viztracer:
         cmd[cmd.index('daaam-ws'):cmd.index('daaam-ws')] = ['-e', 'VIZTRACER=1']
+    if a.pyinstrument:
+        cmd[cmd.index("daaam-ws"):cmd.index("daaam-ws")] = ["-e", "PYINSTRUMENT=1"]
     return cmd, name
 
 

@@ -65,6 +65,26 @@ if [ ! -f "${LABELS_BASE}.yaml" ]; then
   fi
 fi
 
+if [ "${VIZTRACER:-0}" = 1 ] && [ "${PYINSTRUMENT:-0}" = 1 ]; then
+  echo "Select one profiler per run: VIZTRACER or PYINSTRUMENT" >&2
+  exit 2
+fi
+if [ "${PYINSTRUMENT:-0}" = 1 ]; then
+  python -c 'import pyinstrument' || { echo "Run just daaam profile-install first" >&2; exit 1; }
+  mkdir -p "output/${NAME}/profile"
+  sample="output/${NAME}/profile/pyinstrument_$(date -u +%Y%m%dT%H%M%S)_$$.html"
+  export DAAAM_PYINSTRUMENT_OUTPUT="$PWD/${sample}"
+  echo "Pyinstrument report: ${sample}"
+fi
+
+# Opt-in profiling is applied to the actual mapping process, not the replay recorder.
+if [ "${VIZTRACER:-0}" = 1 ]; then
+  python -c 'import viztracer' || { echo "Run just daaam profile-install first" >&2; exit 1; }
+  mkdir -p "output/${NAME}/profile"
+  trace="output/${NAME}/profile/trace_$(date -u +%Y%m%dT%H%M%S)_$$.json"
+  export DAAAM_VIZTRACER_OUTPUT="$PWD/${trace}"
+  echo "VizTracer report: ${trace}"
+fi
 rc=0
 python scripts/run_pipeline.py "${DATASET}" \
   --config config/pipeline_config.yaml \
@@ -78,6 +98,16 @@ python scripts/run_pipeline.py "${DATASET}" \
   "${max_frames_args[@]}" --target-fps "${TARGET_FPS}" \
   --save-images --save-interval 30 --verbose \
   --config-overrides tracking.reid_weights=checkpoints/reid_weights/clip_general.pt ${EXTRA_OVERRIDES} || rc=$?
+
+if [ "${VIZTRACER:-0}" = 1 ] && [ ! -s "${trace}" ]; then
+  echo "VizTracer report was not saved: ${trace}" >&2
+  [ "${rc}" -ne 0 ] || rc=1
+fi
+
+if [ "${PYINSTRUMENT:-0}" = 1 ] && [ ! -s "${sample}" ]; then
+  echo "Pyinstrument report was not saved: ${sample}" >&2
+  [ "${rc}" -ne 0 ] || rc=1
+fi
 
 # the totals printed by run_pipeline.py do not match the saved files, so summarize those; the summary also warns
 # when the grounding worker (DAM) dropped out, which the pipeline itself does not treat as an error

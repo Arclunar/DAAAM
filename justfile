@@ -174,3 +174,21 @@ gs-view model="latest" *args: _coda-guard
 # 内部:已有别的管线 / 深度估计 / 后处理 / 问答 / 3DGS 训练、渲染或查看器的容器在跑就不启动(显存和 WSL 内存装不下两个)
 _coda-guard:
     @if docker ps --no-trunc --format '{{{{.Command}}' | grep -E 'run_coda_example|run_coda_chunks|postprocess_coda|run_foundation_stereo|run_replay|run_pipeline|run_tum_example|run_live_preview|run_habitat_live|demo_query|agent_worker|daaam_node|scripts.gs_world.train|scripts.gs_world.render|scripts.gs_world.view' > /dev/null; then echo "已经有 DAAAM 的管线、深度估计、后处理、问答或 3DGS 训练 / 渲染 / 查看器的容器在跑(docker ps 看):同时跑会 OOM,等它结束,或 docker stop 它(回看页面的问答 worker 叫 daaam-replay-agent,空闲 15 分钟会自己退出)" >&2; exit 1; fi
+
+# 安装到持久工作区 venv；--rm 不会删除该环境，无需重建镜像。
+profile-install:
+    docker compose run --rm -T --no-deps daaam-ws python -m pip install -r docker/requirements-profile.txt
+
+# 记录统一 RGB-D 建图 Python 调用；参数与 run 相同。
+[positional-arguments]
+profile dataset frames="30" *args:
+    python3 scripts/run_rgbd.py --caller-dir {{quote(env_var_or_default("WARMOON_CALLER_DIR", invocation_directory()))}} --viztracer "$@"
+
+# 容器内启动报告查看器，浏览器访问 http://localhost:9001；路径相对于调用目录。
+profile-view report port="9001":
+    @WARMOON_CALLER_DIR={{quote(env_var_or_default("WARMOON_CALLER_DIR", invocation_directory()))}} bash scripts/profile_view.sh {{quote(report)}} {{quote(port)}}
+
+# 主线程采样调用树：HTML/TXT/JSON，参数与 run 相同；不与 VizTracer 同时开启。
+[positional-arguments]
+profile-sample dataset frames="30" *args:
+    python3 scripts/run_rgbd.py --caller-dir {{quote(env_var_or_default("WARMOON_CALLER_DIR", invocation_directory()))}} --pyinstrument "$@"

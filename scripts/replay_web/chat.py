@@ -154,9 +154,10 @@ class ChatManager:
 
 	def __init__(self, repo_root: Path, state_root: Path, registry: Any, monitor: Any, agent: Any, *, models: Optional[Sequence[str]] = None,
 			environ: Optional[Mapping[str, str]] = None, publish: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
-			enabled: bool = True, stage_root: Optional[Path] = None):
+			enabled: bool = True, stage_root: Optional[Path] = None, stage_cache: Optional[Path] = None):
 		self.repo_root = Path(repo_root)   # where the API keys are looked for (.env)
 		self.stage_root = Path(stage_root) if stage_root is not None else self.repo_root   # the worker sees the repository at the same relative paths
+		self.stage_cache = Path(stage_cache) if stage_cache is not None else None   # default: <stage_root>/.replay-web/cache
 		self.history_root = Path(state_root) / "history"
 		self.registry = registry
 		self.monitor = monitor
@@ -294,7 +295,7 @@ class ChatManager:
 		active = self._active(run)
 		for attempt in (1, 2):
 			try:
-				graph_path = stage_file(self.stage_root, key, active.version.path, active.version.digest)
+				graph_path = stage_file(self.stage_root, key, active.version.path, active.version.digest, cache_root=self.stage_cache)
 				break
 			except StagingChanged:
 				if attempt == 2:
@@ -312,7 +313,7 @@ class ChatManager:
 			if data is not None:
 				digest = hashlib.sha256(data).hexdigest()
 				try:
-					background_path = stage_file(self.stage_root, key, source, digest, suffix=".background.yaml")
+					background_path = stage_file(self.stage_root, key, source, digest, suffix=".background.yaml", cache_root=self.stage_cache)
 				except StagingError as error:
 					raise ChatError(503, "the background objects could not be prepared for the worker (%s)" % error, "staging")
 				suffix = digest[:12]

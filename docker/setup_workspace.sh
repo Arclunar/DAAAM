@@ -179,6 +179,7 @@ step_pip_deps() {
 
   # requirements.txt 里有 3 个 git+https 依赖（boxmot / dam / perception_models）。pip 用
   # `git clone --filter=blob:none` 拉取它们，经当前代理会无限卡住；改成先浅克隆到本地再安装。
+  python -m pip install -r "${REPO}/docker/requirements-profile.txt"
   log "pip-deps: 浅克隆 git 依赖到 ${WS}/vendor"
   python3 "${REPO}/docker/vendor_git_requirements.py" requirements.txt "${WS}/vendor" > "${WS}/requirements.local.txt"
 

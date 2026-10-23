@@ -33,6 +33,7 @@ from scripts.replay_web.jobs import CONTAINER_PREFIX
 from scripts.replay_web.locations import algorithm_root
 
 AGENT_CONTAINER = CONTAINER_PREFIX + "agent"   # fixed: a stale one is removed before a start, and only this one is ever stopped
+WORKER_CACHE = "/opt/daaam_ws/src/daaam/" + CACHE_DIR   # the worker runs in the DAAAM checkout of the container
 _CONTAINER_NAME = re.compile(r"daaam-replay-[a-z0-9-]{1,40}")
 EventCallback = Callable[[Dict[str, Any]], None]
 
@@ -70,7 +71,8 @@ class AgentRequestFailed(AgentError):
 CREDENTIAL_VARIABLES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 
 
-def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None, environ: Optional[Mapping[str, str]] = None) -> List[str]:
+def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None, environ: Optional[Mapping[str, str]] = None,
+		cache_root: Optional[Union[str, Path]] = None) -> List[str]:
 	"""The fixed worker command. The only variable parts are the model names, which agent_protocol.allowed_models vetted, the
 	worker's idle time in seconds (a number; 0 means never; by default the worker's own fifteen minutes) and the *names* of the API
 	key variables that are set in `environ` (default: this process's): `-e NAME` makes Docker copy the value from the environment
@@ -86,6 +88,8 @@ def default_argv(models: Sequence[str], idle_seconds: Optional[float] = None, en
 			argv += ["-e", variable]
 	if idle_seconds is not None:
 		argv += ["-e", "REPLAY_AGENT_IDLE_SECONDS=%g" % float(idle_seconds)]
+	if cache_root is not None:   # the service stages snapshots there; the worker reads them at its usual relative path
+		argv += ["-v", "%s:%s" % (Path(cache_root), WORKER_CACHE)]
 	return argv + ["daaam-ws", "python", "-m", "scripts.replay_web.agent_worker"]
 
 
@@ -519,7 +523,7 @@ def _size(path: Path) -> int:
 
 
 def stage_file(repo_root: Path, history_key: str, source: Path, digest: str, suffix: str = ".json", keep: int = 2,
-		max_bytes: int = DEFAULT_CACHE_BYTES) -> str:
+		max_bytes: int = DEFAULT_CACHE_BYTES, cache_root: Optional[Path] = None) -> str:
 	"""Copy a validated file to `.replay-web/cache/<history key>/<digest><suffix>` for the worker and return that path relative
 	to the repository root (the container sees the repository at the same relative path).
 
@@ -529,7 +533,7 @@ def stage_file(repo_root: Path, history_key: str, source: Path, digest: str, suf
 	"""
 	if not _KEY.fullmatch(str(history_key)) or not _DIGEST.fullmatch(str(digest)) or suffix not in _SUFFIXES:
 		raise StagingError("the cache key or digest is not valid")
-	cache_root = Path(repo_root) / ".replay-web" / "cache"
+	cache_root = Path(cache_root) if cache_root is not None else Path(repo_root) / ".replay-web" / "cache"   # the worker sees it at CACHE_DIR
 	directory = cache_root / history_key
 	if os.path.islink(str(cache_root)) or os.path.islink(str(directory)):
 		raise StagingError("the cache directory is a link")

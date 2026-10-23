@@ -9,3 +9,11 @@
 - 只在 CHANGELOG.md 简记用户可感知的变化；纯内部整理写提交说明即可。不新增流水账、计划或交接文档；必要历史资料在 replay_ws/archive/。
 - 用户说明只保留职责、命令、输出与限制，避免重复记录实测过程。
 - 本地文档仅维护 README.md、AGENTS.md、CHANGELOG.md；保留 LICENSE 和第三方声明。用法、环境与限制统一写 README，不新增重复指南。
+
+
+## Docker Python 依赖与 --rm
+- DAAAM 当前 Python 虚拟环境位于容器 /opt/daaam_ws/.venv，整个 /opt/daaam_ws 挂载持久命名卷（当前 daaam_daaam_workspace）。docker compose run --rm 退出只删除容器，卷内 pip 安装的 Python 包仍保留。
+- 添加 VizTracer 等 Python 工具时，先核对 Compose 的实际卷挂载和容器 sys.executable，再用该环境的 python -m pip 安装；通常无需重建 Docker 镜像，也不要为此重新下载 CUDA/PyTorch。
+- 同步维护安装入口与用法，并用第二个新 --rm 容器验证持久性。宿主机安装的包不会自动进入容器。
+- 系统 apt 包、未挂载路径内的安装不具有上述持久性；新建/更换卷或将镜像部署到另一台机器时，需重新安装或另行打包环境。不要把卷内安装误称为镜像已更新。
+- 性能工具统一由 DAAAM docker/requirements-profile.txt 和 just daaam profile-install 安装；profile 生成 VizTracer JSON，profile-sample 生成 Pyinstrument HTML，profile-view 用本地 Perfetto 查看 JSON 或直接展示 HTML。两种采集器不要同时开启。run_pipeline.py 使用 os._exit，新增分析器必须在退出前显式保存，不能只依赖 CLI/atexit。

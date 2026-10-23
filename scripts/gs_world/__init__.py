@@ -9,13 +9,4 @@ gsplat is installed into its own directory of the workspace volume (`just gs-ins
 environment; every entry point calls env.activate() before importing it. Run the entry points in the daaam-ws
 container from the repository root, e.g. `python -m scripts.gs_world.train tum_fr1_room` (see USAGE.md 9.7). `view` shows a
 trained model in the browser (`just gs-view`).
-
-With JELLYMAP_ROOT set (a JellyMap workspace), the modules are loaded from the shared copy in
-$JELLYMAP_ROOT/sm-lab/datasets/scripts/gs_world; otherwise from this directory.
 """
-
-import os as _os
-
-_shared = _os.path.join(_os.environ.get('JELLYMAP_ROOT', ''), 'sm-lab/datasets/scripts/gs_world')
-if _os.environ.get('JELLYMAP_ROOT') and _os.path.isfile(_os.path.join(_shared, '__init__.py')):
-    __path__ = [_shared]

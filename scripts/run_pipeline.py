@@ -698,6 +698,22 @@ def main():
 
 if __name__ == "__main__":
 	# Avoid waiting forever on orphaned multiprocessing queue feeder threads after results are saved.
+	if os.environ.get("DAAAM_VIZTRACER_OUTPUT") and os.environ.get("DAAAM_PYINSTRUMENT_OUTPUT"):
+		raise SystemExit("Select only one profiler per run")
+	profiler = None
+	if os.environ.get("DAAAM_PYINSTRUMENT_OUTPUT"):
+		from pyinstrument import Profiler
+		profiler = Profiler(interval=0.001)
+		profiler.start()
+	tracer = None
+	if os.environ.get("DAAAM_VIZTRACER_OUTPUT"):
+		from viztracer import VizTracer
+		tracer = VizTracer(
+			output_file=os.environ["DAAAM_VIZTRACER_OUTPUT"],
+			include_files=[str(Path(__file__).resolve()), str(Path(__file__).resolve().parents[1] / "src" / "daaam")],
+			ignore_c_function=True,
+		)
+		tracer.start()
 	exit_code = 0
 	try:
 		main()
@@ -708,6 +724,28 @@ if __name__ == "__main__":
 		traceback.print_exc()
 		exit_code = 1
 	finally:
+		# os._exit bypasses atexit: persist the parent-process trace explicitly.
+		if tracer is not None:
+			try:
+				tracer.stop()
+				tracer.save()
+			except Exception:
+				import traceback
+				traceback.print_exc()
+				exit_code = exit_code or 1
+		if profiler is not None:
+			try:
+				profiler.stop()
+				from pyinstrument.renderers import JSONRenderer
+				report = Path(os.environ["DAAAM_PYINSTRUMENT_OUTPUT"])
+				report.parent.mkdir(parents=True, exist_ok=True)
+				report.write_text(profiler.output_html(), encoding="utf-8")
+				report.with_suffix(".txt").write_text(profiler.output_text(unicode=True, color=False), encoding="utf-8")
+				report.with_suffix(".json").write_text(profiler.output(JSONRenderer()), encoding="utf-8")
+			except Exception:
+				import traceback
+				traceback.print_exc()
+				exit_code = exit_code or 1
 		sys.stdout.flush()
 		sys.stderr.flush()
 		os._exit(exit_code)
