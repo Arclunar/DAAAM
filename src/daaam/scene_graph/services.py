@@ -3,6 +3,8 @@ import threading
 import copy
 import queue
 import json
+import os
+import math
 import yaml
 import time
 import pandas as pd
@@ -823,8 +825,27 @@ class SceneGraphService:
 					"label_names": [copy.deepcopy(correction_label_entry(key, value))
 						for key, value in self.corrections.items()],
 				}
+				online = None
+				if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+					features = {}
+					for key, correction in self.corrections.items():
+						feature = correction.description_clip_feature
+						stamp = correction.description_timestamp
+						if feature and stamp is not None and math.isfinite(stamp) and stamp >= 0:
+							values = list(feature)
+							if all(math.isfinite(v) for v in values):
+								features[str(key)] = {"clip_feature": values, "source_timestamp": stamp}
+					online = {"provenance": {"model_name": self.clip_model_name,
+						"backend": self.clip_backend, "pretrained": self.clip_pretrained,
+						"modality": "text",
+						"dim": len(next(iter(features.values()))["clip_feature"]) if features else 0},
+						"features": features}
 			output_save_dir.mkdir(parents=True, exist_ok=True)
 			atomic_yaml_dump(output_save_dir / "corrections.yaml", data)
+			if online is not None:
+				with atomic_path(output_save_dir / "native_semantics.json") as temporary:
+					with temporary.open("w") as stream:
+						json.dump(online, stream, allow_nan=False, separators=(",", ":"))
 		self.logger.info(f"Saved {len(data['label_names'])} descriptions to {output_save_dir / 'corrections.yaml'}")
 
 	def save_data(self, output_save_dir: Path) -> None:
@@ -847,6 +868,10 @@ class SceneGraphService:
 				"clip_feature": corr.selectframe_clip_feature,
 				"sentence_embedding_feature": corr.embedding
 			} for sem_id, corr in corrections_copy.items()}
+		for sem_id, correction in corrections_copy.items():
+			feature = getattr(correction, "description_clip_feature", None)
+			if feature:
+				features[sem_id]["description_clip_feature"] = feature
 
 		with self.scene_graph_lock:
 			if self.scene_graph_is_set:

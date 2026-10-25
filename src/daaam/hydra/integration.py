@@ -1,6 +1,7 @@
 """Hydra integration module for proper pipeline execution with scene graph updates."""
 
 import time
+import os
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -160,6 +161,8 @@ class HydraIntegration:
 			# Add output path to config
 			if self.output_dir:
 				configs["log_path"] = str(self.output_dir)
+			if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+				configs["backend"]["sinks"][-1]["semantic_snapshot_path"] = str(self.output_dir.parent / "native_semantics.json")
 			
 			with hydra_python.external_plugins("khronos"):
 				try:
@@ -169,13 +172,15 @@ class HydraIntegration:
 						robot_id=0,
 						config_verbosity=2,
 						use_step_mode=True,
-						zmq_url="" if self.zmq_url is None else self.zmq_url
+						zmq_url="" if self.zmq_url is None or os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1" else self.zmq_url
 					)
 				except Exception as e:
 					self.logger.error(f"Error creating Hydra pipeline: {e}")
 
 			if not self.pipeline:
 				self.logger.error("Failed to create Hydra pipeline")
+				if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+					raise RuntimeError("Native reconciliation pipeline initialization failed")
 				return False
 			
 			self.logger.info("Hydra pipeline initialized successfully")
@@ -186,6 +191,8 @@ class HydraIntegration:
 			
 		except Exception as e:
 			self.logger.error(f"Error initializing Hydra pipeline: {e}")
+			if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+				raise
 			return False
 	
 	def process_frame(
@@ -258,11 +265,15 @@ class HydraIntegration:
 					self.logger.debug(f"Hydra processed {self.stats['frames_processed']} frames")
 			else:
 				self.logger.warning(f"Hydra failed to process frame at timestamp {timestamp}")
+				if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+					raise RuntimeError("Native reconciliation frame processing failed")
 			
 			return success
 			
 		except Exception as e:
 			self.logger.error(f"Error processing frame in Hydra: {e}")
+			if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+				raise
 			return False
 	
 	def get_dsg_update(self) -> Optional[bytes]:

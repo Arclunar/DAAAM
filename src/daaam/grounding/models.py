@@ -45,6 +45,9 @@ class ObjectAnnotation(Annotation):
 	selectframe_clip_feature: Optional[List[float]] = Field(
 		default=None, description="CLIP feature vector for the object patch."
 	)
+	description_clip_feature: Optional[List[float]] = Field(
+		default=None, description="CLIP text feature of the DAM description for online reconciliation."
+	)
 	
 class ImageAnnotation(Annotation):
 	"""Classification for an entire image."""

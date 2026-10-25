@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from typing import Dict, List, Set, Any, Optional, Tuple
 from PIL import Image as PILImage
 import torch
@@ -549,6 +550,14 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				torch.cuda.empty_cache()
 			
 			if corrections:
+				if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+					objects = [c for c in corrections if isinstance(c, ObjectAnnotation)]
+					if objects:
+						if self.clip_handler is None:
+							raise RuntimeError("Native reconciliation requires the existing CLIP handler")
+						features = self.clip_handler.extract_text_features([c.semantic_label for c in objects], batch_size=8)
+						for correction, feature in zip(objects, features):
+							correction.description_clip_feature = feature.tolist()
 				# Add sentence embeddings if handler is available
 				if self.sentence_embedding_handler is not None:
 					texts = [c.semantic_label for c in corrections]

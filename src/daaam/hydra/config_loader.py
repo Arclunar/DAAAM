@@ -1,6 +1,7 @@
 """Custom config loader for Hydra that supports pseudo labels."""
 
 import logging
+import os
 import pathlib
 import pprint
 from typing import Dict, Optional, Any
@@ -105,5 +106,19 @@ def load_hydra_config(
 		"lcd": {"lcd_use_bow_vectors": False},
 	}
 	update_nested(contents, overrides)
+	if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+		contents["backend"].setdefault("sinks", []).append({
+			"type": "KhronosOnlineReconciliationSink", "every_n_frames": 30,
+			"final_timestamp_ns": int(os.environ["DAAAM_RECONCILIATION_FINAL_NS"]),
+			"output_path": os.environ["DAAAM_RECONCILIATION_OUTPUT"],
+			"zmq": {"url": os.environ.get("ZMQ_URL", "tcp://127.0.0.1:8001")},
+			"archive_after_seconds": contents["active_window"]["tracker"]["temporal_window"],
+			"association": {"merge_require_same_label": False, "merge_min_cosine": 0.85,
+				"merge_proposer": {"strategy": {"type": "NearestNode", "num_merges_to_consider": 5}},
+				"merge_require_no_co_visibility": True, "merge_min_iou": 0.5},
+			"change_detection": {"objects": {"type": "RayObjectChangeDetector",
+				"time_filtering_threshold": 3.0}},
+			"reconciler": {"merge_object_meshes": False},
+		})
 	
 	return contents

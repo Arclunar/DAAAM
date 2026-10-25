@@ -8,6 +8,12 @@
 
 入口设置 `grounding.release_assignment_frames=true`、`scene_graph.corrections_save_interval_seconds=5`，配置本身默认关闭。Khronos静态历史精简由 `KHRONOS_COMPACT_STATIC_FRAMES=1` 启用，动态帧完整保留；`DAAAM_TRIM_INTERVAL_FRAMES=100` 每100帧归还空闲堆。离线入口默认开启二者，设0关闭；原生开关未设置时保持上游。历史容量、采样和输入分辨率不变。更新已有环境用 `just daaam build khronos`，不必重建镜像。完整说明见工作区 `sm-lab/systems/daaam/README.md`。
 
+## 原生在线归并（实验）
+
+先在根目录执行 `just daaam build`，再运行 `just daaam run <Dataset> all --no-tui --reconciliation native`。该模式复用已有CLIP编码DAM文本，将已有语义、已归档且满足原生空间/时序条件的片段交给Khronos变化检测与Reconciler，每30帧及末帧发布当前归并图；Fragment保留，历史快照落盘。第三方默认不开启；实验入口显式设置 `DAAAM_ONLINE_RECONCILIATION=1`。
+
+这是现有离线Hydra后端的原生算法适配，尚不等同于完整ROS/RPGO后端。变化检测随地图增长可能阻塞数十秒，不保证逐帧实时；不会常驻保存完整4D历史图。归并Object的问答和RRD绘制尚未接入。开关、输出及限制详见根目录 `sm-lab/systems/daaam/README.md`。
+
 ## 职责与目录
 
 | 位置 | 内容 |

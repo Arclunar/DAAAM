@@ -38,3 +38,8 @@
 - Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root.
 - Assignment-owned RGB history, explicit terminal results/failure handling, periodic atomic corrections, optional allocator diagnostics and offline native compaction/trim defaults. Safe C YAML backend with safe Python fallback.
 - Validation: 1469 CV/Hydra frames completed without OOM; final graph and1096 descriptions saved. Full launcher failed143 because the validation time guard interrupted replay export; a separate recovery exported296 snapshots/219 verified chunks and RRD. Reconciliation separately generated162 groups without changing native graph/meshes. Core/host tests and limits recorded in root task report; semantic accuracy and native RRD playback unverified.
+
+## 2026-10-25 · 重大更新：原生在线归并实验
+- Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root.
+- Opt-in Hydra sink adapter invokes native Khronos change detection and reconciliation; existing CLIP encodes persisted DAM descriptions, with provenance/time checks and conservative all-pair constraints. Default behavior remains unchanged. Current merged states are published for replay without retaining full graph history. Native failures propagate.
+- Validation: 1469-frame run exited0, 817 original fragments preserved,32 native objects/35 place edges/68 provenance relations,50 verified snapshots. Main sampled peak RSS9.128GiB and own swap0; native callbacks peaked45.939s, so this is not a real-time guarantee. Core95passed/1unverified; quick308passed/8unverified; workspace30packages built. CLI27 failures reproduced on unchanged HEAD baseline; CLI remains failed. Evidence: root runs/reports/daaam_native_online_01a16d82/. Full ROS/RPGO, identity accuracy and merged-object QA/RRD rendering unverified.
