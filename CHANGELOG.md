@@ -43,3 +43,8 @@
 - Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root.
 - Opt-in Hydra sink adapter invokes native Khronos change detection and reconciliation; existing CLIP encodes persisted DAM descriptions, with provenance/time checks and conservative all-pair constraints. Default behavior remains unchanged. Current merged states are published for replay without retaining full graph history. Native failures propagate.
 - Validation: 1469-frame run exited0, 817 original fragments preserved,32 native objects/35 place edges/68 provenance relations,50 verified snapshots. Main sampled peak RSS9.128GiB and own swap0; native callbacks peaked45.939s, so this is not a real-time guarantee. Core95passed/1unverified; quick308passed/8unverified; workspace30packages built. CLI27 failures reproduced on unchanged HEAD baseline; CLI remains failed. Evidence: root runs/reports/daaam_native_online_01a16d82/. Full ROS/RPGO, identity accuracy and merged-object QA/RRD rendering unverified.
+
+## 2026-10-26 · 共享工具包路由
+- Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root (review and commit of existing workspace changes).
+- When JELLYMAP_ROOT names a workspace with shared tools, scripts.gs_world and scripts.replay_web load modules from sm-lab; otherwise their original package paths remain. No dependency changes.
+- Verified both package paths and canonical algorithm lookup in a host subprocess; quick regression passed. Six unrelated fallback-file reversions remain uncommitted and preserved; full GPU/standalone fallback execution not verified. Root task/report: functional_commits_01a16d82.
