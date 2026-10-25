@@ -697,6 +697,9 @@ def main():
 
 
 if __name__ == "__main__":
+	if os.environ.get("DAAAM_MEMORY_STATS") == "trace":
+		import tracemalloc
+		tracemalloc.start(1)
 	# Avoid waiting forever on orphaned multiprocessing queue feeder threads after results are saved.
 	if os.environ.get("DAAAM_VIZTRACER_OUTPUT") and os.environ.get("DAAAM_PYINSTRUMENT_OUTPUT"):
 		raise SystemExit("Select only one profiler per run")

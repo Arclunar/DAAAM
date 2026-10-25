@@ -49,3 +49,27 @@ def release_freed_memory() -> float:
 		return 0.0
 	trim(0)
 	return max(before - resident_mb(), 0.0)
+
+
+class _Mallinfo2(ctypes.Structure):
+	_fields_ = [(name, ctypes.c_size_t) for name in (
+		'arena', 'ordblks', 'smblks', 'hblks', 'hblkhd', 'usmblks',
+		'fsmblks', 'uordblks', 'fordblks', 'keepcost')]
+
+
+def allocation_stats() -> dict:
+	"""Diagnostic allocator counters, not a whole-process memory limit."""
+	import tracemalloc
+
+	stats = {'rss_mib': resident_mb(), 'glibc': None, 'python_traced_bytes': None}
+	try:
+		libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6')
+		libc.mallinfo2.restype = _Mallinfo2
+		libc.mallinfo2.argtypes = []
+		info = libc.mallinfo2()
+		stats['glibc'] = {name: getattr(info, name) for name in ('arena', 'uordblks', 'fordblks', 'hblkhd')}
+	except (OSError, AttributeError):
+		pass
+	if tracemalloc.is_tracing():
+		stats['python_traced_bytes'], stats['python_traced_peak_bytes'] = tracemalloc.get_traced_memory()
+	return stats

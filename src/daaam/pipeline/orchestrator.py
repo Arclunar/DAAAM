@@ -7,6 +7,8 @@ import threading
 import time
 import json
 from collections import deque
+from dataclasses import replace
+import math
 from pathlib import Path
 import torch
 import pickle
@@ -22,7 +24,7 @@ from daaam.grounding import GroundingService
 from daaam.scene_graph import SceneGraphService
 from daaam.config import PipelineConfig
 from daaam.utils.logging import PipelineLogger, get_default_logger
-from daaam.utils.memory import release_freed_memory
+from daaam.utils.memory import release_freed_memory, allocation_stats
 from daaam.utils.output import resolve_pipeline_output_dir
 from daaam.utils.vision import bounding_box_from_mask, fast_median_depth, fast_create_output_images
 from daaam.utils.performance import time_execution_sync, performance_measure, PerformanceTracker
@@ -36,8 +38,9 @@ from daaam.grounding.models import ObjectAnnotation
 from daaam.pipeline.models import PromptRecord, Frame, MinimalCorrection
 from daaam.scene_graph.models import SemanticUpdate, TemporalObservation, SemanticFeatures
 from daaam.tracking.models import Track, SimplifiedTrack
-from daaam.assignment.models import AssignmentTask, SelectedGroup
+from daaam.assignment.models import AssignmentTask, SelectedGroup, AssignmentResult
 from daaam.assignment.schemas import assignment_task_to_json
+from daaam.pipeline.frame_store import AssignmentFrameStore, image_bytes
 
 class PipelineOrchestrator:
 	"""
@@ -98,6 +101,13 @@ class PipelineOrchestrator:
 			exact_output_dir=output_dir,
 		)
 		self.output_dir.mkdir(parents=True, exist_ok=True)
+		self._corrections_save_interval = config.scene_graph.corrections_save_interval_seconds
+		if not math.isfinite(self._corrections_save_interval) or self._corrections_save_interval < 0:
+			raise ValueError("corrections save interval must be finite and nonnegative")
+		self._last_corrections_save_attempt = None
+		self._saved_corrections_count = 0
+		if self._corrections_save_interval:
+			self.scene_graph_service.save_corrections_snapshot(self.output_dir)
 
 		# performance tracking
 		self.performance_tracker = PerformanceTracker()
@@ -122,6 +132,16 @@ class PipelineOrchestrator:
 		self.frame_snapshots: Dict[int, Frame] = {}  # global_frame_id -> Frame
 		self.frame_snapshot_assignments: Dict[int, int] = {}  # global_frame_id -> assignment_id
 		self._processed_snapshot_ids: set = set()  # frame IDs already sent to grounding
+		self.release_assignment_frames = self.config.grounding.release_assignment_frames
+		self._frame_cache_error = None
+		self._frame_store = None
+		if self.release_assignment_frames:
+			budget = self.config.grounding.frame_cache_max_mb
+			timeout = self.config.grounding.assignment_timeout_seconds
+			if not math.isfinite(budget) or budget <= 0 or not math.isfinite(timeout) or timeout <= 0:
+				raise ValueError("frame cache budget and assignment timeout must be finite and positive")
+			self._frame_store = AssignmentFrameStore(int(budget * 1024 * 1024))
+			self.frame_snapshots = self._frame_store.frames
 
 		# Pre-computed simplified tracks cache for performance
 		self.simplified_tracks_cache: Deque[List[SimplifiedTrack]] = deque(maxlen=self.config.grounding.query_interval_frames + 10)
@@ -307,6 +327,12 @@ class PipelineOrchestrator:
 			if self._group_thread.is_alive():
 				self.logger.warning("[Shutdown] Group processor thread did not stop cleanly")
 		self.logger.info("[Shutdown Step 3] Processor threads stopped")
+		if self.release_assignment_frames:
+			with self._state_lock:
+				for assignment_id in list(self._frame_store.assignments):
+					self._release_assignment(assignment_id)
+				self.recent_frames_buffer.clear()
+				self.simplified_tracks_cache.clear()
 
 		# STEP 4: Best-effort drain of remaining corrections (workers now stopped)
 		self.logger.info("[Shutdown Step 4] Draining correction queue...")
@@ -387,6 +413,7 @@ class PipelineOrchestrator:
 				correction = self._enrich_correction_with_temporal_data(correction)
 				self.scene_graph_service.store_correction(correction)
 				self._corrections_stored += 1
+				self._maybe_save_corrections()
 				count += 1
 			except queue.Empty:
 				break
@@ -440,6 +467,8 @@ class PipelineOrchestrator:
 		Returns:
 			Tuple of (processed_frame, label_image, color_image)
 		"""
+		if self.release_assignment_frames:
+			self._check_assignment_health()
 		self.frame_count += 1
 		frame.frame_id = self.frame_count  # Assign frame ID
 
@@ -687,6 +716,13 @@ class PipelineOrchestrator:
 				simplified_tracks_for_cache.append(track.get_simplified())
 
 		with self._state_lock:
+			if self.release_assignment_frames:
+				# Assignment and grounding consume RGB/tracks, never historical depth.
+				frame = replace(frame, depth_image=None)
+				recent = list(self.recent_frames_buffer)
+				if len(recent) == self.recent_frames_buffer.maxlen:
+					recent = recent[1:]
+				self._frame_store.check_budget(recent + [frame])
 			self.recent_frames_buffer.append(frame)
 			self.simplified_tracks_cache.append(simplified_tracks_for_cache)
 
@@ -707,9 +743,11 @@ class PipelineOrchestrator:
 				frame_id_mapping = {}  # local_idx -> global_frame_id
 				for i, frame in enumerate(self.recent_frames_buffer):
 					global_frame_id = start_frame_id + i
-					self.frame_snapshots[global_frame_id] = frame
-					self.frame_snapshot_assignments[global_frame_id] = assignment_id
+					if not self.release_assignment_frames:
+						self.frame_snapshots[global_frame_id] = frame
+						self.frame_snapshot_assignments[global_frame_id] = assignment_id
 					frame_id_mapping[i] = global_frame_id
+				snapshots = dict(zip(frame_id_mapping.values(), self.recent_frames_buffer))
 
 			if not track_history_for_worker:
 				self.logger.warning("Frame history is empty, cannot trigger assignment")
@@ -739,7 +777,8 @@ class PipelineOrchestrator:
 				corrections=corrections_copy,
 				prompted_track_ids=prompted_track_ids_copy,
 				start_frame_count=start_frame_id,  # first global frame ID
-				frame_id_mapping=frame_id_mapping  # mapping for workers
+				frame_id_mapping=frame_id_mapping,  # mapping for workers
+				assignment_id=assignment_id if self.release_assignment_frames else None,
 			)
 			
 			# update prompted track ids to avoid re-prompting:
@@ -766,6 +805,9 @@ class PipelineOrchestrator:
 				additional_ids.add(tid)
 
 			with self._state_lock:
+				if self.release_assignment_frames:
+					self._frame_store.retain(assignment_id, snapshots, additional_ids,
+						time.monotonic() + self.config.grounding.assignment_timeout_seconds)
 				self.pending_track_ids |= additional_ids
 
 			try:
@@ -774,17 +816,28 @@ class PipelineOrchestrator:
 				self.logger.info("Sent JSON data package to assignment worker queue")
 			except TypeError as e:
 				self.logger.error(f"Failed to serialize data to JSON: {e}")
+				if self.release_assignment_frames:
+					self._release_assignment(assignment_id)
+					raise
 			except queue.Full:
 				self.logger.warning("Assignment worker queue is full, skipping this interval")
 				with self._state_lock:
 					self.pending_track_ids.difference_update(additional_ids)  # rollback
+				if self.release_assignment_frames:
+					self._release_assignment(assignment_id)
+					raise
 			except Exception as e:
 				self.logger.error(f"Error putting data on assignment queue: {e}")
 				with self._state_lock:
 					self.pending_track_ids.difference_update(additional_ids)  # rollback
+				if self.release_assignment_frames:
+					self._release_assignment(assignment_id)
+					raise
 				
 		except Exception as e:
 			self.logger.error(f"Error triggering assignment: {e}")
+			if self.release_assignment_frames:
+				raise
 
 	def _create_output_images(self, tracks: List[Track], track_masks: Dict[int, np.ndarray], image_shape: Tuple[int, int]) -> Tuple[np.ndarray, np.ndarray]:
 		"""Create label and color output images using optimized single-pass processing."""
@@ -860,17 +913,33 @@ class PipelineOrchestrator:
 				# Store enriched correction
 				self.scene_graph_service.store_correction(correction)
 				self._corrections_stored += 1
+				self._maybe_save_corrections()
 
 				# Trigger semantic update callback if set
 				if self.semantic_update_callback and hasattr(correction, 'semantic_id'):
 					self._trigger_semantic_update(correction)
 				
 			except queue.Empty:
+				self._maybe_save_corrections()
 				continue
 			except Exception as e:
 				self.logger.error(f"Error processing correction: {e}")
 				import traceback
 				traceback.print_exc()
+
+	def _maybe_save_corrections(self) -> None:
+		if not self._corrections_save_interval or self._corrections_stored == self._saved_corrections_count:
+			return
+		now = time.monotonic()
+		if self._last_corrections_save_attempt is not None and now - self._last_corrections_save_attempt < self._corrections_save_interval:
+			return
+		self._last_corrections_save_attempt = now
+		count = self._corrections_stored
+		try:
+			self.scene_graph_service.save_corrections_snapshot(self.output_dir)
+			self._saved_corrections_count = count
+		except Exception as error:
+			self.logger.error(f"Descriptions were not saved; will retry: {error}")
 
 	def _enrich_correction_with_temporal_data(self, correction: ObjectAnnotation) -> ObjectAnnotation:
 		"""
@@ -968,6 +1037,17 @@ class PipelineOrchestrator:
 	
 	def _cleanup_stale_snapshots(self) -> None:
 		"""Remove consumed and very old frame snapshots."""
+		if self.release_assignment_frames:
+			with self._state_lock:
+				frames = list(self.frame_snapshots.values()) + list(self.recent_frames_buffer)
+				self.logger.info(f"Frame cache: {len(self.recent_frames_buffer)} recent, "
+					f"{len(self.frame_snapshots)} candidates, {len(self._frame_store.assignments)} assignments, "
+					f"{image_bytes(frames) / 1024**2:.1f} MiB RGB storage")
+				if os.environ.get("DAAAM_MEMORY_STATS") in ("1", "trace"):
+					self.logger.info(f"Allocation stats: {json.dumps(allocation_stats())}")
+					workers = self.assignment_service.workers + self.grounding_service.workers
+					self.logger.info(f"Worker identities: {json.dumps([{'pid': w.pid, 'name': w.name} for w in workers])}")
+			return
 		with self._state_lock:
 			# 1. Remove snapshots already sent to grounding
 			processed = [fid for fid in self._processed_snapshot_ids if fid in self.frame_snapshots]
@@ -989,6 +1069,32 @@ class PipelineOrchestrator:
 				self.logger.debug(f"Cleaned up {len(to_remove)} snapshots "
 								f"({len(processed)} processed, {len(stale)} stale)")
 	
+	def _release_assignment(self, assignment_id) -> None:
+		with self._state_lock:
+			self.pending_track_ids.difference_update(self._frame_store.release(assignment_id))
+
+	def _check_assignment_health(self) -> None:
+		with self._state_lock:
+			pending = self._frame_store.assignments
+			if any(deadline <= time.monotonic() for _, _, deadline in pending.values()):
+				self._frame_cache_error = "assignment timed out before its frames could be released"
+			if pending and not any(worker.is_alive() for worker in self.assignment_service.workers):
+				self._frame_cache_error = "assignment workers exited with pending frames"
+			if self._frame_cache_error:
+				for assignment_id in list(pending):
+					self._release_assignment(assignment_id)
+				raise RuntimeError(self._frame_cache_error)
+
+	def finish_assignments(self) -> None:
+		"""Finish accepted selections before shutting their workers down."""
+		if self.release_assignment_frames:
+			while True:
+				self._check_assignment_health()
+				with self._state_lock:
+					if not self._frame_store.assignments:
+						break
+				time.sleep(0.05)
+
 	def _send_incremental_position_updates(self) -> None:
 		"""Send only new position observations to scene graph service (incremental updates)."""
 		# Build incremental update with only new positions
@@ -1046,12 +1152,40 @@ class PipelineOrchestrator:
 						self.logger.debug(f"Closed track {track_id} (semantic_id {semantic_id}) after {track_buffer} frames of inactivity. Total observations: {len(unique_history)}")
 
 	
+	def _process_assignment_result(self, result: AssignmentResult) -> None:
+		with self._state_lock:
+			owner = self._frame_store.assignments.get(result.assignment_id)
+			if owner is None:
+				self.logger.debug(f"Ignoring duplicate or late assignment {result.assignment_id}")
+				return
+		try:
+			if result.status != "completed":
+				raise RuntimeError(result.error or f"assignment {result.status}")
+			for group in result.groups:
+				if group.global_frame_id not in owner[0]:
+					raise ValueError("selected frame is not owned by this assignment")
+				if not self._process_single_group(group):
+					raise RuntimeError("selected group could not be delivered to grounding")
+		except Exception as error:
+			with self._state_lock:
+				self._frame_cache_error = f"Assignment {result.assignment_id} failed: {error}"
+			self.logger.error(self._frame_cache_error)
+		finally:
+			# All groups have acquired their own prompt references before releasing the window.
+			self._release_assignment(result.assignment_id)
+
 	def _group_processor_loop(self) -> None:
 		"""Process selected groups from assignment workers and prepare for grounding."""
 		while not self._stop_group_processing:
 			try:
 				# get selected groups from assignment workers
 				selected_group_list = self.selected_groups_queue.get(timeout=0.1) # 10Hz
+				if isinstance(selected_group_list, AssignmentResult):
+					self._process_assignment_result(selected_group_list)
+					continue
+				if self.release_assignment_frames:
+					self._frame_cache_error = "assignment result is missing its task identity"
+					continue
 				
 				if isinstance(selected_group_list, SelectedGroup):
 					selected_group_list = [selected_group_list]
@@ -1073,7 +1207,7 @@ class PipelineOrchestrator:
 				import traceback
 				traceback.print_exc()
 	
-	def _process_single_group(self, group_info: SelectedGroup) -> None:
+	def _process_single_group(self, group_info: SelectedGroup) -> bool:
 		"""Process a single selected group for grounding."""
 		try:
 			global_frame_id = group_info.global_frame_id
@@ -1081,7 +1215,7 @@ class PipelineOrchestrator:
 			
 			if global_frame_id is None or not isinstance(track_ids, list):
 				self.logger.warning(f"Invalid group info received: {group_info}")
-				return
+				return False
 			
 			# Retrieve frame from snapshots
 			with self._state_lock:
@@ -1090,14 +1224,14 @@ class PipelineOrchestrator:
 			
 			if frame_obj is None:
 				self.logger.error(f"Frame {global_frame_id} not found in snapshots! May have been cleaned up.")
-				return
+				return False
 			
 			prompt_frame = frame_obj.rgb_image
 			all_tracks_in_frame = frame_obj.tracks
 			
 			if prompt_frame is None:
 				self.logger.warning(f"Frame {global_frame_id} has no RGB image")
-				return
+				return False
 			
 			# filter tracks for selected IDs
 			selected_tracks = []
@@ -1107,15 +1241,17 @@ class PipelineOrchestrator:
 			
 			if len(selected_tracks) != len(track_ids):
 				self.logger.warning(f"Some track IDs {track_ids} not found in frame {global_frame_id}")
+				if self.release_assignment_frames:
+					return False
 
 			
 			if not selected_tracks:
 				self.logger.warning(f"No matching tracks found for IDs {track_ids} in frame {global_frame_id}")
-				return
+				return False
 			
 			# prepare prompt record for grounding workers
 			prompt_record = PromptRecord(
-				frame=prompt_frame.copy(),
+				frame=prompt_frame if self.release_assignment_frames else prompt_frame.copy(),
 				tracks=selected_tracks,
 				object_labels=object_labels,
 				frame_id=global_frame_id,
@@ -1124,7 +1260,19 @@ class PipelineOrchestrator:
 			
 			# send to grounding workers
 			try:
-				self.query_group_queue.put_nowait(prompt_record)
+				if self.release_assignment_frames:
+					deadline = time.monotonic() + self.config.grounding.assignment_timeout_seconds
+					while True:
+						if self._stop_group_processing or self._frame_cache_error:
+							raise RuntimeError("grounding delivery cancelled")
+						try:
+							self.query_group_queue.put(prompt_record, timeout=0.1)
+							break
+						except queue.Full:
+							if time.monotonic() >= deadline:
+								raise TimeoutError("grounding queue remained full")
+				else:
+					self.query_group_queue.put_nowait(prompt_record)
 				self.logger.info(f"Successfully sent prompt record for frame {global_frame_id} to grounding workers")
 				
 				# update prompted track IDs
@@ -1138,7 +1286,9 @@ class PipelineOrchestrator:
 						if semantic_id is not None:
 							self.prompted_track_semantic_map[track_id] = semantic_id
 					
-					self._processed_snapshot_ids.add(global_frame_id)
+					if not self.release_assignment_frames:
+						self._processed_snapshot_ids.add(global_frame_id)
+				return True
 							
 			except queue.Full:
 				self.logger.warning("Grounding worker queue is full! Discarding prompt record.")
@@ -1149,6 +1299,7 @@ class PipelineOrchestrator:
 			self.logger.error(f"Error processing single group {group_info}: {e}")
 			import traceback
 			traceback.print_exc()
+		return False
 
 
 	def compute_clip_features(self, frame: Frame, tracks: List[Track]) -> None:

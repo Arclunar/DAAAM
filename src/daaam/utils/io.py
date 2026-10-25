@@ -28,4 +28,4 @@ def atomic_path(target: Path) -> Iterator[Path]:
 def atomic_yaml_dump(target: Path, data: object) -> None:
 	with atomic_path(target) as tmp:
 		with open(tmp, "w") as f:
-			yaml.safe_dump(data, f)
+			yaml.dump(data, f, Dumper=getattr(yaml, "CSafeDumper", yaml.SafeDumper))

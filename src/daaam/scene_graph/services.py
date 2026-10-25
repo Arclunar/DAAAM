@@ -1,5 +1,6 @@
 from typing import Optional, Dict, List, Any, Callable, Tuple, Union
 import threading
+import copy
 import queue
 import json
 import yaml
@@ -55,6 +56,7 @@ class SceneGraphService:
 		self.corrections: Dict[int, ObjectAnnotation] = {}
 		self.corrections_queue: List[ObjectAnnotation] = []  # Only for queued corrections before scene graph is set
 		self.correction_lock = threading.Lock()
+		self._corrections_save_lock = threading.Lock()
 
 		# CRITICAL: Lock for thread-safe scene graph access
 		# The DynamicSceneGraph C++ object is NOT thread-safe by default
@@ -810,6 +812,21 @@ class SceneGraphService:
 				return len(vector)
 		return None
 
+	def save_corrections_snapshot(self, output_save_dir: Path) -> None:
+		"""Persist descriptions without loading, copying, or saving a scene graph."""
+		with self._corrections_save_lock:
+			with self.correction_lock:
+				data = {
+					"total_semantic_labels": self.semantic_config.get("total_semantic_labels", 0),
+					"dynamic_labels": [], "invalid_labels": [], "surface_places_labels": [],
+					"object_labels": sorted(self.corrections),
+					"label_names": [copy.deepcopy(correction_label_entry(key, value))
+						for key, value in self.corrections.items()],
+				}
+			output_save_dir.mkdir(parents=True, exist_ok=True)
+			atomic_yaml_dump(output_save_dir / "corrections.yaml", data)
+		self.logger.info(f"Saved {len(data['label_names'])} descriptions to {output_save_dir / 'corrections.yaml'}")
+
 	def save_data(self, output_save_dir: Path) -> None:
 		"""Save DSG and corrections to files."""
 		# Prefer topic-based DSG (deferred updates) over disk loading
@@ -820,25 +837,10 @@ class SceneGraphService:
 			if self.load_hydra_dsg():
 				self.apply_corrections()
 
-		label_names = []
-
 		with self.correction_lock:
 			corrections_copy = self.corrections.copy()
 
 		self.logger.info(f"corrections stats on shutdown:\n {self.get_correction_stats()}")
-
-		for semantic_id, correction in corrections_copy.items():
-			label_names.append(correction_label_entry(semantic_id, correction))
-		
-		# Save corrections as YAML
-		corrections_data = {
-			"total_semantic_labels": self.semantic_config.get("total_semantic_labels", 0),
-			"dynamic_labels": [],
-			"invalid_labels": [],
-			"object_labels": sorted(list(corrections_copy.keys())),
-			"surface_places_labels": [],
-			"label_names": label_names,
-		}
 
 		features = {
 			sem_id: {
@@ -856,7 +858,7 @@ class SceneGraphService:
 
 		corrections_file = output_save_dir / "corrections.yaml"
 		try:
-			atomic_yaml_dump(corrections_file, corrections_data)
+			self.save_corrections_snapshot(output_save_dir)
 			self.logger.info(f"Saved corrections to {corrections_file}")
 		except Exception as e:
 			self.logger.error(f"Failed to save corrections YAML: {e}")

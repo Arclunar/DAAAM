@@ -11,7 +11,7 @@ import json
 import traceback
 
 from daaam.interfaces import QueueWorkerProcessInterface
-from daaam.assignment.models import AssignmentTask
+from daaam.assignment.models import AssignmentTask, AssignmentResult
 from daaam.assignment.schemas import json_to_assignment_task
 from daaam.utils.logging import setup_worker_logging, get_default_logger
 
@@ -83,7 +83,7 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 		"""
 		pass
 		
-	def process_item(self, item: str) -> Optional[List]:
+	def process_item(self, item: str) -> Optional[Union[List, AssignmentResult]]:
 		"""
 		Process a serialized AssignmentTask from the queue.
 		
@@ -91,15 +91,19 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 			item: JSON serialized AssignmentTask string
 			
 		Returns:
-			List of SelectedGroup objects or None
+			A terminal envelope for identified tasks; legacy groups or None otherwise.
 		"""
+		assignment_task = None
 		try:
 			# deserialize assignment task
 			assignment_task = json_to_assignment_task(item)
 			self.worker_logger.debug(f"Deserialized AssignmentTask with {len(assignment_task.track_history)} frames")
 			
 			# call implementation-specific processing method
-			return self.process_assignment_task(assignment_task)
+			groups = self.process_assignment_task(assignment_task)
+			if assignment_task.assignment_id is not None:
+				return AssignmentResult(assignment_task.assignment_id, groups or [])
+			return groups
 			
 		except json.JSONDecodeError as e:
 			self.worker_logger.error(f"ERROR decoding JSON data: {e}")
@@ -107,4 +111,6 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 		except Exception as e:
 			self.worker_logger.error(f"ERROR processing assignment task: {e}")
 			self.worker_logger.error(traceback.format_exc())
+			if assignment_task is not None and assignment_task.assignment_id is not None:
+				return AssignmentResult(assignment_task.assignment_id, [], "failed", str(e))
 			return None

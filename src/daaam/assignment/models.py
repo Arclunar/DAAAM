@@ -1,6 +1,6 @@
 """Data models for the assignment service."""
 from dataclasses import dataclass
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import numpy as np
 
 from daaam.tracking.models import SimplifiedTrack
@@ -16,6 +16,7 @@ class AssignmentTask:
 	prompted_track_ids: List[int]
 	start_frame_count: int
 	frame_id_mapping: Dict[int, int] = None  # local_idx -> global_frame_id
+	assignment_id: Optional[int] = None
 
 
 @dataclass
@@ -29,3 +30,12 @@ class SelectedGroup:
 	"""
 	global_frame_id: int
 	track_ids: List[int]
+
+
+@dataclass
+class AssignmentResult:
+	"""One terminal result, including empty selections and worker failures."""
+	assignment_id: int
+	groups: List[SelectedGroup]
+	status: str = "completed"
+	error: Optional[str] = None

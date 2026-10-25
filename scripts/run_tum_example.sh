@@ -43,6 +43,10 @@ FPS="${FPS:-15}"
 DEPTH_SCALE="${DEPTH_SCALE:-5000}"
 HYDRA_CONFIG="${HYDRA_CONFIG:-config/hydra_config/tum_rgbd_khronos.yaml}"
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
+FRAME_CACHE_OVERRIDES="grounding.release_assignment_frames=true scene_graph.corrections_save_interval_seconds=5"
+export KHRONOS_COMPACT_STATIC_FRAMES="${KHRONOS_COMPACT_STATIC_FRAMES:-1}"
+export DAAAM_TRIM_INTERVAL_FRAMES="${DAAAM_TRIM_INTERVAL_FRAMES:-100}"
+echo "[memory] compact_static=${KHRONOS_COMPACT_STATIC_FRAMES}, trim_interval=${DAAAM_TRIM_INTERVAL_FRAMES} frames"
 ZMQ_URL="${ZMQ_URL:-none}"
 DEPTH_LB="${DEPTH_LB:-0.3}"
 DEPTH_UB="${DEPTH_UB:-4.0}"
@@ -97,7 +101,7 @@ python scripts/run_pipeline.py "${DATASET}" \
   --zmq-url "${ZMQ_URL}" --dataset-name "${NAME}" \
   "${max_frames_args[@]}" --target-fps "${TARGET_FPS}" \
   --save-images --save-interval 30 --verbose \
-  --config-overrides tracking.reid_weights=checkpoints/reid_weights/clip_general.pt ${EXTRA_OVERRIDES} || rc=$?
+  --config-overrides tracking.reid_weights=checkpoints/reid_weights/clip_general.pt ${FRAME_CACHE_OVERRIDES} ${EXTRA_OVERRIDES} || rc=$?
 
 if [ "${VIZTRACER:-0}" = 1 ] && [ ! -s "${trace}" ]; then
   echo "VizTracer report was not saved: ${trace}" >&2

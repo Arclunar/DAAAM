@@ -5,12 +5,12 @@ import numpy as np
 
 from daaam.tracking.models import SimplifiedTrack
 from daaam.assignment.models import AssignmentTask, SelectedGroup
-from daaam.pipeline.models import MinimalCorrection
 
 from daaam.grounding.schemas import annotation_from_dict, annotation_to_json_serializable
 
 def assignment_task_to_json(task: AssignmentTask) -> str:
 	"""Convert AssignmentTask to JSON string for worker communication."""
+	from daaam.pipeline.models import MinimalCorrection
 	assert isinstance(task, AssignmentTask), "task must be an instance of AssignmentTask"
 
 	data = {
@@ -39,11 +39,15 @@ def assignment_task_to_json(task: AssignmentTask) -> str:
 		"prompted_track_ids": task.prompted_track_ids,
 		"start_frame_count": task.start_frame_count
 	}
+	if task.assignment_id is not None:
+		data["assignment_id"] = task.assignment_id
+		data["frame_id_mapping"] = task.frame_id_mapping
 	return json.dumps(data)
 
 
 def json_to_assignment_task(json_str: str) -> AssignmentTask:
 	"""Convert JSON string back to AssignmentTask."""
+	from daaam.pipeline.models import MinimalCorrection
 	data = json.loads(json_str)
 
 	# Reconstruct track history with SimplifiedTrack objects
@@ -73,7 +77,10 @@ def json_to_assignment_task(json_str: str) -> AssignmentTask:
 			for idx, correction in data["corrections"].items()
 		},
 		prompted_track_ids=data["prompted_track_ids"],
-		start_frame_count=data["start_frame_count"]
+		start_frame_count=data["start_frame_count"],
+		assignment_id=data.get("assignment_id"),
+		frame_id_mapping={int(k): int(v) for k, v in data["frame_id_mapping"].items()}
+			if data.get("frame_id_mapping") is not None else None,
 	)
 
 

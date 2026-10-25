@@ -2,6 +2,12 @@
 
 > 在 WSL Ubuntu-20.04 的 `~/jellymap_dev` 使用根 justfile；算法源码位于 `third_party/src/daaam_ws/src/daaam`。
 
+## 重大更新：长跑内存与描述持久化（2026-10-25）
+
+离线入口按 assignment 生命周期释放仅含 RGB 的历史帧，缓存预算默认512 MiB；它不限制模型、地图或整个进程。首条 DAM 描述立即保存，后续有更新约每5秒原子保存 `corrections.yaml`，保留来源和历史，最终保存复用同一写入器。中断仍可能丢失最近一个保存间隔；不提供地图恢复或精确续跑。
+
+入口设置 `grounding.release_assignment_frames=true`、`scene_graph.corrections_save_interval_seconds=5`，配置本身默认关闭。Khronos静态历史精简由 `KHRONOS_COMPACT_STATIC_FRAMES=1` 启用，动态帧完整保留；`DAAAM_TRIM_INTERVAL_FRAMES=100` 每100帧归还空闲堆。离线入口默认开启二者，设0关闭；原生开关未设置时保持上游。历史容量、采样和输入分辨率不变。更新已有环境用 `just daaam build khronos`，不必重建镜像。完整说明见工作区 `sm-lab/systems/daaam/README.md`。
+
 ## 职责与目录
 
 | 位置 | 内容 |

@@ -33,3 +33,8 @@
 - 验证：新 --rm 容器导入、布局/语法/diff、21 项 CLI/replay 测试通过；TUM 30 帧、8 快照、11514 trace 事件且无溢出，HTML 导出及 Windows HTTP 200。
 - 全量回归 1116 项、55 skipped，daaam_cli/phonegs/gs_view_portal 三个 suite 未通过；未宣称全绿。未验证全段语义质量和其他数据链路新实跑。
 - 证据：runs/reports/viztracer_01a16749/；任务 docs/completed/2026-10-23-daaam-viztracer-01a16749.md。
+
+## 2026-10-25 · 重大更新：内存与 DAM 持久化
+- Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root.
+- Assignment-owned RGB history, explicit terminal results/failure handling, periodic atomic corrections, optional allocator diagnostics and offline native compaction/trim defaults. Safe C YAML backend with safe Python fallback.
+- Validation: 1469 CV/Hydra frames completed without OOM; final graph and1096 descriptions saved. Full launcher failed143 because the validation time guard interrupted replay export; a separate recovery exported296 snapshots/219 verified chunks and RRD. Reconciliation separately generated162 groups without changing native graph/meshes. Core/host tests and limits recorded in root task report; semantic accuracy and native RRD playback unverified.

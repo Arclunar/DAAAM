@@ -416,6 +416,7 @@ class HydraPipelineRunner:
 						time.sleep(sleep_time)
 						self.logger.debug(f"Throttled: slept {sleep_time:.3f}s to maintain {self.target_fps} FPS")
 					
+			self.orchestrator.finish_assignments()
 			if pbar:
 				pbar.close()
 				

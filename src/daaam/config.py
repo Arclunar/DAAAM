@@ -36,6 +36,9 @@ class GroundingConfig:
 	perframe_clip_model_name: str = "ViT-B-16"
 	perframe_clip_model_dataset: str = "openai"
 	cuda_device: Optional[str] = None  # null = inherit env. "0", "1", etc. to pin GPU for grounding workers.
+	release_assignment_frames: bool = False
+	frame_cache_max_mb: float = 512.0
+	assignment_timeout_seconds: float = 180.0
 
 
 @dataclass
@@ -111,6 +114,7 @@ class SceneGraphConfig:
 	defer_dsg_processing: bool = False  # Defer DSG processing until shutdown for performance
 	enable_background_objects: bool = True  # Enable tracking of all objects including those filtered by Hydra
 	hydra_dsg_path: str = ""  # Path to Hydra's output directory; loads <path>/backend/dsg.json at shutdown
+	corrections_save_interval_seconds: float = 0.0
 
 
 @dataclass
@@ -208,6 +212,7 @@ class PipelineConfig:
 			'depth': self.depth.__dict__,
 			'dataset': self.dataset.__dict__,
 			'hydra': self.hydra.__dict__,
+			'scene_graph': self.scene_graph.__dict__,
 			'semantic_config_path': self.semantic_config_path,
 			'labelspace_colors_path': self.labelspace_colors_path,
 			'hierarchical_optimization': self.hierarchical_optimization,
