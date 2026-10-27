@@ -13,8 +13,8 @@ def workspace_root():
 
 def algorithm_root():
     """Use the shared canonical host/container source lookup."""
-    package_root = str(workspace_root() / "jellymap")
+    package_root = str(workspace_root() / "sm-lab/infra")
     if package_root not in sys.path:
         sys.path.insert(0, package_root)
-    from jellymap.paths import algorithm_root as shared_algorithm_root
+    from workspace_common.paths import algorithm_root as shared_algorithm_root
     return shared_algorithm_root()
