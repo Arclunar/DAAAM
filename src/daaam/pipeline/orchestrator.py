@@ -35,12 +35,13 @@ from daaam.utils.geometry import (
 					)
 from daaam.utils.embedding import CLIPHandler
 from daaam.grounding.models import ObjectAnnotation
-from daaam.pipeline.models import PromptRecord, Frame, MinimalCorrection
+from daaam.pipeline.models import PromptRecord, Frame, MinimalCorrection, UQPromptBundle, UQObjectRecord
 from daaam.scene_graph.models import SemanticUpdate, TemporalObservation, SemanticFeatures
 from daaam.tracking.models import Track, SimplifiedTrack
 from daaam.assignment.models import AssignmentTask, SelectedGroup, AssignmentResult
 from daaam.assignment.schemas import assignment_task_to_json
 from daaam.pipeline.frame_store import AssignmentFrameStore, image_bytes
+from daaam.pipeline.intermediates import IntermediateRecorder
 
 class PipelineOrchestrator:
 	"""
@@ -101,6 +102,7 @@ class PipelineOrchestrator:
 			exact_output_dir=output_dir,
 		)
 		self.output_dir.mkdir(parents=True, exist_ok=True)
+		self._intermediates = IntermediateRecorder(self.output_dir, self.logger) if config.save_intermediates else None
 		self._corrections_save_interval = config.scene_graph.corrections_save_interval_seconds
 		if not math.isfinite(self._corrections_save_interval) or self._corrections_save_interval < 0:
 			raise ValueError("corrections save interval must be finite and nonnegative")
@@ -126,6 +128,8 @@ class PipelineOrchestrator:
 		self.recent_frames_buffer: Deque[Frame] = deque(maxlen=self.config.grounding.query_interval_frames + 10)  # Increased from 200 for safety
 		self.prompted_track_ids: set = set()
 		self.pending_track_ids: set = set()  # track IDs pending prompting (i.e. in assignment pipeline)
+		self._uq_rows: list = []  # UQ-DAAAM rows of uq_objects.jsonl
+		self._intermediates: Optional[IntermediateRecorder] = None  # save_intermediates, opened once output_dir exists
 		self.prompted_track_semantic_map: Dict[int, int] = {}
 
 		# Frame snapshot storage for assignment->grounding pipeline
@@ -135,6 +139,8 @@ class PipelineOrchestrator:
 		self.release_assignment_frames = self.config.grounding.release_assignment_frames
 		self._frame_cache_error = None
 		self._frame_store = None
+		if self.config.uq.enabled and not self.release_assignment_frames:
+			raise ValueError("uq.enabled requires grounding.release_assignment_frames (identified assignment results)")
 		if self.release_assignment_frames:
 			budget = self.config.grounding.frame_cache_max_mb
 			timeout = self.config.grounding.assignment_timeout_seconds
@@ -193,6 +199,7 @@ class PipelineOrchestrator:
 				for track_id in tracks_to_remove:
 					self.prompted_track_semantic_map.pop(track_id, None)
 				self.logger.info(f"Removed {len(tracks_to_remove)} track IDs from prompted set due to 'unknown' label for semantic_id {semantic_id}")
+				self._event("reprompt", semantic_id=semantic_id, track_ids=sorted(tracks_to_remove))
 		
 	def _initialize_queues(self) -> None:
 		"""Initialize multiprocessing queues for worker communication."""
@@ -313,6 +320,9 @@ class PipelineOrchestrator:
 		self.assignment_service.stop()
 		self.grounding_service.stop()  # 20s join + SIGINT before terminate
 		self.logger.info("[Shutdown Step 2] Worker services stopped")
+		if self.config.uq.enabled and getattr(self.grounding_service, "interrupted_workers", None):
+			self.logger.error(f"[Shutdown] UQ grounding interrupted, descriptions incomplete: {self.grounding_service.interrupted_workers}")
+			self._write_uq_summary()
 
 		# STEP 3: Stop processor threads
 		self.logger.info("[Shutdown Step 3] Stopping processor threads...")
@@ -344,6 +354,9 @@ class PipelineOrchestrator:
 			self._save_all_data()
 		else:
 			self.logger.info("[Shutdown Step 4] No corrections since Step 1 save; skipping re-save")
+		if self._intermediates is not None:
+			self._intermediates.close()
+			self._intermediates = None
 
 		# STEP 5: Diagnostics
 		self.logger.info("[Shutdown Step 5] Running diagnostics...")
@@ -410,8 +423,13 @@ class PipelineOrchestrator:
 				finally:
 					executor.shutdown(wait=False)
 
+				if isinstance(correction, UQObjectRecord):
+					self._record_uq(correction.data)
+					count += 1
+					continue
 				correction = self._enrich_correction_with_temporal_data(correction)
 				self.scene_graph_service.store_correction(correction)
+				self._record_description(correction)
 				self._corrections_stored += 1
 				self._maybe_save_corrections()
 				count += 1
@@ -513,6 +531,10 @@ class PipelineOrchestrator:
 		# 8: create output images
 		with performance_measure("create_output_images", self.logger.debug, self.performance_tracker):
 			label_image, color_image = self._create_output_images(processed_tracks, track_masks, frame.rgb_image.shape[:2])
+
+		if self._intermediates is not None:
+			with performance_measure("record_intermediates", self.logger.debug, self.performance_tracker):
+				self._record_frame(frame, dets, tracks, processed_tracks, label_image)
 
 		# 9: Check for track closures periodically (every 10 frames)
 		if self.config.tracking.enable_temporal_history and self.frame_count % 10 == 0:
@@ -809,6 +831,9 @@ class PipelineOrchestrator:
 					self._frame_store.retain(assignment_id, snapshots, additional_ids,
 						time.monotonic() + self.config.grounding.assignment_timeout_seconds)
 				self.pending_track_ids |= additional_ids
+			if self._intermediates is not None:
+				self._record_query(assignment_id, start_frame_id, track_history_for_worker, prompted_track_ids_copy,
+					object_labels_copy, additional_ids)
 
 			try:
 				json_data = assignment_task_to_json(assignment_task)
@@ -821,6 +846,7 @@ class PipelineOrchestrator:
 					raise
 			except queue.Full:
 				self.logger.warning("Assignment worker queue is full, skipping this interval")
+				self._event("query_dropped", assignment_id=assignment_id)
 				with self._state_lock:
 					self.pending_track_ids.difference_update(additional_ids)  # rollback
 				if self.release_assignment_frames:
@@ -906,12 +932,16 @@ class PipelineOrchestrator:
 		while not self._stop_correction_processing:
 			try:
 				correction = self.correction_queue.get(timeout=0.1)
+				if isinstance(correction, UQObjectRecord):
+					self._record_uq(correction.data)
+					continue
 
 				# Enrich correction with temporal data
 				correction = self._enrich_correction_with_temporal_data(correction)
 
 				# Store enriched correction
 				self.scene_graph_service.store_correction(correction)
+				self._record_description(correction)
 				self._corrections_stored += 1
 				self._maybe_save_corrections()
 
@@ -926,6 +956,71 @@ class PipelineOrchestrator:
 				self.logger.error(f"Error processing correction: {e}")
 				import traceback
 				traceback.print_exc()
+
+	def _event(self, kind: str, **data) -> None:
+		"""save_intermediates: one events.jsonl row stamped with the current frame count."""
+		if self._intermediates is not None:
+			self._intermediates.event(kind, self.frame_count, **data)
+
+	def _record_frame(self, frame: Frame, dets, tracks, processed_tracks: List[Track], label_image: np.ndarray) -> None:
+		scores = {int(t[4]): round(float(t[5]), 3) for t in tracks}
+		rows = [dict(track_id=t.id, semantic_id=self.object_labels.get(t.id), score=scores.get(t.id),
+			bbox=None if t.bbox is None else [round(float(v), 1) for v in t.bbox], area=int(t.region_area),
+			depth_valid=bool(t.depth_valid), median_depth=None if t.median_depth is None else round(float(t.median_depth), 3))
+			for t in processed_tracks]
+		self._intermediates.frame(dict(frame_id=frame.frame_id, timestamp=frame.timestamp, detections=len(dets), tracks=rows),
+			label_image)
+
+	def _record_query(self, assignment_id, start_frame_id, history, prompted, labels, eligible) -> None:
+		"""Every track of the query window with the first rule of the eligibility loop that excluded it."""
+		min_obs = self.config.workers.assignment_config.min_obs_per_track
+		counts, valid = {}, set()
+		for frame_tracks in history:
+			for t in frame_tracks:
+				counts[t.id] = counts.get(t.id, 0) + 1
+				if t.depth_valid:
+					valid.add(t.id)
+		prompted = set(prompted)
+
+		def status(tid):
+			if tid in eligible:
+				return "eligible"
+			if tid in prompted:
+				return "prompted"
+			if tid not in valid:
+				return "depth_invalid"
+			return "few_observations" if counts[tid] < min_obs else "described"
+		self._event("query", assignment_id=assignment_id, window=[start_frame_id, self.frame_count], min_observations=min_obs,
+			tracks=[dict(track_id=tid, semantic_id=labels.get(tid), observations=counts[tid], status=status(tid))
+				for tid in sorted(counts)])
+
+	def _record_description(self, correction) -> None:
+		self._event("description", semantic_id=getattr(correction, "semantic_id", None),
+			label=getattr(correction, "semantic_label", None), confidence=getattr(correction, "confidence", None),
+			description_frame_id=getattr(correction, "description_frame_id", None))
+
+	def _record_uq(self, data: Dict[str, Any]) -> None:
+		"""UQ-DAAAM: append one uq_objects.jsonl row and atomically refresh uq_summary.json."""
+		try:
+			with (self.output_dir / "uq_objects.jsonl").open("a") as stream:
+				stream.write(json.dumps(data) + "\n")
+			self._uq_rows.append(data)
+			self._write_uq_summary()
+		except Exception as e:
+			self.logger.error(f"UQ record was not written: {e}")
+
+	def _write_uq_summary(self) -> None:
+		from daaam.uq.refinement import summarize
+		with self.scene_graph_service.correction_lock:
+			objects = sum(1 for sid in self.scene_graph_service.corrections if sid != -1)
+		rows = self._uq_rows
+		# a grounding worker killed at shutdown drops its queued groups: the run is then incomplete
+		summary = dict(summarize(rows), objects_with_descriptions=objects, config=self.config.uq.__dict__,
+			text_encoder=rows[-1].get("text_encoder") if rows else None, fusion_model=rows[-1].get("fusion_model") if rows else None,
+			grounding_interrupted=getattr(self.grounding_service, "interrupted_workers", []))
+		path = self.output_dir / "uq_summary.json"
+		path.with_suffix(".json.tmp").write_text(json.dumps(summary, indent=2) + "\n")
+		path.with_suffix(".json.tmp").replace(path)
 
 	def _maybe_save_corrections(self) -> None:
 		if not self._corrections_save_interval or self._corrections_stored == self._saved_corrections_count:
@@ -1014,6 +1109,7 @@ class PipelineOrchestrator:
 			
 			# save correction through scene graph service
 			self.scene_graph_service.store_correction(unknown_correction)
+			self._event("unknown", semantic_id=semantic_id, reason=reason)
 			self.logger.debug(f"Automatically marked semantic_id {semantic_id} as 'unknown' due to {reason} (with {observation_count} observations)")
 			
 		except Exception as e:
@@ -1031,6 +1127,7 @@ class PipelineOrchestrator:
 					
 					if label.lower() == "unknown":
 						del self.scene_graph_service.corrections[semantic_id]
+						self._event("unknown_cleared", semantic_id=semantic_id)
 						self.logger.debug(f"Cleared unknown correction for semantic_id {semantic_id} due to depth validation transition")
 		except Exception as e:
 			self.logger.error(f"Failed to clear unknown correction for semantic_id {semantic_id}: {e}")
@@ -1158,14 +1255,21 @@ class PipelineOrchestrator:
 			if owner is None:
 				self.logger.debug(f"Ignoring duplicate or late assignment {result.assignment_id}")
 				return
+		self._event("selection", assignment_id=result.assignment_id, status=result.status, groups=[
+			dict(frame_id=g.global_frame_id, track_ids=list(g.track_ids), role=getattr(g, "role", None)) for g in result.groups])
 		try:
 			if result.status != "completed":
 				raise RuntimeError(result.error or f"assignment {result.status}")
 			for group in result.groups:
 				if group.global_frame_id not in owner[0]:
 					raise ValueError("selected frame is not owned by this assignment")
-				if not self._process_single_group(group):
-					raise RuntimeError("selected group could not be delivered to grounding")
+			if self.config.uq.enabled:
+				if result.groups and not self._process_uq_groups(result.groups):
+					raise RuntimeError("UQ bundle could not be delivered to grounding")
+			else:
+				for group in result.groups:
+					if not self._process_single_group(group):
+						raise RuntimeError("selected group could not be delivered to grounding")
 		except Exception as error:
 			with self._state_lock:
 				self._frame_cache_error = f"Assignment {result.assignment_id} failed: {error}"
@@ -1210,95 +1314,128 @@ class PipelineOrchestrator:
 	def _process_single_group(self, group_info: SelectedGroup) -> bool:
 		"""Process a single selected group for grounding."""
 		try:
-			global_frame_id = group_info.global_frame_id
-			track_ids = group_info.track_ids
-			
-			if global_frame_id is None or not isinstance(track_ids, list):
-				self.logger.warning(f"Invalid group info received: {group_info}")
+			prompt_record = self._prompt_record(group_info)
+			if prompt_record is None:
 				return False
-			
-			# Retrieve frame from snapshots
-			with self._state_lock:
-				frame_obj = self.frame_snapshots.get(global_frame_id)
-				object_labels = self.object_labels.copy()
-			
-			if frame_obj is None:
-				self.logger.error(f"Frame {global_frame_id} not found in snapshots! May have been cleaned up.")
-				return False
-			
-			prompt_frame = frame_obj.rgb_image
-			all_tracks_in_frame = frame_obj.tracks
-			
-			if prompt_frame is None:
-				self.logger.warning(f"Frame {global_frame_id} has no RGB image")
-				return False
-			
-			# filter tracks for selected IDs
-			selected_tracks = []
-			for track in all_tracks_in_frame:
-				if track.id in track_ids:
-					selected_tracks.append(track)
-			
-			if len(selected_tracks) != len(track_ids):
-				self.logger.warning(f"Some track IDs {track_ids} not found in frame {global_frame_id}")
-				if self.release_assignment_frames:
-					return False
-
-			
-			if not selected_tracks:
-				self.logger.warning(f"No matching tracks found for IDs {track_ids} in frame {global_frame_id}")
-				return False
-			
-			# prepare prompt record for grounding workers
-			prompt_record = PromptRecord(
-				frame=prompt_frame if self.release_assignment_frames else prompt_frame.copy(),
-				tracks=selected_tracks,
-				object_labels=object_labels,
-				frame_id=global_frame_id,
-				timestamp=frame_obj.timestamp
-			)
-			
-			# send to grounding workers
-			try:
-				if self.release_assignment_frames:
-					deadline = time.monotonic() + self.config.grounding.assignment_timeout_seconds
-					while True:
-						if self._stop_group_processing or self._frame_cache_error:
-							raise RuntimeError("grounding delivery cancelled")
-						try:
-							self.query_group_queue.put(prompt_record, timeout=0.1)
-							break
-						except queue.Full:
-							if time.monotonic() >= deadline:
-								raise TimeoutError("grounding queue remained full")
-				else:
-					self.query_group_queue.put_nowait(prompt_record)
-				self.logger.info(f"Successfully sent prompt record for frame {global_frame_id} to grounding workers")
-				
-				# update prompted track IDs
-				with self._state_lock:
-					self.pending_track_ids.difference_update(set(track_ids))
-					self.prompted_track_ids.update(track_ids)
-					
-					# record semantic mapping for re-prompting
-					for track_id in track_ids:
-						semantic_id = object_labels.get(track_id)
-						if semantic_id is not None:
-							self.prompted_track_semantic_map[track_id] = semantic_id
-					
-					if not self.release_assignment_frames:
-						self._processed_snapshot_ids.add(global_frame_id)
-				return True
-							
-			except queue.Full:
-				self.logger.warning("Grounding worker queue is full! Discarding prompt record.")
-			except Exception as e:
-				self.logger.error(f"Error sending prompt record to grounding workers: {e}")
-
+			return self._deliver_prompt(prompt_record, group_info.track_ids, [group_info.global_frame_id], prompt_record.object_labels)
 		except Exception as e:
 			self.logger.error(f"Error processing single group {group_info}: {e}")
 			import traceback
 			traceback.print_exc()
+		return False
+
+	def _process_uq_groups(self, groups: List[SelectedGroup]) -> bool:
+		"""UQ-DAAAM: one bundle per assignment so all views and refinement candidates of an object reach the same worker."""
+		try:
+			records = {"view": [], "candidate": []}
+			quality = {}
+			for group in groups:
+				record = self._prompt_record(group)
+				if record is None:
+					return False
+				records[group.role].append(record)
+				for track_id, q in (group.quality or {}).items():
+					quality[track_id, group.global_frame_id] = q
+			track_ids = sorted({tid for group in groups if group.role == "view" for tid in group.track_ids})
+			bundle = UQPromptBundle(records["view"], records["candidate"], quality)
+			return self._deliver_prompt(bundle, track_ids, [group.global_frame_id for group in groups], records["view"][0].object_labels)
+		except Exception as e:
+			self.logger.error(f"Error processing UQ groups: {e}")
+			import traceback
+			traceback.print_exc()
+		return False
+
+	def _prompt_record(self, group_info: SelectedGroup) -> Optional[PromptRecord]:
+		"""Prompt record for one selected group, or None when its frame or tracks are unavailable."""
+		global_frame_id = group_info.global_frame_id
+		track_ids = group_info.track_ids
+		
+		if global_frame_id is None or not isinstance(track_ids, list):
+			self.logger.warning(f"Invalid group info received: {group_info}")
+			return None
+		
+		# Retrieve frame from snapshots
+		with self._state_lock:
+			frame_obj = self.frame_snapshots.get(global_frame_id)
+			object_labels = self.object_labels.copy()
+		
+		if frame_obj is None:
+			self.logger.error(f"Frame {global_frame_id} not found in snapshots! May have been cleaned up.")
+			return None
+		
+		prompt_frame = frame_obj.rgb_image
+		all_tracks_in_frame = frame_obj.tracks
+		
+		if prompt_frame is None:
+			self.logger.warning(f"Frame {global_frame_id} has no RGB image")
+			return None
+		
+		# filter tracks for selected IDs
+		selected_tracks = []
+		for track in all_tracks_in_frame:
+			if track.id in track_ids:
+				selected_tracks.append(track)
+		
+		if len(selected_tracks) != len(track_ids):
+			self.logger.warning(f"Some track IDs {track_ids} not found in frame {global_frame_id}")
+			if self.release_assignment_frames:
+				return None
+
+		
+		if not selected_tracks:
+			self.logger.warning(f"No matching tracks found for IDs {track_ids} in frame {global_frame_id}")
+			return None
+		
+		# prepare prompt record for grounding workers
+		prompt_record = PromptRecord(
+			frame=prompt_frame if self.release_assignment_frames else prompt_frame.copy(),
+			tracks=selected_tracks,
+			object_labels=object_labels,
+			frame_id=global_frame_id,
+			timestamp=frame_obj.timestamp
+		)
+		return prompt_record
+
+	def _deliver_prompt(self, prompt_record, track_ids: List[int], global_frame_ids: List[int], object_labels: Dict[int, int]) -> bool:
+		"""Send a prompt record (or UQ bundle) to grounding and mark its tracks prompted."""
+		# send to grounding workers
+		try:
+			if self.release_assignment_frames:
+				deadline = time.monotonic() + self.config.grounding.assignment_timeout_seconds
+				while True:
+					if self._stop_group_processing or self._frame_cache_error:
+						raise RuntimeError("grounding delivery cancelled")
+					try:
+						self.query_group_queue.put(prompt_record, timeout=0.1)
+						break
+					except queue.Full:
+						if time.monotonic() >= deadline:
+							raise TimeoutError("grounding queue remained full")
+			else:
+				self.query_group_queue.put_nowait(prompt_record)
+			self.logger.info(f"Successfully sent prompt record for frames {global_frame_ids} to grounding workers")
+			self._event("prompt", frame_ids=list(global_frame_ids), track_ids=list(track_ids),
+				semantic_ids=[object_labels.get(t) for t in track_ids])
+			
+			# update prompted track IDs
+			with self._state_lock:
+				self.pending_track_ids.difference_update(set(track_ids))
+				self.prompted_track_ids.update(track_ids)
+				
+				# record semantic mapping for re-prompting
+				for track_id in track_ids:
+					semantic_id = object_labels.get(track_id)
+					if semantic_id is not None:
+						self.prompted_track_semantic_map[track_id] = semantic_id
+				
+				if not self.release_assignment_frames:
+					self._processed_snapshot_ids.update(global_frame_ids)
+			return True
+						
+		except queue.Full:
+			self.logger.warning("Grounding worker queue is full! Discarding prompt record.")
+		except Exception as e:
+			self.logger.error(f"Error sending prompt record to grounding workers: {e}")
 		return False
 
 

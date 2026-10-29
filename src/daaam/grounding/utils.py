@@ -79,6 +79,8 @@ def correction_label_entry(semantic_id: int, correction: ObjectAnnotation) -> Di
 			"frame_id": correction.description_frame_id,
 			"timestamp": correction.description_timestamp,
 		}
+		if correction.description_mask:
+			entry["description_source"]["mask"] = correction.description_mask
 	if correction.frame_ids:
 		entry["temporal_history"] = {
 			"frame_ids": correction.frame_ids,

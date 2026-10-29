@@ -68,6 +68,7 @@ class DAMGroundingWorkerConfig:
 	save_plain_grounding_images: bool = False
 	save_object_images: bool = False
 	enable_selectframe_clip_features: bool = False
+	save_description_masks: bool = False  # write the exact DAM mask of each description to description_masks/
 	selectframe_clip_model_name: str = "ViT-L-14"
 	selectframe_clip_model_dataset: str = "openai"
 	selectframe_clip_backend: str = "openclip"  # "openclip" or "pe" (Perception Encoder)
@@ -131,6 +132,27 @@ class HydraConfig:
 
 
 @dataclass
+class UQConfig:
+	"""UQ-DAAAM (arXiv:2606.08277): multi-view captions, log-volume uncertainty, active refinement and fusion. Off = upstream behavior."""
+	enabled: bool = False
+	views_per_object: int = 3  # r
+	min_views: int = 2
+	refine_budget: int = 2  # B
+	tau_mode: str = "fixed"  # "fixed" or "quantile"
+	tau: float = -0.25
+	tau_quantile: float = 0.8
+	alpha: float = 1.0
+	lam: float = 1e-8  # lambda (a Python keyword)
+	text_encoder: str = "clip"  # "clip" reuses the grounding CLIP model; otherwise a locally cached sentence-transformers name
+	caption_temperature: float = 1.0  # paper 1.0; upstream DAAAM captions use 0.2
+	solver_time_limit_s: float = 15.0
+	save_views: bool = True  # write each caption's RGB frame and mask to uq_views/ (paths in uq_objects.jsonl) for viewers
+	shutdown_timeout_s: float = 3600.0  # grounding join at shutdown; UQ batches are several times slower (900 s cut a 703-frame run)
+	fusion_enabled: bool = True
+	fusion_model: str = "gpt-5-mini"
+
+
+@dataclass
 class PipelineConfig:
 	segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
 	tracking: TrackingConfig = field(default_factory=TrackingConfig)
@@ -140,11 +162,13 @@ class PipelineConfig:
 	dataset: DatasetConfig = field(default_factory=DatasetConfig)
 	scene_graph: SceneGraphConfig = field(default_factory=SceneGraphConfig)
 	hydra: HydraConfig = field(default_factory=HydraConfig)
+	uq: UQConfig = field(default_factory=UQConfig)
 	semantic_config_path: str = "config/labels_pseudo.yaml"
 	labelspace_colors_path: str = "config/labels_pseudo.csv"
 	hierarchical_optimization: bool = True
 	output_dir: str = "output"
 	log_dir: Optional[str] = None  # Runtime log directory for unified logging
+	save_intermediates: bool = False  # write per-frame tracks, label images and query/description events to intermediates/
 
 	@classmethod
 	def from_yaml(cls, path: str, validate_files: bool = True) -> 'PipelineConfig':
@@ -164,6 +188,7 @@ class PipelineConfig:
 		dataset_config = DatasetConfig(**data.get('dataset', {}))
 		scene_graph_config = SceneGraphConfig(**data.get('scene_graph', {}))
 		hydra_config = HydraConfig(**data.get('hydra', {}))
+		uq_config = UQConfig(**data.get('uq', {}))
 
 		# Handle workers config with nested worker-specific configs
 		workers_data = data.get('workers', {})
@@ -181,7 +206,7 @@ class PipelineConfig:
 
 		# Extract top-level config
 		top_level = {k: v for k, v in data.items()
-					if k not in ['segmentation', 'tracking', 'grounding', 'workers', 'depth', 'dataset', 'scene_graph', 'hydra']}
+					if k not in ['segmentation', 'tracking', 'grounding', 'workers', 'depth', 'dataset', 'scene_graph', 'hydra', 'uq']}
 
 		config = cls(
 			segmentation=segmentation_config,
@@ -192,6 +217,7 @@ class PipelineConfig:
 			dataset=dataset_config,
 			scene_graph=scene_graph_config,
 			hydra=hydra_config,
+			uq=uq_config,
 			**top_level
 		)
 
@@ -217,6 +243,9 @@ class PipelineConfig:
 			'labelspace_colors_path': self.labelspace_colors_path,
 			'hierarchical_optimization': self.hierarchical_optimization,
 			'output_dir': self.output_dir,
+			# omitted while disabled so saved configs (and their hashes) stay identical to upstream
+			**({'uq': self.uq.__dict__} if self.uq.enabled else {}),
+			**({'save_intermediates': True} if self.save_intermediates else {}),
 		}
 
 	def get_worker_config(self, worker_type: str) -> Dict[str, Any]:

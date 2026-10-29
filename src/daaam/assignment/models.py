@@ -30,6 +30,8 @@ class SelectedGroup:
 	"""
 	global_frame_id: int
 	track_ids: List[int]
+	role: str = "view"  # UQ-DAAAM: "view" is described now, "candidate" is kept for active refinement
+	quality: Optional[Dict[int, float]] = None  # UQ-DAAAM: track_id -> q_ij in this frame
 
 
 @dataclass

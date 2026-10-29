@@ -61,6 +61,8 @@ class GroundingService:
 		# is too late, because torch caches the visible devices during the module
 		# imports that run before __init__, and the worker then binds to whatever
 		# device the parent's environment happened to name.
+		uq = getattr(pipeline_config, 'uq', None)
+		self._join_timeout = uq.shutdown_timeout_s if uq is not None and uq.enabled else 20.0
 		if hasattr(pipeline_config, 'grounding') and pipeline_config.grounding.cuda_device is not None:
 			worker_config['cuda_device'] = str(pipeline_config.grounding.cuda_device)
 			os.environ['CUDA_VISIBLE_DEVICES'] = worker_config['cuda_device']
@@ -104,9 +106,11 @@ class GroundingService:
 		if self.stop_event:
 			self.stop_event.set()
 
+		self.interrupted_workers = []  # workers still busy after the join timeout: their queued groups are lost
 		for worker in self.workers:
-			worker.join(timeout=20.0)
+			worker.join(timeout=getattr(self, "_join_timeout", 20.0))
 			if worker.is_alive():
+				self.interrupted_workers.append(worker.name)
 				# Try SIGINT first — allows clean queue flush in worker's finally block
 				self.logger.warning(f"Sending SIGINT to grounding worker {worker.name}")
 				try:

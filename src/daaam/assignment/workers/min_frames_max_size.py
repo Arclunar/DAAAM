@@ -50,6 +50,10 @@ class MinFramesMaxSizeAssignmentWorker(MinFramesAssignmentWorker):
 	) -> Optional[List[SelectedGroup]]:
 		"""DAM-specific selection that minimizes frames and covers all unlabeled tracks without overlap constraints."""
 
+		if self.config.get("uq", {}).get("enabled", False):
+			return self.select_prompt_images_uq(
+				frame_history, corrections, frame_dims, object_labels, prompted_track_ids, start_frame_count)
+
 		frame_height, frame_width = frame_dims
 
 		with performance_measure(
@@ -279,6 +283,100 @@ class MinFramesMaxSizeAssignmentWorker(MinFramesAssignmentWorker):
 		self.worker_logger.info(f"DAM assignment complete. Selected {len(selected_groups)} groups.")
 		return selected_groups, valid_tracks, qualified_track_ids, track_observations, tracks_by_frame
 
+
+	def select_prompt_images_uq(
+		self,
+		frame_history: List[List[SimplifiedTrack]],
+		corrections: Dict[int, ObjectAnnotation],
+		frame_dims: Tuple[int, int],
+		object_labels: Dict[int, int],
+		prompted_track_ids: Set[int],
+		start_frame_count: int
+	) -> Optional[List[SelectedGroup]]:
+		"""UQ-DAAAM r-assignment: max sum q_ij y_ij s.t. sum_i y_ij = r_j, y_ij <= v_ij, y_ij <= x_i.
+
+		r_j = min(r, visible frames), or 1 when fewer than min_views frames see the track (single-view upstream path).
+		Frame budget = greedy r-cover frame count + min_frame_margin_slack, capped at the window length.
+		For each track the top-B visible frames it was not assigned are returned as "candidate" groups for refinement.
+		"""
+		uq = self.config["uq"]
+		greedy = self.select_prompt_images_greedy(
+			frame_history, corrections, frame_dims, object_labels, prompted_track_ids, start_frame_count)
+		if not greedy:
+			return None
+		_, _, qualified_track_ids, track_observations, tracks_by_frame = greedy
+		frame_height, frame_width = frame_dims
+		track_ids = sorted(qualified_track_ids)
+		quality = {
+			(track.id, frame_idx): float(self.track_size_reward(track, frame_height, frame_width))
+			for frame_idx, tracks in tracks_by_frame.items() for track in tracks if track.id in qualified_track_ids
+		}
+		demand = {}
+		for tid in track_ids:
+			visible = len(track_observations[tid])
+			demand[tid] = min(uq["views_per_object"], visible) if visible >= uq["min_views"] else 1
+
+		# greedy r-cover: frame covering most tracks that still need a view not taken from this frame
+		remaining, used, greedy_frames = dict(demand), {tid: set() for tid in track_ids}, 0
+		while any(remaining.values()):
+			coverage = {
+				frame_idx: [t.id for t in tracks if remaining.get(t.id, 0) > 0 and frame_idx not in used[t.id]]
+				for frame_idx, tracks in tracks_by_frame.items()
+			}
+			best = max(coverage, key=lambda frame_idx: (len(coverage[frame_idx]), -frame_idx))
+			if not coverage[best]:
+				break
+			greedy_frames += 1
+			for tid in coverage[best]:
+				remaining[tid] -= 1
+				used[tid].add(best)
+		assigned = used  # greedy assignment is the fallback
+
+		n_frames, n_tracks = len(frame_history), len(track_ids)
+		frame_vars = cp.Variable(n_frames, boolean=True)
+		track_frame_vars = cp.Variable((n_tracks, n_frames), boolean=True)
+		rewards, visible = np.zeros((n_tracks, n_frames)), np.zeros((n_tracks, n_frames))
+		for (tid, frame_idx), q in quality.items():
+			rewards[track_ids.index(tid), frame_idx] = q
+			visible[track_ids.index(tid), frame_idx] = 1
+		budget = min(n_frames, greedy_frames + self.config.get("min_frame_margin_slack", 1))
+		constraints = [
+			cp.sum(track_frame_vars, axis=1) == np.array([demand[tid] for tid in track_ids]),
+			track_frame_vars <= visible,
+			cp.sum(frame_vars) == budget,
+		]
+		constraints += [track_frame_vars[:, i] <= frame_vars[i] for i in range(n_frames)]
+		problem = cp.Problem(cp.Maximize(cp.sum(cp.multiply(track_frame_vars, rewards))), constraints)
+		limit = float(uq.get("solver_time_limit_s", 15.0))
+		try:
+			try:
+				problem.solve(cp.GLPK_MI, glpk={"tm_lim": int(limit * 1000)})
+			except Exception:
+				self.worker_logger.warning("GLPK_MI failed, falling back to SCIPY")
+				problem.solve(cp.SCIPY, scipy_options={"time_limit": limit})
+			self.worker_logger.info(f"UQ r-assignment status: {problem.status}, value: {problem.value}, frame budget: {budget}")
+			if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE] and track_frame_vars.value is not None:
+				selection = track_frame_vars.value > 0.5
+				assigned = {tid: set(np.where(selection[k])[0].tolist()) for k, tid in enumerate(track_ids)}
+			else:
+				self.worker_logger.warning("UQ r-assignment MIP failed, using greedy r-cover")
+		except Exception as e:
+			self.worker_logger.error(f"UQ r-assignment failed ({e}), using greedy r-cover")
+
+		groups: Dict[Tuple[str, int], Dict[int, float]] = {}
+		for tid in track_ids:
+			for frame_idx in assigned[tid]:
+				groups.setdefault(("view", frame_idx), {})[tid] = quality[tid, frame_idx]
+			if demand[tid] < uq["min_views"]:
+				continue
+			unused = sorted((f for f in track_observations[tid] if f not in assigned[tid]),
+				key=lambda f: (-quality[tid, f], f))[:uq["refine_budget"]]
+			for frame_idx in unused:
+				groups.setdefault(("candidate", frame_idx), {})[tid] = quality[tid, frame_idx]
+		return [
+			SelectedGroup(start_frame_count + int(frame_idx), list(scores), role=role, quality=scores)
+			for (role, frame_idx), scores in sorted(groups.items(), key=lambda item: (item[0][0] != "view", item[0][1]))
+		]
 
 	def track_size_reward(self, track: SimplifiedTrack, frame_height: int, frame_width: int) -> float:
 		"""

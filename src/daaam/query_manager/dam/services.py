@@ -241,3 +241,24 @@ class DAMAgentPanoptic:
                 print(f"[DAM Multi-Image Agent Response - Image {img_idx}, Mask {mask_idx}]: {desc}")
         
         return descriptions
+    def query_multi_image_multi_mask_scored(
+        self,
+        image_mask_pairs: List[Tuple[Image.Image, List[Image.Image]]],
+        **kwargs
+    ) -> Tuple[List[List[str]], List[List[Optional[float]]]]:
+        """UQ-DAAAM: descriptions plus the mean model probability of each sampled non-special token (None if it has none).
+
+        The installed DAM package is not modified: model.generate is wrapped for this call only and gets a logits processor
+        that runs before the temperature/top-p warpers, i.e. it reads the raw next-token distribution. auto_batch=False keeps
+        the generation order equal to the flattened (image, mask) order used to regroup the probabilities.
+        """
+        from daaam.uq.scoring import scored
+
+        descriptions, flat = scored(self.dam_model, lambda: self.query_multi_image_multi_mask(image_mask_pairs, auto_batch=False, **kwargs))
+        if len(flat) != sum(len(masks) for _, masks in image_mask_pairs):
+            raise RuntimeError("token probabilities do not match the generated descriptions")
+        probabilities, start = [], 0
+        for _, masks in image_mask_pairs:
+            probabilities.append(flat[start:start + len(masks)])
+            start += len(masks)
+        return descriptions, probabilities

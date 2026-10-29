@@ -39,6 +39,20 @@ class PromptRecord:
 	timestamp: float = 0.0  # Observation timestamp in seconds
 
 
+@dataclass
+class UQPromptBundle:
+	"""UQ-DAAAM: every initial view and refinement candidate of one assignment, so one grounding worker sees all views of an object."""
+	views: List[PromptRecord]
+	candidates: List[PromptRecord]
+	quality: Dict[Any, float]  # (track_id, frame_id) -> q_ij
+
+
+@dataclass
+class UQObjectRecord:
+	"""UQ-DAAAM per-object provenance (one uq_objects.jsonl row); travels on the correction queue next to its ObjectAnnotation."""
+	data: Dict[str, Any]
+
+
 class MinimalCorrection(BaseModel):
 	"""Minimal correction data for assignment workers (without embeddings)."""
 	semantic_id: int

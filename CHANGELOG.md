@@ -48,3 +48,11 @@
 - Agent: codex/01a16d82-3f68-7d23-b9cb-344fc412dd58/root (review and commit of existing workspace changes).
 - When JELLYMAP_ROOT names a workspace with shared tools, scripts.gs_world and scripts.replay_web load modules from sm-lab; otherwise their original package paths remain. No dependency changes.
 - Verified both package paths and canonical algorithm lookup in a host subprocess; quick regression passed. Six unrelated fallback-file reversions remain uncommitted and preserved; full GPU/standalone fallback execution not verified. Root task/report: functional_commits_01a16d82.
+
+## 2026-10-28 · UQ-DAAAM（可选）
+- Agent: claude/6c3fdff5-e603-44e6-8cba-93408d3665fa/opus.
+- `just daaam run <Dataset> all --uq` / `uq.enabled=true`：多视角描述的不确定性、按选帧打分补视角、LLM 融合（`src/daaam/uq/`），并输出 `uq_objects.jsonl`、`uq_summary.json`、`uq_views/`。离线入口默认保存描述 Mask（`description_masks/`）。关闭时为原版行为，配置与上游一致；不依赖 JellyMap 代码。
+
+## 2026-10-28 · 前端中间结果导出（可选）
+- Agent: claude/6c3fdff5-e603-44e6-8cba-93408d3665fa/opus.
+- `save_intermediates`（默认关）：逐帧 track 与标签图、查询/选帧/送 DAM/描述/unknown 事件写到 `out_*/intermediates/`，后台线程写盘；`run_rgbd.py --intermediates`。

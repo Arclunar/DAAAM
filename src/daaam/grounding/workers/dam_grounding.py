@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import queue
 from typing import Dict, List, Set, Any, Optional, Tuple
 from PIL import Image as PILImage
 import torch
@@ -7,7 +8,7 @@ import traceback
 from sentence_transformers import SentenceTransformer
 from abc import ABC, abstractmethod
 import re
-from daaam.pipeline.models import PromptRecord
+from daaam.pipeline.models import PromptRecord, UQPromptBundle, UQObjectRecord
 from daaam.tracking.models import Track
 from pathlib import Path
 import cv2
@@ -389,6 +390,13 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		"""Process prompt record - aggregate until we have enough masks."""
 		if self.dam_agent is None:
 			return None
+
+		if isinstance(prompt_record, UQPromptBundle):
+			self.aggregated_records.append(prompt_record)
+			self.total_masks += sum(len(record.tracks) for record in prompt_record.views)
+			if self.total_masks >= self.multi_image_min_n_masks:
+				return self._process_aggregated_batch()
+			return None
 		
 		# validate and count masks in record
 		prompt_tracks = prompt_record.tracks
@@ -421,10 +429,72 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		# continue aggregating
 		return None
 	
+	def _write_mask(self, relative: str, mask: np.ndarray, enabled: Optional[bool] = None) -> Optional[str]:
+		"""Run-relative PNG of an exact mask DAM described (replay overlays it), or None unless enabled (default: save_description_masks)."""
+		if enabled is None:
+			enabled = self.config.get("save_description_masks", False)
+		if not enabled or not self.config.get("output_dir"):
+			return None
+		path = Path(self.config["output_dir"]) / relative
+		path.parent.mkdir(parents=True, exist_ok=True)
+		if not cv2.imwrite(str(path), mask.astype(np.uint8) * 255):
+			raise OSError(f"could not write {path}")
+		return relative
+
+	def _write_uq_view(self, label: int, frame_id: int, frame: np.ndarray, mask: np.ndarray) -> Dict[str, Optional[str]]:
+		"""uq.save_views: the exact RGB frame (JPEG, once per frame) and object mask (PNG) of one UQ caption, run-relative, so a
+		viewer can show every view without the dataset; both None when disabled."""
+		if not self.config["uq"].get("save_views", True) or not self.config.get("output_dir"):
+			return {"image_path": None, "mask_path": None}
+		image = f"uq_views/frames/{frame_id}.jpg"
+		path = Path(self.config["output_dir"]) / image
+		if not path.is_file():
+			path.parent.mkdir(parents=True, exist_ok=True)
+			if not cv2.imwrite(str(path), cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 90]):
+				raise OSError(f"could not write {path}")
+		return {"image_path": image, "mask_path": self._write_mask(f"uq_views/masks/{label}_{frame_id}.png", np.asarray(mask) > 0, True)}
+
+	def _save_description_mask(self, correction, mask: np.ndarray) -> None:
+		if isinstance(correction, ObjectAnnotation):
+			correction.description_mask = self._write_mask(f"description_masks/{correction.semantic_id}_{correction.description_frame_id}.png", mask)
+
+	def _attach_text_features(self, corrections: List[ObjectAnnotation]) -> None:
+		if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
+			objects = [c for c in corrections if isinstance(c, ObjectAnnotation)]
+			if objects:
+				if self.clip_handler is None:
+					raise RuntimeError("Native reconciliation requires the existing CLIP handler")
+				features = self.clip_handler.extract_text_features([c.semantic_label for c in objects], batch_size=8)
+				for correction, feature in zip(objects, features):
+					correction.description_clip_feature = feature.tolist()
+		# Add sentence embeddings if handler is available
+		if self.sentence_embedding_handler is not None:
+			texts = [c.semantic_label for c in corrections]
+			embeddings = self.sentence_embedding_handler.extract_text_embeddings_with_format(
+				texts,
+				prefix="an object that looks like '",
+				postfix="'",
+				show_progress=False
+			)
+			for correction, embedding in zip(corrections, embeddings):
+				correction.embedding = embedding.tolist()
+
 	def _process_aggregated_batch(self) -> Optional[List[ObjectAnnotation]]:
 		"""Process the aggregated batch of records."""
 		if not self.aggregated_records:
 			return None
+		if isinstance(self.aggregated_records[0], UQPromptBundle):
+			try:
+				return self._process_uq_batch(self.aggregated_records)
+			except Exception as e:
+				self.worker_logger.error(f"[Worker {self.worker_id}] ERROR processing UQ batch: {e}")
+				self.worker_logger.error(traceback.format_exc())
+				return None
+			finally:
+				self.aggregated_records = []
+				self.total_masks = 0
+				if torch.cuda.is_available():
+					torch.cuda.empty_cache()
 		
 		self.worker_logger.info(
 			f"Processing batch of {len(self.aggregated_records)} records "
@@ -535,6 +605,9 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 						source_timestamp=record_timestamp,
 					)
 					
+					for correction, mask in zip(record_corrections, image_mask_pairs[img_idx][1]):
+						self._save_description_mask(correction, np.array(mask) > 0)
+
 					# Attach CLIP features to corrections
 					for correction in record_corrections:
 						if hasattr(correction, 'semantic_id') and correction.semantic_id in clip_features:
@@ -550,25 +623,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				torch.cuda.empty_cache()
 			
 			if corrections:
-				if os.environ.get("DAAAM_ONLINE_RECONCILIATION") == "1":
-					objects = [c for c in corrections if isinstance(c, ObjectAnnotation)]
-					if objects:
-						if self.clip_handler is None:
-							raise RuntimeError("Native reconciliation requires the existing CLIP handler")
-						features = self.clip_handler.extract_text_features([c.semantic_label for c in objects], batch_size=8)
-						for correction, feature in zip(objects, features):
-							correction.description_clip_feature = feature.tolist()
-				# Add sentence embeddings if handler is available
-				if self.sentence_embedding_handler is not None:
-					texts = [c.semantic_label for c in corrections]
-					embeddings = self.sentence_embedding_handler.extract_text_embeddings_with_format(
-						texts,
-						prefix="an object that looks like '",
-						postfix="'",
-						show_progress=False
-					)
-					for correction, embedding in zip(corrections, embeddings):
-						correction.embedding = embedding.tolist()
+				self._attach_text_features(corrections)
 				return corrections
 			else:
 				self.worker_logger.warning(f"[Worker {self.worker_id}] Received no valid corrections from DAM agent.")
@@ -589,6 +644,124 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				torch.cuda.empty_cache()
 				self.worker_logger.debug(f"[Worker {self.worker_id}] Cleared GPU cache after multi-image batch processing")
 	
+	def _uq_encode(self, texts: List[str]) -> np.ndarray:
+		"""Caption embeddings phi(c): "clip" reuses the loaded CLIP text encoder, otherwise a locally cached sentence-transformers model."""
+		name = self.config["uq"]["text_encoder"]
+		if name == "clip":
+			if self.clip_handler is None:
+				raise RuntimeError("uq.text_encoder=clip needs enable_selectframe_clip_features (the already loaded CLIP model)")
+			return np.asarray(self.clip_handler.extract_text_features(texts, batch_size=8))
+		if getattr(self, "_uq_encoder", None) is None:
+			self._uq_encoder = SentenceTransformer(name, device="cuda" if torch.cuda.is_available() else "cpu", local_files_only=True)
+		return np.asarray(self._uq_encoder.encode(texts, batch_size=8, show_progress_bar=False))
+
+	def _uq_describe(self, requests: List[Tuple[PromptRecord, Track]]) -> List[Tuple[str, Optional[float]]]:
+		"""One scored DAM query for (record, track) requests, grouped per source frame; returns (text, mean token probability)."""
+		groups = {}
+		for index, (record, track) in enumerate(requests):
+			groups.setdefault(id(record), (record, []))[1].append((index, track))
+		pairs = [
+			(PILImage.fromarray(record.frame), [PILImage.fromarray((track.segmentation * 255).astype(np.uint8), mode="L") for _, track in items])
+			for record, items in groups.values()
+		]
+		with performance_measure(f"DAMGroundingWorker {self.worker_id}: uq scored query", self.worker_logger.debug):
+			descriptions, probabilities = self.dam_agent.query_multi_image_multi_mask_scored(
+				pairs,
+				query="Describe what you see in this region.",
+				temperature=self.config["uq"]["caption_temperature"],
+				top_p=0.9,
+				max_new_tokens=196 if self.compute_full_image_description else 512,
+			)
+		results = [None] * len(requests)
+		for (_, items), texts, probs in zip(groups.values(), descriptions, probabilities):
+			for (index, _), text, probability in zip(items, texts, probs):
+				results[index] = ((text or "").strip(), probability)
+		return results
+
+	def _uq_completion(self):
+		"""Fusion LLM call, or None without a key; the key comes from the environment/.env exactly as for the replay agent."""
+		from daaam.uq.fusion import openai_complete
+
+		uq = self.config["uq"]
+		if not uq.get("fusion_enabled", True):
+			return None
+		if not hasattr(self, "_uq_complete"):
+			self._uq_complete = openai_complete(uq["fusion_model"])
+		return self._uq_complete
+
+	def _process_uq_batch(self, bundles: List[UQPromptBundle]) -> Optional[List[Any]]:
+		"""UQ-DAAAM: r initial captions -> u_j; refine above tau by descending q within budget B; fuse; one correction per object."""
+		import hashlib
+		from daaam.uq.refinement import finish_objects, refine_objects
+
+		uq = self.config["uq"]
+		digest = lambda array: hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+		sources, objects = {}, {}
+		for bundle in bundles:
+			for record in bundle.views + bundle.candidates:
+				for track in record.tracks:
+					if record.object_labels.get(track.id) is not None and isinstance(track.segmentation, np.ndarray):
+						sources[track.id, record.frame_id] = (record, track)
+			for record in bundle.views:
+				for track in record.tracks:
+					if (track.id, record.frame_id) in sources:
+						item = objects.setdefault(track.id, {"semantic_id": int(record.object_labels[track.id]), "initial": [], "candidates": {}})
+						item["initial"].append(record.frame_id)
+			for (track_id, frame_id), q in bundle.quality.items():
+				if track_id in objects and frame_id not in objects[track_id]["initial"] and (track_id, frame_id) in sources:
+					objects[track_id]["candidates"][frame_id] = q
+		if not objects:
+			self.worker_logger.warning("UQ batch has no describable tracks")
+			return None
+		quality = {key: q for bundle in bundles for key, q in bundle.quality.items()}
+		frame_hashes = {}
+
+		def describe(stage, keys):
+			"""Describe (track_id, frame_id) keys and return view provenance dicts with embeddings."""
+			results = self._uq_describe([sources[key] for key in keys])
+			embeddings = self._uq_encode([text for text, _ in results])
+			views = []
+			for key, (text, probability), embedding in zip(keys, results, embeddings):
+				record, track = sources[key]
+				if id(record) not in frame_hashes:
+					frame_hashes[id(record)] = digest(record.frame)
+				views.append(dict(stage=stage, frame_id=key[1], quality=quality.get(key, 0.0), probability=probability,
+					text=text, embedding=embedding, timestamp=record.timestamp, rgb_sha256=frame_hashes[id(record)],
+					mask_sha256=digest(track.segmentation),
+					**self._write_uq_view(record.object_labels[track.id], key[1], record.frame, track.segmentation)))
+			return views
+
+		if not hasattr(self, "_uq_seen"):
+			self._uq_seen = []  # initial u of every object this worker has seen: causal quantile threshold
+		tau = refine_objects(objects, describe, uq, self._uq_seen)
+		finished = finish_objects(objects, tau, uq, self._uq_completion())
+
+		corrections, rows, best_views = [], [], {}
+		for track_id, item in objects.items():
+			row = dict(semantic_id=item["semantic_id"], track_id=int(track_id), **finished[track_id], worker=self.worker_id)
+			best = next(view for view in row["views"] if view["frame_id"] == row["description_frame_id"])
+			best_views[track_id] = best["frame_id"]
+			corrections.append(ObjectAnnotation(
+				semantic_id=item["semantic_id"], semantic_label=row["final_caption"], confidence=0.0,
+				description_frame_id=best["frame_id"], description_timestamp=best["timestamp"]))
+			self._save_description_mask(corrections[-1], np.asarray(sources[track_id, best["frame_id"]][1].segmentation) > 0)
+			rows.append(row)
+
+		if self.config.get("enable_selectframe_clip_features", False) and self.clip_handler is not None:
+			for correction, track_id in zip(corrections, objects):
+				record, track = sources[track_id, best_views[track_id]]
+				feature = self._extract_clip_features_for_tracks(record.frame, [track], [correction.semantic_id])
+				if correction.semantic_id in feature:
+					correction.selectframe_clip_feature = feature[correction.semantic_id]
+		self._attach_text_features(corrections)
+		self.worker_logger.info(
+			f"[Worker {self.worker_id}] UQ batch: {len(objects)} objects, tau={tau}, "
+			f"refined={sum(any(v['stage'] == 'refine' for v in row['views']) for row in rows)}")
+		output = []
+		for correction, row in zip(corrections, rows):
+			output += [correction, UQObjectRecord(row)]
+		return output
+
 	def run(self):
 		"""Override run to handle remaining records when stopping."""
 		if self.dam_agent is None:
@@ -596,6 +769,16 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			return
 		
 		super().run()
+
+		if self.config.get("uq", {}).get("enabled", False):
+			# describe bundles already delivered instead of dropping them at shutdown (upstream exits on stop_event)
+			while True:
+				try:
+					item = self.input_queue.get(timeout=1.0)
+				except queue.Empty:
+					break
+				for correction in self.process_item(item) or []:
+					self.output_queue.put(correction)
 		
 		# remaining records before shutting down
 		if self.aggregated_records and self.total_masks > 0:

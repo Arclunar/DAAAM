@@ -28,6 +28,8 @@ def arguments(argv=None):
     p.add_argument('--target-fps', type=float, default=3.)
     p.add_argument('--depth-lb', type=float, default=.3)
     p.add_argument('--depth-ub', type=float, default=8.)
+    p.add_argument('--uq', action='store_true', help='UQ-DAAAM: multi-view captions, uncertainty, active refinement and fusion (uq.enabled=true)')
+    p.add_argument('--intermediates', action='store_true', help='also write per-frame tracks, label images and query/description events to out_*/intermediates/ (save_intermediates=true)')
     profiling = p.add_mutually_exclusive_group()
     profiling.add_argument('--pyinstrument', action='store_true', help='sample main-thread calls and save an interactive HTML report')
     profiling.add_argument('--viztracer', action='store_true', help='record Python calls in the run directory (requires profile-install)')
@@ -117,13 +119,17 @@ def command(a):
         raise SystemExit('requested frame count exceeds available frames: '+str(count))
     label = re.sub(r'[^A-Za-z0-9_-]+', '_', dataset.name).strip('_')[:60] or 'dataset'
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')
-    name = 'rgbd_'+label+'_'+stamp+'_'+uuid.uuid4().hex[:8]
+    name = ('uq-daaam' if getattr(a, 'uq', False) else 'rgbd')+'_'+label+'_'+stamp+'_'+uuid.uuid4().hex[:8]
     cmd = ['docker', 'compose', 'run', '--rm', '-T', '--name', name,
         '-v', str(dataset)+':/rgbd_input:ro', '-e', 'DATASET=/rgbd_input',
         '-e', 'NAME='+name, '-e', 'SEQ='+label, '-e', 'FPS='+str(float(info['fps'])),
         '-e', 'DEPTH_SCALE='+str(float(info['depth_scale'])), '-e', 'REFERENCE_MESH=off',
         '-e', 'DEPTH_LB='+str(a.depth_lb), '-e', 'DEPTH_UB='+str(a.depth_ub),
         'daaam-ws', 'bash', 'scripts/run_replay.sh', a.frames, str(a.target_fps)]
+    flags = ['uq.enabled=true' if getattr(a, 'uq', False) else '', 'save_intermediates=true' if getattr(a, 'intermediates', False) else '']
+    if any(flags):
+        overrides = ' '.join(filter(None, [os.environ.get('EXTRA_OVERRIDES', ''), *flags]))
+        cmd[cmd.index('daaam-ws'):cmd.index('daaam-ws')] = ['-e', 'EXTRA_OVERRIDES='+overrides]
     if a.viztracer:
         cmd[cmd.index('daaam-ws'):cmd.index('daaam-ws')] = ['-e', 'VIZTRACER=1']
     if a.pyinstrument:

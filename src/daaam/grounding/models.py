@@ -26,6 +26,9 @@ class ObjectAnnotation(Annotation):
 	description_timestamp: Optional[float] = Field(
 		default=None, description="Timestamp of the exact image sent to DAM for this description."
 	)
+	description_mask: Optional[str] = Field(
+		default=None, description="Run-relative PNG of the exact mask sent to DAM for this description."
+	)
 	# Temporal observation history fields
 	frame_ids: Optional[List[int]] = Field(
 		default=None, description="List of frame IDs where this object was observed."

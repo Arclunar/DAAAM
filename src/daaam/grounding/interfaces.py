@@ -16,7 +16,7 @@ import traceback
 
 from daaam.utils.logging import setup_worker_logging, get_default_logger
 from daaam.interfaces import QueueWorkerProcessInterface
-from daaam.pipeline.models import PromptRecord
+from daaam.pipeline.models import PromptRecord, UQPromptBundle
 
 
 class GroundingWorkerInterface(QueueWorkerProcessInterface):
@@ -121,7 +121,7 @@ class GroundingWorkerInterface(QueueWorkerProcessInterface):
 		try:
 			
 			# validate record type
-			if not isinstance(item, PromptRecord):
+			if not isinstance(item, (PromptRecord, UQPromptBundle)):
 				self.worker_logger.error(f"Invalid prompt record type: {type(item)}")
 				return None
 				

@@ -14,6 +14,82 @@
 
 这是现有离线Hydra后端的原生算法适配，尚不等同于完整ROS/RPGO后端。变化检测随地图增长可能阻塞数十秒，不保证逐帧实时；不会常驻保存完整4D历史图。归并Object的问答和RRD绘制尚未接入。开关、输出及限制详见根目录 `sm-lab/systems/daaam/README.md`。
 
+## UQ-DAAAM（可选，默认关闭）
+
+UQ-DAAAM（arXiv:2606.08277）是对描述环节的改动。原版每个物体只用一帧描述一次；开启后改为：
+
+1. 每个物体先选 r=3 个视角，各描述一次；
+2. 用描述嵌入张成的体积 u = log det(ZᵀZ + λI) 衡量这几条描述之间的分歧（Z 的每列是按 token 概率加权的单位嵌入）；
+3. u > τ 时，按选帧打分 q 依次补视角，最多 B=2 个，直到 u ≤ τ；
+4. 最后由 LLM 把所有描述融合成一条，融合时只能用已有描述里的事实。
+
+`uq.enabled=false` 时走原版路径，保存的配置与上游逐字一致。全部实现都在本仓库，不依赖 JellyMap 代码。
+
+```bash
+just daaam run <转换目录> all --uq                                # 结果目录 uq-daaam_<数据>_<时间>_<ID>
+EXTRA_OVERRIDES="uq.refine_budget=3 uq.tau=-0.3" just daaam run <转换目录> all --uq   # 其余 uq.* 用覆盖项
+```
+
+- **代码**：`src/daaam/uq/`。
+  - `uncertainty`：u，以及增量更新（Schur 补）；
+  - `refinement`：初始视角、补视角与停止规则、统计；
+  - `scoring`：DAM token 平均概率。通过 logits processor 读取，不修改 `dam` 包；
+  - `fusion`：融合提示、严格 JSON 校验、确定性回退。
+- **接入点**：
+  - assignment 的 `select_prompt_images_uq`：r-assignment 整数规划，同时为每个物体选出补视角候选；
+  - orchestrator 的 `_process_uq_groups`：把一次 assignment 的全部视角打成一个包，送往同一个 grounding worker；
+  - grounding 的 `_process_uq_batch`：批量打分描述、计算 u、补视角、融合。
+- **配置**（`uq.*`，默认值）：
+
+  | 键 | 默认值 | 说明 |
+  | --- | --- | --- |
+  | `views_per_object` | 3 | r |
+  | `min_views` | 2 | 可见帧少于它时只描述 1 次 |
+  | `refine_budget` | 2 | B |
+  | `tau_mode` / `tau` / `tau_quantile` | `fixed` / −0.25 / 0.8 | `quantile` 模式只统计已见物体的初始 u |
+  | `alpha` / `lam` | 1.0 / 1e-8 | |
+  | `text_encoder` | `clip` | 复用已加载的 CLIP |
+  | `caption_temperature` | 1.0 | |
+  | `solver_time_limit_s` | 15 | |
+  | `save_views` | true | |
+  | `shutdown_timeout_s` | 3600 | |
+  | `fusion_enabled` / `fusion_model` | true / `gpt-5-mini` | 密钥取 `.env` 的 `OPENAI_API_KEY`；没有密钥时使用回退描述 |
+
+- **输出**（结果 `out_*` 目录内，回看工具只需读文件）：
+  - `uq_objects.jsonl`：每个物体一行，包括：
+    - 身份：`semantic_id`、`track_id`；
+    - u 与停止：`u_initial`、`u_final`、`tau`、`stop_reason`；
+    - 融合：`final_caption`、`fusion_status`、`facts_used`、`facts_omitted`；
+    - `views[]`：每个视角的阶段、帧号、时间、q、p、γ、u、是否使 u 下降、描述，`image_path`（`uq_views/frames/<帧>.jpg`）、`mask_path`（`uq_views/masks/<标签>_<帧>.png`）及其哈希。
+  - `uq_summary.json`：物体数、初始超阈值数、URR、DAM 调用次数（初始/补视角）、融合状态、u 分布、配置，以及收尾时是否有 grounding 被中断（`grounding_interrupted`）。
+  - 写回的描述：每个物体一条融合描述，写入场景图和 `corrections.yaml`，描述源帧是 q 最高的视角。离线入口默认开启 `save_description_masks`，该 Mask 存为 `description_masks/<标签>_<帧>.png`，并记在 `description_source.mask`。
+- **与论文的差异**：
+  - τ 默认用附录的固定值 −0.25；论文正文用校准集上的分位数，并对 u 做了归一化，所以 u 的数值不能直接和论文比较。
+  - CLIP 文本编码在 77 token 处截断。
+  - 增量更新用 Schur 补，没有用 Sherman–Morrison。
+  - 补视角候选在选帧时一并选出：窗口帧在 assignment 后会被释放，预算 B 内这与论文逐次查询等价。
+- **限制**：
+  - 只接了离线 RGB-D 入口，ROS2 入口不支持。
+  - 融合会把描述文本发到 OpenAI。
+  - 开启后总耗时约为原版的 2.4 倍（jellyhold 703 帧实测）。
+  - 不保存 grounding 调试图。
+  - 没有在 OC-NaVQA 上评测。
+
+## 前端中间结果导出（可选，默认关闭）
+
+`save_intermediates=true`（`scripts/run_rgbd.py --intermediates`，或写进 `EXTRA_OVERRIDES`）时，在 `out_*/intermediates/` 记录 Hydra 场景图之前每一步的产物，供 Replay 的“逐帧过程”页查看：
+
+- `frames.jsonl`：每帧一行，包括检测数、每个 track 的 Track ID → 语义 ID、分数、框、面积、深度校验结果和中位深度。
+- `labels/<帧>.png`：送进 Hydra 的 uint16 标签图（像素值 = 语义 ID），每帧一张。重叠的掩码只保留后写的那个，与送入 Hydra 的一致。
+- `events.jsonl`：
+  - 每次查询（窗口内每个 track 的状态：有资格、已提示、深度无效、观测不足、已有描述，判断顺序与选帧循环一致）；
+  - 选帧结果、送入 DAM、描述写回；
+  - 自动 unknown、清除 unknown、重新提示，以及因队列满被丢弃的查询。
+
+  事件记的帧号是它发生时主循环正在处理的帧，后台进程返回的结果会晚于触发它的查询。
+
+写盘在后台线程完成，主循环只把引用放进队列，耗时记在 `performance_statistics.csv` 的 `record_intermediates`。默认关闭时不创建目录，保存的配置与上游一致。实现在 `src/daaam/pipeline/intermediates.py`，单测 `tests/test_intermediates.py`。
+
 ## 职责与目录
 
 | 位置 | 内容 |
