@@ -53,6 +53,29 @@ class UQObjectRecord:
 	data: Dict[str, Any]
 
 
+@dataclass
+class MVRefineJob:
+	"""Multi-view refinement: the chosen views of one object (whole frames, referenced, and object-window masks), its first
+	description and the observation conditions; kind "fallback" describes the least blurred view of an object that never got
+	an admissible frame."""
+	semantic_id: int
+	track_id: int
+	views: List[Dict[str, Any]]  # image (whole frame), mask (window), offset, shape, frame_id, timestamp, q_prime, condition_text
+	initial: Optional[Dict[str, Any]]  # frame_id, text, p, gamma, q_prime, condition_text (None for kind "fallback")
+	kind: str = "refine"
+
+
+@dataclass
+class MVFlush:
+	"""Multi-view end of sequence: describe the aggregated first-description batch now instead of at worker shutdown."""
+
+
+@dataclass
+class MVRecord:
+	"""Multi-view result on the correction queue: kind "initial" (p of a first description) or "final" (a refinement)."""
+	data: Dict[str, Any]
+
+
 class MinimalCorrection(BaseModel):
 	"""Minimal correction data for assignment workers (without embeddings)."""
 	semantic_id: int

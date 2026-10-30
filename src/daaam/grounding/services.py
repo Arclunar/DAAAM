@@ -50,6 +50,7 @@ class GroundingService:
 		# Add output_dir to worker config if provided
 		if output_dir:
 			worker_config['output_dir'] = output_dir
+			worker_config['save_intermediates'] = bool(getattr(pipeline_config, 'save_intermediates', False))   # intermediates/grounding.jsonl
 		
 		# Add log_dir to worker config if provided
 		if log_dir:

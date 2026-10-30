@@ -41,3 +41,5 @@ class AssignmentResult:
 	groups: List[SelectedGroup]
 	status: str = "completed"
 	error: Optional[str] = None
+	solve_start: Optional[float] = None  # wall time the worker started / finished this task (Replay timeline)
+	solve_end: Optional[float] = None

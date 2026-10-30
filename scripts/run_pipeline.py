@@ -357,6 +357,8 @@ def apply_config_overrides(config: PipelineConfig, overrides: list[str]):
 
 				setattr(obj, final_key, value)
 				print(f"Applied override: {key} = {value}")
+			elif keys[0] == 'multiview':  # a mistyped switch would silently run another experiment
+				raise SystemExit(f"Unknown multiview key: {key}")
 			else:
 				print(f"Warning: Unknown config key: {key}")
 

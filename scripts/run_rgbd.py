@@ -29,6 +29,9 @@ def arguments(argv=None):
     p.add_argument('--depth-lb', type=float, default=.3)
     p.add_argument('--depth-ub', type=float, default=8.)
     p.add_argument('--uq', action='store_true', help='UQ-DAAAM: multi-view captions, uncertainty, active refinement and fusion (uq.enabled=true)')
+    p.add_argument('--mv-preset', default='', help='multi-view delayed refinement preset (multiview.preset): baseline_daaam, qr, '
+        'immediate_gamma, ours_full or ours_full.<ablation>; see src/daaam/multiview/config.py')
+    p.add_argument('--mv', action='append', default=[], metavar='KEY=VALUE', help='multiview setting after the preset, e.g. --mv kappa=1 (repeatable)')
     p.add_argument('--intermediates', action='store_true', help='also write per-frame tracks, label images and query/description events to out_*/intermediates/ (save_intermediates=true)')
     profiling = p.add_mutually_exclusive_group()
     profiling.add_argument('--pyinstrument', action='store_true', help='sample main-thread calls and save an interactive HTML report')
@@ -37,6 +40,10 @@ def arguments(argv=None):
     a = p.parse_args(argv)
     path = a.dataset.expanduser()
     a.dataset = (path if path.is_absolute() else a.caller_dir/path).resolve()
+    if a.uq and (a.mv_preset or a.mv):
+        p.error('--uq and multiview (--mv-preset/--mv) are alternative description modules')
+    if any('=' not in item or ' ' in item for item in a.mv):
+        p.error('--mv takes KEY=VALUE without spaces')
     if a.frames != 'all' and (not a.frames.isdigit() or int(a.frames) <= 0):
         p.error('frames must be positive or all')
     if not all(math.isfinite(v) for v in (a.target_fps, a.depth_lb, a.depth_ub)) or \
@@ -119,7 +126,9 @@ def command(a):
         raise SystemExit('requested frame count exceeds available frames: '+str(count))
     label = re.sub(r'[^A-Za-z0-9_-]+', '_', dataset.name).strip('_')[:60] or 'dataset'
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')
-    name = ('uq-daaam' if getattr(a, 'uq', False) else 'rgbd')+'_'+label+'_'+stamp+'_'+uuid.uuid4().hex[:8]
+    multiview = bool(getattr(a, 'mv_preset', '') or getattr(a, 'mv', []))
+    kind = 'uq-daaam' if getattr(a, 'uq', False) else ('mv-'+re.sub(r'[^A-Za-z0-9_.-]+', '_', a.mv_preset or 'custom')) if multiview else 'rgbd'
+    name = (getattr(a, 'run_prefix', None) or kind)+'_'+label+'_'+stamp+'_'+uuid.uuid4().hex[:8]  # the workspace launcher names algorithm and reconciliation
     cmd = ['docker', 'compose', 'run', '--rm', '-T', '--name', name,
         '-v', str(dataset)+':/rgbd_input:ro', '-e', 'DATASET=/rgbd_input',
         '-e', 'NAME='+name, '-e', 'SEQ='+label, '-e', 'FPS='+str(float(info['fps'])),
@@ -127,7 +136,12 @@ def command(a):
         '-e', 'DEPTH_LB='+str(a.depth_lb), '-e', 'DEPTH_UB='+str(a.depth_ub),
         'daaam-ws', 'bash', 'scripts/run_replay.sh', a.frames, str(a.target_fps)]
     flags = ['uq.enabled=true' if getattr(a, 'uq', False) else '', 'save_intermediates=true' if getattr(a, 'intermediates', False) else '']
-    if any(flags):
+    if multiview:  # the preset first so explicit --mv values win; frames are stamped index/fps, which maps them to motion.json rows
+        motion = dataset/'.daaam/motion/motion.json'
+        flags += ['multiview.enabled=true', 'multiview.dataset_fps='+str(float(info['fps']))] + \
+            (['multiview.motion_path=/rgbd_input/.daaam/motion/motion.json'] if motion.is_file() else []) + \
+            (['multiview.preset='+a.mv_preset] if a.mv_preset else []) + ['multiview.'+item for item in a.mv]
+    if any(flags) or os.environ.get('EXTRA_OVERRIDES'):
         overrides = ' '.join(filter(None, [os.environ.get('EXTRA_OVERRIDES', ''), *flags]))
         cmd[cmd.index('daaam-ws'):cmd.index('daaam-ws')] = ['-e', 'EXTRA_OVERRIDES='+overrides]
     if a.viztracer:

@@ -17,6 +17,7 @@ class SimplifiedTrack:
 	median_depth: float = 0.0
 	lin_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
 	ang_vel: np.ndarray = field(default_factory=lambda: np.zeros(3))
+	quality_weight: float = 1.0  # multiview motion-blur weight w: the BLP maximizes q' = q * w (1.0 = upstream q)
 
 
 @dataclass

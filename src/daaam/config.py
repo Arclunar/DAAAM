@@ -152,6 +152,9 @@ class UQConfig:
 	fusion_model: str = "gpt-5-mini"
 
 
+from daaam.multiview.config import MultiViewConfig  # noqa: E402  (plain dataclass, no pipeline imports)
+
+
 @dataclass
 class PipelineConfig:
 	segmentation: SegmentationConfig = field(default_factory=SegmentationConfig)
@@ -163,6 +166,7 @@ class PipelineConfig:
 	scene_graph: SceneGraphConfig = field(default_factory=SceneGraphConfig)
 	hydra: HydraConfig = field(default_factory=HydraConfig)
 	uq: UQConfig = field(default_factory=UQConfig)
+	multiview: MultiViewConfig = field(default_factory=MultiViewConfig)
 	semantic_config_path: str = "config/labels_pseudo.yaml"
 	labelspace_colors_path: str = "config/labels_pseudo.csv"
 	hierarchical_optimization: bool = True
@@ -189,6 +193,7 @@ class PipelineConfig:
 		scene_graph_config = SceneGraphConfig(**data.get('scene_graph', {}))
 		hydra_config = HydraConfig(**data.get('hydra', {}))
 		uq_config = UQConfig(**data.get('uq', {}))
+		multiview_config = MultiViewConfig.from_dict(data.get('multiview', {}))
 
 		# Handle workers config with nested worker-specific configs
 		workers_data = data.get('workers', {})
@@ -206,7 +211,7 @@ class PipelineConfig:
 
 		# Extract top-level config
 		top_level = {k: v for k, v in data.items()
-					if k not in ['segmentation', 'tracking', 'grounding', 'workers', 'depth', 'dataset', 'scene_graph', 'hydra', 'uq']}
+					if k not in ['segmentation', 'tracking', 'grounding', 'workers', 'depth', 'dataset', 'scene_graph', 'hydra', 'uq', 'multiview']}
 
 		config = cls(
 			segmentation=segmentation_config,
@@ -218,6 +223,7 @@ class PipelineConfig:
 			scene_graph=scene_graph_config,
 			hydra=hydra_config,
 			uq=uq_config,
+			multiview=multiview_config,
 			**top_level
 		)
 
@@ -245,6 +251,7 @@ class PipelineConfig:
 			'output_dir': self.output_dir,
 			# omitted while disabled so saved configs (and their hashes) stay identical to upstream
 			**({'uq': self.uq.__dict__} if self.uq.enabled else {}),
+			**({'multiview': self.multiview.as_dict()} if self.multiview.enabled else {}),
 			**({'save_intermediates': True} if self.save_intermediates else {}),
 		}
 

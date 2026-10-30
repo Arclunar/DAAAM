@@ -93,7 +93,7 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 		Returns:
 			A terminal envelope for identified tasks; legacy groups or None otherwise.
 		"""
-		assignment_task = None
+		assignment_task, start = None, time.time()
 		try:
 			# deserialize assignment task
 			assignment_task = json_to_assignment_task(item)
@@ -102,7 +102,7 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 			# call implementation-specific processing method
 			groups = self.process_assignment_task(assignment_task)
 			if assignment_task.assignment_id is not None:
-				return AssignmentResult(assignment_task.assignment_id, groups or [])
+				return AssignmentResult(assignment_task.assignment_id, groups or [], solve_start=start, solve_end=time.time())
 			return groups
 			
 		except json.JSONDecodeError as e:
@@ -112,5 +112,5 @@ class AssignmentWorkerInterface(QueueWorkerProcessInterface):
 			self.worker_logger.error(f"ERROR processing assignment task: {e}")
 			self.worker_logger.error(traceback.format_exc())
 			if assignment_task is not None and assignment_task.assignment_id is not None:
-				return AssignmentResult(assignment_task.assignment_id, [], "failed", str(e))
+				return AssignmentResult(assignment_task.assignment_id, [], "failed", str(e), start, time.time())
 			return None

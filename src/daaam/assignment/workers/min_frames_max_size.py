@@ -93,7 +93,7 @@ class MinFramesMaxSizeAssignmentWorker(MinFramesAssignmentWorker):
 					if track.id in qualified_track_ids:
 						track_sizes[
 							track_id_to_idx[track.id], local_frame_idx
-						] = self.track_size_reward(track, frame_height, frame_width)
+						] = self.track_size_reward(track, frame_height, frame_width) * track.quality_weight
 
 			constraints = []
 			constraints.append(cp.sum(track_frame_vars, axis=1) == 1)

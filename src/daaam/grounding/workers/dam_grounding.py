@@ -1,14 +1,20 @@
 import numpy as np
 import os
+import json
+import time
 import queue
 from typing import Dict, List, Set, Any, Optional, Tuple
 from PIL import Image as PILImage
 import torch
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from sentence_transformers import SentenceTransformer
 from abc import ABC, abstractmethod
 import re
-from daaam.pipeline.models import PromptRecord, UQPromptBundle, UQObjectRecord
+from types import SimpleNamespace
+from daaam.pipeline.models import PromptRecord, UQPromptBundle, UQObjectRecord, MVRefineJob, MVFlush, MVRecord
 from daaam.tracking.models import Track
 from pathlib import Path
 import cv2
@@ -374,6 +380,9 @@ class DAMGroundingWorkerBase(GroundingWorkerInterface):
 
 class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 	"""DAM-specific grounding worker that aggregates multiple images/masks for batch processing."""
+	_model_lock = nullcontext()   # set per worker; fixtures built without __init__ need no lock
+	_mv_pool = None
+	_mv_jobs: List[MVRefineJob] = []
 	
 	def __init__(self, query_group_queue, correction_queue, stop_event, config, name=None):
 		super().__init__(query_group_queue, correction_queue, stop_event, config, name)
@@ -385,15 +394,35 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		
 		self.aggregated_records = []
 		self.total_masks = 0
-	
+		self._mv_jobs = []   # refinement jobs whose views wait for the next DAM batch
+		mv = config.get("multiview") or {}
+		if mv.get("refine"):
+			self._model_lock = threading.RLock()   # DAM, CLIP and encoders: the worker loop and the fusion threads take turns
+			self._mv_pool = ThreadPoolExecutor(mv["fusion_workers"], thread_name_prefix="mv-fusion")   # the fusion worker
+
 	def process_prompt_record(self, prompt_record: PromptRecord) -> Optional[List[ObjectAnnotation]]:
+		with self._model_lock:
+			return self._process_prompt_record(prompt_record)
+
+	def _process_prompt_record(self, prompt_record: PromptRecord) -> Optional[List[ObjectAnnotation]]:
 		"""Process prompt record - aggregate until we have enough masks."""
 		if self.dam_agent is None:
 			return None
 
+		if isinstance(prompt_record, MVFlush):
+			return self._process_aggregated_batch() if self.aggregated_records or self._mv_jobs else None
+		if isinstance(prompt_record, MVRefineJob):
+			self._mv_jobs.append(prompt_record)
+			if sum(len(job.views) for job in self._mv_jobs) < self.config["multiview"]["refine_batch_views"]:
+				return None
+			jobs, self._mv_jobs = self._mv_jobs, []
+			return self._mv_describe(jobs)
+
 		if isinstance(prompt_record, UQPromptBundle):
 			self.aggregated_records.append(prompt_record)
 			self.total_masks += sum(len(record.tracks) for record in prompt_record.views)
+			self._timeline("receive", frame_ids=[r.frame_id for r in prompt_record.views], masks=sum(len(r.tracks) for r in prompt_record.views),
+				queued_images=len(self.aggregated_records), queued_masks=self.total_masks)
 			if self.total_masks >= self.multi_image_min_n_masks:
 				return self._process_aggregated_batch()
 			return None
@@ -416,6 +445,8 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		# add to aggregation
 		self.aggregated_records.append(prompt_record)
 		self.total_masks += len(valid_tracks)
+		self._timeline("receive", frame_ids=[prompt_record.frame_id], masks=len(valid_tracks),
+			queued_images=len(self.aggregated_records), queued_masks=self.total_masks)
 		
 		self.worker_logger.debug(
 			f"Aggregated record with {len(valid_tracks)} masks. "
@@ -429,6 +460,16 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		# continue aggregating
 		return None
 	
+	def _timeline(self, kind: str, **data) -> None:
+		"""save_intermediates: one intermediates/grounding.jsonl row (what this worker received, when each DAM batch or
+		multiview refinement ran) for the Replay timeline; appended per line, so several workers can share the file."""
+		if not self.config.get("save_intermediates") or not self.config.get("output_dir"):
+			return
+		path = Path(self.config["output_dir"]) / "intermediates" / "grounding.jsonl"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		with path.open("a", encoding="utf-8") as stream:
+			stream.write(json.dumps(dict(kind=kind, worker=self.worker_id, wall_time=time.time(), **data)) + "\n")
+
 	def _write_mask(self, relative: str, mask: np.ndarray, enabled: Optional[bool] = None) -> Optional[str]:
 		"""Run-relative PNG of an exact mask DAM described (replay overlays it), or None unless enabled (default: save_description_masks)."""
 		if enabled is None:
@@ -480,7 +521,27 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				correction.embedding = embedding.tolist()
 
 	def _process_aggregated_batch(self) -> Optional[List[ObjectAnnotation]]:
-		"""Process the aggregated batch of records."""
+		"""Describe the aggregated records as one DAM batch, with the waiting refinement views in the same scored query; the
+		timeline gets its start, end and size."""
+		records, masks, start = list(self.aggregated_records), self.total_masks, time.time()
+		jobs, self._mv_jobs, self._mv_batch = self._mv_jobs, [], None
+		result = None
+		try:
+			result = self._describe_aggregated_batch(self._mv_pairs(jobs)) if records else None
+			if jobs:   # described in the batch, or alone when the batch had no scored query or failed before it
+				extra = self._mv_describe(jobs, self._mv_batch)
+				result = (result or []) + extra if extra else result
+			return result
+		finally:
+			if records:
+				views = [v for r in records for v in (r.views if isinstance(r, UQPromptBundle) else [r])]
+				self._timeline("dam_batch", start=start, end=time.time(), images=len(views), masks=masks,
+					frame_ids=[v.frame_id for v in views], semantic_ids=sorted({v.object_labels.get(t.id) for v in views for t in v.tracks} - {None}),
+					uq=isinstance(records[0], UQPromptBundle), described=sum(isinstance(c, ObjectAnnotation) for c in result or []))
+
+	def _describe_aggregated_batch(self, extra_pairs=()) -> Optional[List[ObjectAnnotation]]:
+		"""Process the aggregated batch of records; `extra_pairs` (refinement views) join a scored query, their results in
+		self._mv_batch."""
 		if not self.aggregated_records:
 			return None
 		if isinstance(self.aggregated_records[0], UQPromptBundle):
@@ -570,14 +631,26 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			# DAM Agent
 			# Use smaller max_new_tokens if full image description is included to prevent repetition
 			max_tokens = 196 if self.compute_full_image_description else 512
+			mv = self.config.get("multiview")
+			probabilities_by_image = None
 			with performance_measure(f"DAMGroundingWorker {self.worker_id}: dam_agent.query_multi_image_multi_mask", self.worker_logger.debug):
-				descriptions_by_image = self.dam_agent.query_multi_image_multi_mask(
-					image_mask_pairs=image_mask_pairs,
-					query="Describe what you see in this region.",
-					temperature=0.2, 
-					top_p=0.9,
-					max_new_tokens=max_tokens
-				)
+				if mv and mv["token_probabilities"]:
+					descriptions_by_image, probabilities_by_image = self.dam_agent.query_multi_image_multi_mask_scored(
+						image_mask_pairs + list(extra_pairs), query="Describe what you see in this region.", temperature=self._mv_temperature(),
+						top_p=0.9, max_new_tokens=max_tokens)
+					n = len(image_mask_pairs)
+					if extra_pairs:
+						self._mv_batch = [((texts[0] or "").strip(), probs[0]) for texts, probs in
+							zip(descriptions_by_image[n:], probabilities_by_image[n:])]
+					descriptions_by_image, probabilities_by_image = descriptions_by_image[:n], probabilities_by_image[:n]
+				else:
+					descriptions_by_image = self.dam_agent.query_multi_image_multi_mask(
+						image_mask_pairs=image_mask_pairs,
+						query="Describe what you see in this region.",
+						temperature=self._mv_temperature() if mv else 0.2,
+						top_p=0.9,
+						max_new_tokens=max_tokens
+					)
 			
 			self.worker_logger.info(
 				f"[Worker {self.worker_id}] DAM agent returned descriptions for {len(descriptions_by_image)} images"
@@ -624,6 +697,13 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			
 			if corrections:
 				self._attach_text_features(corrections)
+				if mv:  # first descriptions with their mean token probability, for the trust check
+					for img_idx, descriptions in enumerate(descriptions_by_image[:len(all_semantic_ids_by_record)]):
+						probabilities = probabilities_by_image[img_idx] if probabilities_by_image else [None] * len(descriptions)
+						for text, semantic_id, probability in zip(descriptions, all_semantic_ids_by_record[img_idx], probabilities):
+							if semantic_id != -1:
+								corrections.append(MVRecord(dict(kind="initial", semantic_id=int(semantic_id),
+									frame_id=all_frame_ids_by_record[img_idx], text=(text or "").strip() or "unknown", probability=probability)))
 				return corrections
 			else:
 				self.worker_logger.warning(f"[Worker {self.worker_id}] Received no valid corrections from DAM agent.")
@@ -644,9 +724,9 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 				torch.cuda.empty_cache()
 				self.worker_logger.debug(f"[Worker {self.worker_id}] Cleared GPU cache after multi-image batch processing")
 	
-	def _uq_encode(self, texts: List[str]) -> np.ndarray:
+	def _uq_encode(self, texts: List[str], name: Optional[str] = None) -> np.ndarray:
 		"""Caption embeddings phi(c): "clip" reuses the loaded CLIP text encoder, otherwise a locally cached sentence-transformers model."""
-		name = self.config["uq"]["text_encoder"]
+		name = name or self.config["uq"]["text_encoder"]
 		if name == "clip":
 			if self.clip_handler is None:
 				raise RuntimeError("uq.text_encoder=clip needs enable_selectframe_clip_features (the already loaded CLIP model)")
@@ -655,7 +735,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			self._uq_encoder = SentenceTransformer(name, device="cuda" if torch.cuda.is_available() else "cpu", local_files_only=True)
 		return np.asarray(self._uq_encoder.encode(texts, batch_size=8, show_progress_bar=False))
 
-	def _uq_describe(self, requests: List[Tuple[PromptRecord, Track]]) -> List[Tuple[str, Optional[float]]]:
+	def _uq_describe(self, requests: List[Tuple[PromptRecord, Track]], temperature: Optional[float] = None) -> List[Tuple[str, Optional[float]]]:
 		"""One scored DAM query for (record, track) requests, grouped per source frame; returns (text, mean token probability)."""
 		groups = {}
 		for index, (record, track) in enumerate(requests):
@@ -668,7 +748,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			descriptions, probabilities = self.dam_agent.query_multi_image_multi_mask_scored(
 				pairs,
 				query="Describe what you see in this region.",
-				temperature=self.config["uq"]["caption_temperature"],
+				temperature=self.config["uq"]["caption_temperature"] if temperature is None else temperature,
 				top_p=0.9,
 				max_new_tokens=196 if self.compute_full_image_description else 512,
 			)
@@ -762,6 +842,128 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			output += [correction, UQObjectRecord(row)]
 		return output
 
+	def _mv_temperature(self) -> float:
+		return 0.0 if self.config["multiview"]["decoding"] == "greedy" else 0.2
+
+	@staticmethod
+	def _mv_mask(view) -> np.ndarray:
+		"""A refinement view's mask in frame coordinates (it travels as the window around the object plus its offset)."""
+		full = np.zeros(view["shape"], dtype=bool)
+		(x0, y0), (h, w) = view["offset"], view["mask"].shape
+		full[y0:y0 + h, x0:x0 + w] = view["mask"]
+		return full
+
+	@classmethod
+	def _mv_pairs(cls, jobs: List[MVRefineJob]) -> list:
+		"""One DAM image (the whole frame) with its one mask per refinement view, in job order."""
+		return [(PILImage.fromarray(v["image"]), [PILImage.fromarray(cls._mv_mask(v).astype(np.uint8) * 255, mode="L")])
+			for job in jobs for v in job.views]
+
+	def _mv_describe(self, jobs: List[MVRefineJob], results=None) -> List[Any]:
+		"""Refinement jobs after their views were described (`results`, one per view in job order), or with one scored query of
+		their own; fusions go to the fusion worker, fallbacks are written back here."""
+		start = time.time()
+		if results is None:
+			requests = [(PromptRecord(frame=v["image"], tracks=[], object_labels={}, frame_id=v["frame_id"], timestamp=v["timestamp"]),
+				SimpleNamespace(segmentation=self._mv_mask(v).astype(np.uint8))) for job in jobs for v in job.views]
+			try:
+				results = self._uq_describe(requests, temperature=self._mv_temperature())
+			except Exception as e:
+				self.worker_logger.error(f"[Worker {self.worker_id}] multiview description failed: {e}")
+				self.worker_logger.error(traceback.format_exc())
+				return [self._mv_error(job, e) for job in jobs]
+		out, offset = [], 0
+		for job in jobs:
+			own, offset = results[offset:offset + len(job.views)], offset + len(job.views)
+			self._timeline("mv_refine", start=start, end=time.time(), semantic_id=job.semantic_id, refine_kind=job.kind,
+				frame_ids=[v["frame_id"] for v in job.views], ok=True)
+			try:
+				out.extend(self._mv_refine(job, own))
+			except Exception as e:
+				self.worker_logger.error(f"[Worker {self.worker_id}] multiview refinement of {job.semantic_id} failed: {e}")
+				self.worker_logger.error(traceback.format_exc())
+				out.append(self._mv_error(job, e))
+		return out
+
+	@staticmethod
+	def _mv_error(job: MVRefineJob, error: Exception) -> MVRecord:
+		return MVRecord(dict(kind="final", semantic_id=job.semantic_id, views=[], error=str(error)[:300],
+			fusion=dict(description=None, fusion_status="error")))
+
+	def _mv_refine(self, job: MVRefineJob, results) -> List[Any]:
+		"""Multi-view refinement (J, L) of described views: log consistency u, then fuse and write back, in the fusion worker
+		when the fusion calls the LLM."""
+		import math
+		from daaam.multiview.viewtext import confidence_tier
+		from daaam.uq.uncertainty import log_volume
+
+		mv = self.config["multiview"]
+		gamma = lambda p: math.exp(mv["alpha"] * (1 - p)) if p is not None and mv["token_probabilities"] else None
+		views = []
+		for view, (text, probability) in zip(job.views, results):
+			tier = confidence_tier(probability) if mv["token_probabilities"] else None
+			views.append(dict(stage="refine" if job.kind == "refine" else "fallback", frame_id=view["frame_id"], timestamp=view["timestamp"],
+				text=text or "unknown", p=probability if mv["token_probabilities"] else None, gamma=gamma(probability),
+				q_prime=view["q_prime"], condition_text=view["condition_text"] + ("; model confidence " + tier if tier else "")))
+		described = ([dict(job.initial, stage="initial")] if job.initial else []) + views
+		u_before = u_after = None
+		if mv["consistency"] and job.initial and all(v["p"] is not None for v in described):
+			embeddings = self._uq_encode([v["text"] for v in described], name=mv["text_encoder"])
+			probabilities = [v["p"] for v in described]
+			u_before = float(log_volume(embeddings[:1], probabilities[:1], mv["alpha"], mv["lam"]))
+			u_after = float(log_volume(embeddings, probabilities, mv["alpha"], mv["lam"]))
+		mode = mv["fusion"] if job.kind == "refine" else "none_best"
+		if mode == "none_best" or self._mv_pool is None:
+			return self._mv_write_back(job, views, described, mode, u_before, u_after)
+		self._mv_pool.submit(self._mv_fuse, job, views, described, mode, u_before, u_after)
+		return []
+
+	def _mv_fuse(self, job, views, described, mode, u_before, u_after) -> None:
+		"""Fusion worker thread: the LLM call runs unlocked, the write-back takes the model lock; results go straight out."""
+		start = time.time()
+		try:
+			records = self._mv_write_back(job, views, described, mode, u_before, u_after)
+		except Exception as e:
+			self.worker_logger.error(f"[Worker {self.worker_id}] multiview fusion of {job.semantic_id} failed: {e}")
+			self.worker_logger.error(traceback.format_exc())
+			records = [self._mv_error(job, e)]
+		self._timeline("mv_fusion", start=start, end=time.time(), semantic_id=job.semantic_id, ok=not isinstance(records[0], MVRecord))
+		for record in records:
+			self.output_queue.put(record)
+
+	def _mv_write_back(self, job, views, described, mode, u_before, u_after) -> List[Any]:
+		from daaam.multiview.fusion import fuse
+		from daaam.uq.fusion import openai_complete
+
+		if mode != "none_best" and not hasattr(self, "_mv_complete"):
+			self._mv_complete = openai_complete(self.config["multiview"]["fusion_model"])
+		fused = fuse(mode, described, getattr(self, "_mv_complete", None))
+		with self._model_lock:
+			return self._mv_records(job, views, described, fused, u_before, u_after)
+
+	def _mv_records(self, job, views, described, fused, u_before, u_after) -> List[Any]:
+		chosen = next(v for v in described if v["frame_id"] == fused["description_frame_id"])
+		correction = ObjectAnnotation(semantic_id=job.semantic_id, semantic_label=fused["description"], confidence=0.0,
+			description_frame_id=chosen["frame_id"], description_timestamp=chosen.get("timestamp"))
+		masks = {}
+		for v in job.views:   # each described view's mask in frame coordinates, named like a first description's
+			masks[v["frame_id"]] = self._write_mask(f"description_masks/{job.semantic_id}_{v['frame_id']}.png", self._mv_mask(v))
+		initial_mask = f"description_masks/{job.semantic_id}_{chosen['frame_id']}.png"   # written with the first description
+		correction.description_mask = masks.get(chosen["frame_id"]) or (
+			initial_mask if self.config.get("output_dir") and (Path(self.config["output_dir"]) / initial_mask).is_file() else None)
+		view = next((v for v in job.views if v["frame_id"] == chosen["frame_id"]), None)
+		if view is not None and self.config.get("enable_selectframe_clip_features", False) and self.clip_handler is not None:
+			(x0, y0), (h, w) = view["offset"], view["mask"].shape
+			feature = self._extract_clip_features_for_tracks(view["image"], [SimpleNamespace(bbox=np.array([x0, y0, x0 + w, y0 + h]))],
+				[job.semantic_id])
+			if job.semantic_id in feature:
+				correction.selectframe_clip_feature = feature[job.semantic_id]
+		self._attach_text_features([correction])
+		self.worker_logger.info(f"[Worker {self.worker_id}] multiview {job.kind} of semantic {job.semantic_id}: {len(views)} views, "
+			f"fusion {fused['fusion_status']}")
+		return [correction, MVRecord(dict(kind="final", semantic_id=job.semantic_id,
+			views=[dict(text=v["text"], p=v["p"], gamma=v["gamma"]) for v in views], fusion=fused, u_before=u_before, u_after=u_after))]
+
 	def run(self):
 		"""Override run to handle remaining records when stopping."""
 		if self.dam_agent is None:
@@ -770,7 +972,7 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 		
 		super().run()
 
-		if self.config.get("uq", {}).get("enabled", False):
+		if self.config.get("uq", {}).get("enabled", False) or self.config.get("multiview"):
 			# describe bundles already delivered instead of dropping them at shutdown (upstream exits on stop_event)
 			while True:
 				try:
@@ -781,12 +983,13 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 					self.output_queue.put(correction)
 		
 		# remaining records before shutting down
-		if self.aggregated_records and self.total_masks > 0:
+		if (self.aggregated_records and self.total_masks > 0) or self._mv_jobs:
 			self.worker_logger.info(
 				f"Processing final batch of {len(self.aggregated_records)} records "
 				f"with {self.total_masks} total masks"
 			)
-			corrections = self._process_aggregated_batch()
+			with self._model_lock:
+				corrections = self._process_aggregated_batch()
 			if corrections:
 				# to out queue
 				self.worker_logger.info(f"[Worker {self.worker_id}] Putting {len(corrections)} corrections on output queue")
@@ -794,3 +997,5 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 					self.output_queue.put(correction)
 			else:
 				self.worker_logger.warning(f"[Worker {self.worker_id}] No valid corrections to put on output queue.")
+		if self._mv_pool is not None:
+			self._mv_pool.shutdown(wait=True)   # fusions still in flight put their write-back on the output queue

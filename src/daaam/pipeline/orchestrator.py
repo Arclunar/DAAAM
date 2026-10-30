@@ -35,7 +35,7 @@ from daaam.utils.geometry import (
 					)
 from daaam.utils.embedding import CLIPHandler
 from daaam.grounding.models import ObjectAnnotation
-from daaam.pipeline.models import PromptRecord, Frame, MinimalCorrection, UQPromptBundle, UQObjectRecord
+from daaam.pipeline.models import PromptRecord, Frame, MinimalCorrection, UQPromptBundle, UQObjectRecord, MVRecord, MVFlush
 from daaam.scene_graph.models import SemanticUpdate, TemporalObservation, SemanticFeatures
 from daaam.tracking.models import Track, SimplifiedTrack
 from daaam.assignment.models import AssignmentTask, SelectedGroup, AssignmentResult
@@ -50,7 +50,8 @@ class PipelineOrchestrator:
 	This replaces the monolithic DAAAM class with a clean separation
 	of concerns using dedicated services for each major component.
 	"""
-	
+	_mv = None  # multiview adapter; class default so partially built instances keep the upstream paths
+
 	def __init__(
 		self,
 		config: PipelineConfig,
@@ -103,6 +104,14 @@ class PipelineOrchestrator:
 		)
 		self.output_dir.mkdir(parents=True, exist_ok=True)
 		self._intermediates = IntermediateRecorder(self.output_dir, self.logger) if config.save_intermediates else None
+		self._mv = None  # multiview delayed refinement; None keeps every upstream code path
+		if config.multiview.enabled:
+			config.multiview.validate()
+			if config.uq.enabled:
+				raise ValueError("multiview and uq are alternative description modules; enable only one")
+			from daaam.multiview.adapter import MultiViewAdapter
+			self._mv = MultiViewAdapter(config.multiview, config.workers.assignment_config.__dict__, self.output_dir, self.logger,
+				self._deliver_mv, self._buffer_frames)
 		self._corrections_save_interval = config.scene_graph.corrections_save_interval_seconds
 		if not math.isfinite(self._corrections_save_interval) or self._corrections_save_interval < 0:
 			raise ValueError("corrections save interval must be finite and nonnegative")
@@ -337,6 +346,8 @@ class PipelineOrchestrator:
 			if self._group_thread.is_alive():
 				self.logger.warning("[Shutdown] Group processor thread did not stop cleanly")
 		self.logger.info("[Shutdown Step 3] Processor threads stopped")
+		if self._mv is not None:
+			self._mv.close()
 		if self.release_assignment_frames:
 			with self._state_lock:
 				for assignment_id in list(self._frame_store.assignments):
@@ -427,6 +438,11 @@ class PipelineOrchestrator:
 					self._record_uq(correction.data)
 					count += 1
 					continue
+				if isinstance(correction, MVRecord):
+					if self._mv is not None:
+						self._mv.on_record(correction.data)
+					count += 1
+					continue
 				correction = self._enrich_correction_with_temporal_data(correction)
 				self.scene_graph_service.store_correction(correction)
 				self._record_description(correction)
@@ -508,6 +524,9 @@ class PipelineOrchestrator:
 		
 		# Update frame with processed tracks
 		frame.tracks = processed_tracks
+		if self._mv is not None:  # needs depth and the cached masks, both gone once the frame is buffered
+			with performance_measure("multiview_observe", self.logger.debug, self.performance_tracker):
+				self._mv.observe(frame, processed_tracks, track_masks, self.object_labels)
 
 		# 3.5 (optional) extract CLIP features for each track if enabled
 		if self.config.grounding.enable_perframe_clip_features and frame.frame_id % self.config.grounding.clip_feature_interval_frames == 0:
@@ -550,6 +569,9 @@ class PipelineOrchestrator:
 			if self.object_3d_positions:
 				with performance_measure("update_object_positions", self.logger.debug, self.performance_tracker):
 					self._send_incremental_position_updates()
+
+		if self._mv is not None:
+			self._mv.tick(self.object_labels)
 
 		return label_image, color_image
 	
@@ -736,6 +758,8 @@ class PipelineOrchestrator:
 		for track in frame.tracks:
 			if track.bbox is not None:
 				simplified_tracks_for_cache.append(track.get_simplified())
+		if self._mv is not None:  # blur filtering only changes what the BLP may select
+			simplified_tracks_for_cache = self._mv.weigh(frame.frame_id, simplified_tracks_for_cache)
 
 		with self._state_lock:
 			if self.release_assignment_frames:
@@ -935,6 +959,10 @@ class PipelineOrchestrator:
 				if isinstance(correction, UQObjectRecord):
 					self._record_uq(correction.data)
 					continue
+				if isinstance(correction, MVRecord):
+					if self._mv is not None:
+						self._mv.on_record(correction.data)
+					continue
 
 				# Enrich correction with temporal data
 				correction = self._enrich_correction_with_temporal_data(correction)
@@ -968,8 +996,16 @@ class PipelineOrchestrator:
 			bbox=None if t.bbox is None else [round(float(v), 1) for v in t.bbox], area=int(t.region_area),
 			depth_valid=bool(t.depth_valid), median_depth=None if t.median_depth is None else round(float(t.median_depth), 3))
 			for t in processed_tracks]
-		self._intermediates.frame(dict(frame_id=frame.frame_id, timestamp=frame.timestamp, detections=len(dets), tracks=rows),
-			label_image)
+		queues = {}
+		for name, q in (("assignment_queue", self.assignment_task_queue), ("grounding_queue", self.query_group_queue)):
+			try:
+				queues[name] = q.qsize()
+			except (NotImplementedError, AttributeError):   # macOS multiprocessing queues have no qsize
+				queues[name] = None
+		with self._state_lock:
+			pending, prompted = len(self.pending_track_ids), len(self.prompted_track_ids)
+		self._intermediates.frame(dict(frame_id=frame.frame_id, timestamp=frame.timestamp, wall_time=time.time(), detections=len(dets),
+			pending_tracks=pending, prompted_tracks=prompted, **queues, tracks=rows), label_image)
 
 	def _record_query(self, assignment_id, start_frame_id, history, prompted, labels, eligible) -> None:
 		"""Every track of the query window with the first rule of the eligibility loop that excluded it."""
@@ -1191,6 +1227,38 @@ class PipelineOrchestrator:
 					if not self._frame_store.assignments:
 						break
 				time.sleep(0.05)
+		if self._mv is not None:
+			self._finish_multiview()
+
+	def _finish_multiview(self) -> None:
+		"""Sequence end, before results are saved: describe the aggregated first-description batch now, wait for every first
+		description, end every PENDING object (sequence end = track end) and wait for the refinements."""
+		cfg = self.config.multiview
+		deadline = time.monotonic() + cfg.finish_timeout_s
+		# shortcut: one flush per worker on the shared queue, a worker may take two; exact with the default single grounding worker
+		for _ in range(self.config.workers.num_grounding_workers):
+			self.query_group_queue.put(MVFlush())
+		idle = lambda: time.monotonic() - self._mv.last_update > 300.0  # a lost batch must not hold the run for the full timeout
+		while self._mv.awaiting and time.monotonic() < deadline and not idle():
+			time.sleep(0.2)
+		self._mv.finish(self.object_labels)
+		for _ in range(self.config.workers.num_grounding_workers):
+			self.query_group_queue.put(MVFlush())   # refinements of objects pending at the end wait for a DAM batch
+		while self._mv.jobs > 0 and time.monotonic() < deadline and not idle():
+			time.sleep(0.2)
+		self.logger.info(f"[Multiview] sequence end: {self._mv.summary()}")
+
+	def _deliver_mv(self, job) -> bool:
+		try:
+			self.query_group_queue.put(job, timeout=self.config.grounding.assignment_timeout_seconds)
+			return True
+		except queue.Full:
+			self.logger.error(f"[Multiview] grounding queue full, refinement of semantic {job.semantic_id} dropped")
+			return False
+
+	def _buffer_frames(self) -> List[Frame]:
+		with self._state_lock:
+			return list(self.recent_frames_buffer)
 
 	def _send_incremental_position_updates(self) -> None:
 		"""Send only new position observations to scene graph service (incremental updates)."""
@@ -1255,7 +1323,8 @@ class PipelineOrchestrator:
 			if owner is None:
 				self.logger.debug(f"Ignoring duplicate or late assignment {result.assignment_id}")
 				return
-		self._event("selection", assignment_id=result.assignment_id, status=result.status, groups=[
+		self._event("selection", assignment_id=result.assignment_id, status=result.status,
+			solve_start=getattr(result, "solve_start", None), solve_end=getattr(result, "solve_end", None), groups=[
 			dict(frame_id=g.global_frame_id, track_ids=list(g.track_ids), role=getattr(g, "role", None)) for g in result.groups])
 		try:
 			if result.status != "completed":
@@ -1430,6 +1499,8 @@ class PipelineOrchestrator:
 				
 				if not self.release_assignment_frames:
 					self._processed_snapshot_ids.update(global_frame_ids)
+			if self._mv is not None:
+				self._mv.on_prompt(track_ids, object_labels, getattr(prompt_record, 'frame_id', None))
 			return True
 						
 		except queue.Full:

@@ -24,6 +24,8 @@ def assignment_task_to_json(task: AssignmentTask) -> str:
 					"median_depth": track.median_depth,
 					"lin_vel": track.lin_vel.tolist() if isinstance(track.lin_vel, np.ndarray) else track.lin_vel,
 					"ang_vel": track.ang_vel.tolist() if isinstance(track.ang_vel, np.ndarray) else track.ang_vel,
+					# only multiview sets a weight, so the upstream payload stays byte-identical
+					**({"quality_weight": track.quality_weight} if track.quality_weight != 1.0 else {}),
 				}
 				for track in frame_data
 			]
@@ -62,6 +64,7 @@ def json_to_assignment_task(json_str: str) -> AssignmentTask:
 				median_depth=track.get("median_depth", 0.0),
 				lin_vel=np.array(track.get("lin_vel", [0, 0, 0])),
 				ang_vel=np.array(track.get("ang_vel", [0, 0, 0])),
+				quality_weight=track.get("quality_weight", 1.0),
 			)
 			for track in frame_data
 		]
