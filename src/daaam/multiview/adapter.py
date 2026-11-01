@@ -131,11 +131,11 @@ class MultiViewAdapter:
 			return simplified
 		with self.lock:
 			kept, rows = [], [self.obs.get((frame_id, t.id)) for t in simplified]
-			frame_bad = self.cfg.blur_frame_filter and any(r is not None and r['b_rot'] is not None and r['b_rot'] > self.cfg.blur_max_px for r in rows)
+			frame_bad = self.cfg.blur_frame_filter and any(r is not None and r['b_rot'] is not None and r['b_rot'] > self.cfg.blur_limit(r) for r in rows)
 			if frame_bad:
 				self.event('blur_filtered', level='frame', frame_id=frame_id, b_rot=max(r['b_rot'] for r in rows if r and r['b_rot'] is not None))
 			for track, row in zip(simplified, rows):
-				object_bad = self.cfg.blur_object_filter and row is not None and row['b'] is not None and row['b'] > self.cfg.blur_max_px
+				object_bad = self.cfg.blur_object_filter and row is not None and row['b'] is not None and row['b'] > self.cfg.blur_limit(row)
 				if frame_bad or object_bad:
 					self.filtered[track.id] = self.filtered.get(track.id, 0) + 1
 					if object_bad and not frame_bad:
@@ -295,7 +295,7 @@ class MultiViewAdapter:
 			why.append('low_q_prime')
 		if row['area_ratio'] < self.cfg.area_min or row['edge_ratio'] > self.cfg.snap_truncation_max:
 			why.append('small_or_truncated')
-		if self.cfg.blur and row['b'] is not None and row['b'] > self.cfg.blur_max_px:
+		if self.cfg.blur and row['b'] is not None and row['b'] > self.cfg.blur_limit(row):
 			why.append('blurred')
 		direction = self._direction(row, state['track_id'])
 		initial = self._direction(state['initial'], state['track_id']) if state.get('initial') else None   # unknown until the track is selected
@@ -352,7 +352,7 @@ class MultiViewAdapter:
 		items = state['snapshots'] if self.cfg.candidate_source == 'snapshots' else self._buffer_candidates(state)
 		state['snapshots'] = []
 		if self.cfg.blur:
-			items = [s for s in items if s['view']['b'] is None or s['view']['b'] <= self.cfg.blur_max_px]
+			items = [s for s in items if s['view']['b'] is None or s['view']['b'] <= self.cfg.blur_limit(s['view'])]
 		initial = dict(state['initial'], direction=self._direction(state['initial'], state['track_id']))
 		for item in items:  # directions against the final centre estimate
 			item['view']['direction'] = self._direction(item['view'], state['track_id'])

@@ -21,6 +21,7 @@ class MultiViewConfig:
 	blur_fallback: bool = False  # F7: a track ending without an admissible frame is described from its least blurred one
 	blur_b0_px: float = 2.5
 	blur_max_px: float = 8.0
+	blur_max_px_no_imu: float = 16.0  # blur_max_px when the motion comes from pose differences: no IMU, the exposure is guessed
 	blur_joint_a: float = 0.6
 	blur_samples: int = 24
 	motion_path: str = ""  # <dataset>/.daaam/motion/motion.json (just datasets motion); empty: pose differences
@@ -95,6 +96,10 @@ class MultiViewConfig:
 	def as_dict(self):
 		return {f.name: getattr(self, f.name) for f in fields(self)}
 
+	def blur_limit(self, row):
+		"""The blur threshold for an observation row: blur_max_px_no_imu when its motion came from pose differences."""
+		return self.blur_max_px_no_imu if row.get('motion_source') == 'pose_difference' else self.blur_max_px
+
 	def validate(self):
 		if not self.enabled:
 			return
@@ -110,6 +115,8 @@ class MultiViewConfig:
 			raise ValueError('multiview.consistency needs multiview.token_probabilities=true (gamma weights)')
 		if min(self.refine_budget, self.snapshot_capacity, self.n_lost, self.fusion_workers, self.refine_batch_views) < 1:
 			raise ValueError('multiview.refine_budget, snapshot_capacity, n_lost, fusion_workers and refine_batch_views must be positive')
+		if min(self.blur_max_px, self.blur_max_px_no_imu) <= 0:
+			raise ValueError('multiview.blur_max_px and blur_max_px_no_imu must be positive')
 		if self.motion_path and self.dataset_fps <= 0:
 			raise ValueError('multiview.motion_path needs multiview.dataset_fps (frames are stamped index / fps)')
 

@@ -539,9 +539,9 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 					frame_ids=[v.frame_id for v in views], semantic_ids=sorted({v.object_labels.get(t.id) for v in views for t in v.tracks} - {None}),
 					uq=isinstance(records[0], UQPromptBundle), described=sum(isinstance(c, ObjectAnnotation) for c in result or []))
 
-	def _describe_aggregated_batch(self, extra_pairs=()) -> Optional[List[ObjectAnnotation]]:
+	def _describe_aggregated_batch(self, extra_pairs=(), retried=False) -> Optional[List[ObjectAnnotation]]:
 		"""Process the aggregated batch of records; `extra_pairs` (refinement views) join a scored query, their results in
-		self._mv_batch."""
+		self._mv_batch. A CUDA error is retried once with the same records before the batch is dropped."""
 		if not self.aggregated_records:
 			return None
 		if isinstance(self.aggregated_records[0], UQPromptBundle):
@@ -713,6 +713,11 @@ class DAMGroundingWorkerMultiImage(DAMGroundingWorkerBase):
 			self.worker_logger.error(f"[Worker {self.worker_id}] ERROR processing multi-image batch: {e}")
 
 			self.worker_logger.error(traceback.format_exc())
+			if "CUDA" in str(e) and not retried:   # transient driver errors ("device not ready" under WSL) lost whole batches
+				self.worker_logger.warning(f"[Worker {self.worker_id}] retrying the batch once after a CUDA error")
+				if torch.cuda.is_available():
+					torch.cuda.empty_cache()
+				return self._describe_aggregated_batch(extra_pairs, retried=True)   # runs before this finally clears the records
 			return None
 		finally:
 			# clear batch after processing

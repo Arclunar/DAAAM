@@ -1244,6 +1244,7 @@ class PipelineOrchestrator:
 		self._mv.finish(self.object_labels)
 		for _ in range(self.config.workers.num_grounding_workers):
 			self.query_group_queue.put(MVFlush())   # refinements of objects pending at the end wait for a DAM batch
+		self._mv.last_update = time.monotonic()   # the refinements just sent start their own idle clock
 		while self._mv.jobs > 0 and time.monotonic() < deadline and not idle():
 			time.sleep(0.2)
 		self.logger.info(f"[Multiview] sequence end: {self._mv.summary()}")

@@ -107,11 +107,11 @@ def sharpness_ratio(gray, mask, direction):
 	return float(along / across) if across > 1e-9 else None
 
 
-def blur_weight(b, rho, cfg):
-	"""w_blur from the configured source; 0 when the predicted blur exceeds blur_max_px."""
+def blur_weight(b, rho, cfg, limit=None):
+	"""w_blur from the configured source; 0 when the predicted blur exceeds limit (default blur_max_px)."""
 	w_odo = None if b is None else math.exp(-b * b / (2 * cfg.blur_b0_px ** 2))
 	w_img = None if rho is None else min(max(rho, 0.0), 1.0)
-	if b is not None and b > cfg.blur_max_px and cfg.blur_source != 'image':
+	if b is not None and b > (cfg.blur_max_px if limit is None else limit) and cfg.blur_source != 'image':
 		return 0.0
 	w_odo, w_img = 1.0 if w_odo is None else w_odo, 1.0 if w_img is None else w_img  # a missing source does not penalize
 	if cfg.blur_source == 'odometry':
@@ -181,7 +181,7 @@ def observe(frame, track, mask, q, motion, cfg, center_hint=None):
 			x, y, bw, bh = row['bbox']
 			gray = cv2.cvtColor(frame.rgb_image[y:y + bh, x:x + bw], cv2.COLOR_RGB2GRAY)
 			rho = sharpness_ratio(gray, mask[y:y + bh, x:x + bw], b_dir)
-	w_blur = blur_weight(b, rho, cfg) if cfg.blur else 1.0
+	w_blur = blur_weight(b, rho, cfg, cfg.blur_limit(row)) if cfg.blur else 1.0
 	row.update(b=b, b_direction=None if b_dir is None else [float(b_dir[0]), float(b_dir[1])], b_rot=b_rot, rho=rho,
 		w_blur=float(w_blur), q_prime=float(q * w_blur))
 	return row
